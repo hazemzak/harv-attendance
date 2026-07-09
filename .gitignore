@@ -1,0 +1,5 @@
+node_modules/
+.wrangler/
+scratch_*.log
+scratch_*.sql
+backup-test.sql

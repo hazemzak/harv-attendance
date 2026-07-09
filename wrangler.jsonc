@@ -1,0 +1,12 @@
+{
+  "name": "harv-attendance",
+  "main": "src/index.js",
+  "compatibility_date": "2026-07-01",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "harv-attendance",
+      "database_id": "5af5ec21-fc82-46cc-8b96-5591fb38b8f0"
+    }
+  ]
+}
