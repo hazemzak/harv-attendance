@@ -183,7 +183,8 @@ const KNOWN_SUBJECT_SLUGS = new Set([...SUBJECTS.map(s => s.v), ...SUBJECT_EN_CO
 // raw POST data, not just what the checkbox UI rendered, so a crafted request
 // could otherwise smuggle an arbitrary string into a column later rendered as HTML.
 function sanitizeSubjects(values) {
-  return values.map(v => v.toString().trim()).filter(v => KNOWN_SUBJECT_SLUGS.has(v)).join(",");
+  const known = values.map(v => v.toString().trim()).filter(v => KNOWN_SUBJECT_SLUGS.has(v));
+  return [...new Set(known)].join(",");
 }
 
 function escapeHtml(s) {
@@ -216,13 +217,16 @@ function subjectsCheckboxes(lang, checkedValues) {
   return main.join("") + cousins.join("");
 }
 
+// Escaped here, once, so every consumer (subjectsDisplay's admin/promotions/teacher-panel
+// call sites, plus subjectPills) is safe by construction instead of opt-in per renderer —
+// covers legacy DB rows too, since sanitizeSubjects() only guards writes going forward.
 function subjectNames(lang, csv) {
   if (!csv) return [];
   const map = new Map([
     ...SUBJECTS.map(s => [s.v, lang === "en" ? s.en : s.ar]),
     ...SUBJECT_EN_COUSINS.map(s => [s.v, s.en])
   ]);
-  return csv.split(",").map(v => map.get(v.trim()) || v.trim()).filter(Boolean);
+  return csv.split(",").map(v => map.get(v.trim()) || v.trim()).filter(Boolean).map(escapeHtml);
 }
 
 function subjectsDisplay(lang, csv) {
@@ -232,7 +236,7 @@ function subjectsDisplay(lang, csv) {
 function subjectPills(lang, csv) {
   const names = subjectNames(lang, csv);
   if (!names.length) return "";
-  return `<div class="sc-subjects">${names.map(n => `<span class="sc-subject-pill">${escapeHtml(n)}</span>`).join("")}</div>`;
+  return `<div class="sc-subjects">${names.map(n => `<span class="sc-subject-pill">${n}</span>`).join("")}</div>`;
 }
 
 function stageRadios(lang, selectedValue) {
