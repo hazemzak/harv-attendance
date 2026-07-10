@@ -18,6 +18,8 @@ jobs:
         id: review
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          track_progress: true
+          use_sticky_comment: true
           prompt: |
             Review this pull request diff for a Cloudflare Workers + D1 student attendance app
             handling real student/parent data. Ignore all style, formatting, naming, and typo
