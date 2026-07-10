@@ -8,7 +8,10 @@ CREATE TABLE students (
   email TEXT,
   photo BLOB,
   photo_type TEXT,
-  status TEXT NOT NULL DEFAULT 'approved'
+  status TEXT NOT NULL DEFAULT 'approved',
+  subjects TEXT,
+  payment_method TEXT,
+  parent_phone TEXT
 );
 
 CREATE TABLE attendance (
@@ -21,3 +24,23 @@ CREATE TABLE attendance (
 -- (double-scanning the same QR code).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_day
   ON attendance(student_id, date(scanned_at));
+
+CREATE TABLE teachers (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  subject_label TEXT,
+  phase TEXT,
+  mode TEXT,
+  schedule TEXT,
+  track TEXT
+);
+
+CREATE TABLE promotions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  subject TEXT,
+  teacher_name TEXT,
+  text TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
