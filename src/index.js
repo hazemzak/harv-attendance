@@ -177,6 +177,20 @@ const SUBJECT_EN_COUSINS = [
   { v: "accounting-en", en: "Accounting" }
 ];
 
+const KNOWN_SUBJECT_SLUGS = new Set([...SUBJECTS.map(s => s.v), ...SUBJECT_EN_COUSINS.map(s => s.v)]);
+
+// Whitelists against known subject slugs before storing — form.getAll() reflects
+// raw POST data, not just what the checkbox UI rendered, so a crafted request
+// could otherwise smuggle an arbitrary string into a column later rendered as HTML.
+function sanitizeSubjects(values) {
+  const known = values.map(v => v.toString().trim()).filter(v => KNOWN_SUBJECT_SLUGS.has(v));
+  return [...new Set(known)].join(",");
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
 const STAGES = [
   { v: "تالتة إعدادي", ar: "تالتة إعدادي", en: "3rd Prep" },
   { v: "أولى ثانوي", ar: "أولى ثانوي", en: "1st Secondary" },
@@ -203,13 +217,26 @@ function subjectsCheckboxes(lang, checkedValues) {
   return main.join("") + cousins.join("");
 }
 
-function subjectsDisplay(lang, csv) {
-  if (!csv) return "";
+// Escaped here, once, so every consumer (subjectsDisplay's admin/promotions/teacher-panel
+// call sites, plus subjectPills) is safe by construction instead of opt-in per renderer —
+// covers legacy DB rows too, since sanitizeSubjects() only guards writes going forward.
+function subjectNames(lang, csv) {
+  if (!csv) return [];
   const map = new Map([
     ...SUBJECTS.map(s => [s.v, lang === "en" ? s.en : s.ar]),
     ...SUBJECT_EN_COUSINS.map(s => [s.v, s.en])
   ]);
-  return csv.split(",").map(v => map.get(v.trim()) || v.trim()).filter(Boolean).join(" · ");
+  return csv.split(",").map(v => map.get(v.trim()) || v.trim()).filter(Boolean).map(escapeHtml);
+}
+
+function subjectsDisplay(lang, csv) {
+  return subjectNames(lang, csv).join(" · ");
+}
+
+function subjectPills(lang, csv) {
+  const names = subjectNames(lang, csv);
+  if (!names.length) return "";
+  return `<div class="sc-subjects">${names.map(n => `<span class="sc-subject-pill">${n}</span>`).join("")}</div>`;
 }
 
 function stageRadios(lang, selectedValue) {
@@ -489,7 +516,7 @@ export default {
       const stage = (form.get("stage") || "").toString().trim();
       const phone = (form.get("phone") || "").toString().trim();
       const email = (form.get("email") || "").toString().trim();
-      const subjects = form.getAll("subjects").map(v => v.toString().trim()).filter(Boolean).join(",");
+      const subjects = sanitizeSubjects(form.getAll("subjects"));
       const paymentMethod = (form.get("payment_method") || "").toString().trim();
       const parentPhone = (form.get("parent_phone") || "").toString().trim();
       if (!phone || !parentPhone || parentPhone === phone) {
@@ -694,7 +721,7 @@ export default {
       const school = (form.get("school") || "").toString().trim();
       const phone = (form.get("phone") || "").toString().trim();
       const email = (form.get("email") || "").toString().trim();
-      const subjects = form.getAll("subjects").map(v => v.toString().trim()).filter(Boolean).join(",");
+      const subjects = sanitizeSubjects(form.getAll("subjects"));
       const parentPhone = (form.get("parent_phone") || "").toString().trim();
       if (!phone || !parentPhone || parentPhone === phone) {
         return new Response(page(t.errTitle, `<p class="empty">${t.errParentPhone}</p>`, { nav: false, lang }), { status: 400, headers: { "content-type": "text/html;charset=utf-8" } });
@@ -755,7 +782,7 @@ export default {
 
     if (url.pathname === "/student" && request.method === "GET") {
       const id = url.searchParams.get("id");
-      const student = await env.DB.prepare("SELECT id, name, class, status FROM students WHERE id = ?").bind(id).first();
+      const student = await env.DB.prepare("SELECT id, name, class, subjects, status FROM students WHERE id = ?").bind(id).first();
       if (!student) {
         return new Response(page("لم يتم العثور على الطالب", `<p class="empty">البطاقة دي مش موجودة. اتأكد من الرابط أو ارجع لموظف الاستقبال.</p>`, { nav: false }), { status: 404, headers: { "content-type": "text/html;charset=utf-8" } });
       }
@@ -779,6 +806,8 @@ export default {
 .sc-body{padding:24px 22px 26px;text-align:center}
 .sc-name{font-size:30px;font-weight:700;line-height:1.2;color:var(--ink)}
 .sc-class{font-size:17px;color:#5A6784;margin-top:6px}
+.sc-subjects{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-top:12px}
+.sc-subject-pill{background:var(--line-soft);color:var(--ink);font-size:13px;font-weight:600;padding:5px 12px;border-radius:999px}
 .sc-status{display:inline-flex;align-items:center;gap:8px;margin-top:16px;padding:9px 16px;border-radius:999px;font-size:15px;font-weight:600}
 .sc-yes{background:var(--success-bg);color:var(--success)}
 .sc-no{background:var(--line-soft);color:#5A6784}
@@ -798,6 +827,7 @@ export default {
     <div class="sc-body">
       <div class="sc-name">${student.name}</div>
       ${student.class ? `<div class="sc-class">${student.class}</div>` : ""}
+      ${subjectPills("ar", student.subjects)}
       ${status}
       <div class="sc-qr">${qrSvg(scanUrl)}</div>
       <p class="sc-hint">اعرض الكود ده لموظف الاستقبال عند دخولك، وهيتسجّل حضورك على طول.</p>
