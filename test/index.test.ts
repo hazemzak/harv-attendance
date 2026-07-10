@@ -69,6 +69,19 @@ describe("/scan: attendance dedup (migration 0001_attendance_dedup.sql)", () => 
     const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE student_id = ?").bind(id).first();
     expect(count?.n).toBe(1);
   });
+
+  it("scanning on a new day after already attending yesterday records a second row", async () => {
+    const id = await insertStudent({ name: "Cross-Day Dedup Test", status: "approved" });
+    await env.DB.prepare(
+      "INSERT INTO attendance (student_id, scanned_at) VALUES (?, datetime('now', '-1 day'))"
+    ).bind(id).run();
+
+    const res = await SELF.fetch(`https://example.com/scan?student=${id}`);
+    expect(res.status).toBe(200);
+
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE student_id = ?").bind(id).first();
+    expect(count?.n).toBe(2);
+  });
 });
 
 describe("/scan: approval gating (payment-gate business logic)", () => {
