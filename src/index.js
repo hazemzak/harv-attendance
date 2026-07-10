@@ -177,6 +177,19 @@ const SUBJECT_EN_COUSINS = [
   { v: "accounting-en", en: "Accounting" }
 ];
 
+const KNOWN_SUBJECT_SLUGS = new Set([...SUBJECTS.map(s => s.v), ...SUBJECT_EN_COUSINS.map(s => s.v)]);
+
+// Whitelists against known subject slugs before storing — form.getAll() reflects
+// raw POST data, not just what the checkbox UI rendered, so a crafted request
+// could otherwise smuggle an arbitrary string into a column later rendered as HTML.
+function sanitizeSubjects(values) {
+  return values.map(v => v.toString().trim()).filter(v => KNOWN_SUBJECT_SLUGS.has(v)).join(",");
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
 const STAGES = [
   { v: "تالتة إعدادي", ar: "تالتة إعدادي", en: "3rd Prep" },
   { v: "أولى ثانوي", ar: "أولى ثانوي", en: "1st Secondary" },
@@ -219,7 +232,7 @@ function subjectsDisplay(lang, csv) {
 function subjectPills(lang, csv) {
   const names = subjectNames(lang, csv);
   if (!names.length) return "";
-  return `<div class="sc-subjects">${names.map(n => `<span class="sc-subject-pill">${n}</span>`).join("")}</div>`;
+  return `<div class="sc-subjects">${names.map(n => `<span class="sc-subject-pill">${escapeHtml(n)}</span>`).join("")}</div>`;
 }
 
 function stageRadios(lang, selectedValue) {
@@ -499,7 +512,7 @@ export default {
       const stage = (form.get("stage") || "").toString().trim();
       const phone = (form.get("phone") || "").toString().trim();
       const email = (form.get("email") || "").toString().trim();
-      const subjects = form.getAll("subjects").map(v => v.toString().trim()).filter(Boolean).join(",");
+      const subjects = sanitizeSubjects(form.getAll("subjects"));
       const paymentMethod = (form.get("payment_method") || "").toString().trim();
       const parentPhone = (form.get("parent_phone") || "").toString().trim();
       if (!phone || !parentPhone || parentPhone === phone) {
@@ -704,7 +717,7 @@ export default {
       const school = (form.get("school") || "").toString().trim();
       const phone = (form.get("phone") || "").toString().trim();
       const email = (form.get("email") || "").toString().trim();
-      const subjects = form.getAll("subjects").map(v => v.toString().trim()).filter(Boolean).join(",");
+      const subjects = sanitizeSubjects(form.getAll("subjects"));
       const parentPhone = (form.get("parent_phone") || "").toString().trim();
       if (!phone || !parentPhone || parentPhone === phone) {
         return new Response(page(t.errTitle, `<p class="empty">${t.errParentPhone}</p>`, { nav: false, lang }), { status: 400, headers: { "content-type": "text/html;charset=utf-8" } });
