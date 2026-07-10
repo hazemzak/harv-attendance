@@ -5,70 +5,37 @@ on:
     types: [opened, synchronize, reopened]
 
 jobs:
-  review:
+  claude-review:
     runs-on: ubuntu-latest
     permissions:
-      pull-requests: write
       contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
+
+      - uses: anthropics/claude-code-action@v1
+        id: review
         with:
-          fetch-depth: 0
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Review this pull request diff for a Cloudflare Workers + D1 student attendance app
+            handling real student/parent data. Ignore all style, formatting, naming, and typo
+            issues entirely -- that is a linter's job, not yours.
 
-      - name: Get PR diff
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh pr diff ${{ github.event.pull_request.number }} > pr.diff
+            Focus only on:
+            - Business logic correctness (does the code do what it's supposed to do)
+            - Security issues, especially SQL injection vectors and auth/access-control gaps
+            - Unhandled edge cases (nulls, empty input, race conditions)
+            - N+1 query patterns or other correctness-affecting performance issues
 
-      - name: Review with Claude
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+            For each issue found, cite the file and give a one-line fix suggestion. Post this as
+            a PR comment.
+          claude_args: |
+            --model claude-sonnet-5
+            --json-schema '{"type":"object","properties":{"has_critical_issues":{"type":"boolean","description":"true only for security bugs or business-logic bugs that would actually break the app in production, false for everything else including minor suggestions"}},"required":["has_critical_issues"]}'
+
+      - name: Block merge on critical issues
+        if: fromJSON(steps.review.outputs.structured_output).has_critical_issues == true
         run: |
-          DIFF=$(head -c 100000 pr.diff)
-          PROMPT=$(cat <<PROMPT_EOF
-          You are reviewing a pull request diff for a Cloudflare Workers + D1 student attendance app handling real student/parent data. Ignore all style, formatting, naming, and typo issues entirely -- that is a linter's job, not yours.
-
-          Focus only on:
-          - Business logic correctness (does the code do what it's supposed to do)
-          - Security issues, especially SQL injection vectors and auth/access-control gaps
-          - Unhandled edge cases (nulls, empty input, race conditions)
-          - N+1 query patterns or other correctness-affecting performance issues
-
-          For each issue found, cite the file and give a one-line fix suggestion. If there are no real issues, say so plainly.
-
-          End your response with exactly one line, verbatim:
-          MERGE_BLOCKING: true
-          or
-          MERGE_BLOCKING: false
-          Use true only for security bugs or business-logic bugs that would actually break the app in production. Use false for everything else, including minor suggestions.
-
-          Diff:
-          $DIFF
-          PROMPT_EOF
-          )
-
-          RESPONSE=$(jq -n --arg prompt "$PROMPT" '{
-            model: "claude-sonnet-5",
-            max_tokens: 2000,
-            messages: [{role: "user", content: $prompt}]
-          }' | curl -s https://api.anthropic.com/v1/messages \
-            -H "x-api-key: $ANTHROPIC_API_KEY" \
-            -H "anthropic-version: 2023-06-01" \
-            -H "content-type: application/json" \
-            -d @-)
-
-          echo "$RESPONSE" | jq -r '.content[0].text // ("Review call failed: " + (. | tostring))' > review.md
-          cat review.md
-
-      - name: Post review comment
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh pr comment ${{ github.event.pull_request.number }} --body-file review.md
-
-      - name: Gate merge on critical issues
-        run: |
-          if grep -q "MERGE_BLOCKING: true" review.md; then
-            echo "Critical issues found -- blocking merge."
-            exit 1
-          fi
-          echo "No blocking issues."
+          echo "Critical issues found -- blocking merge."
+          exit 1
