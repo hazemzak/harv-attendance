@@ -1,7 +1,14 @@
 CREATE TABLE students (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
-  class TEXT
+  class TEXT,
+  school TEXT,
+  stage TEXT,
+  phone TEXT,
+  email TEXT,
+  photo BLOB,
+  photo_type TEXT,
+  status TEXT NOT NULL DEFAULT 'approved'
 );
 
 CREATE TABLE attendance (
