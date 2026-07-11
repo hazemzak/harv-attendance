@@ -208,6 +208,75 @@ describe("student name: stored-XSS regression (found by claude-review on PR #5, 
     expect(html).not.toContain("<strong><script>alert(1)</script>");
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
   });
+
+  it("escapes a malicious name in the /admin pending-card list (found by claude-review, round 3)", async () => {
+    await insertStudent({
+      name: "<script>alert(1)</script>",
+      status: "pending",
+      school: "<img src=x onerror=alert(2)>",
+    });
+    const res = await SELF.fetch("https://example.com/admin");
+    const html = await res.text();
+    expect(html).not.toContain("<strong><script>alert(1)</script>");
+    expect(html).not.toContain("<img src=x onerror=alert(2)>");
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+  });
+
+  it("escapes a malicious name on the success/handoff page (found by claude-review, round 3)", async () => {
+    const id = await insertStudent({ name: "<script>alert(1)</script>", status: "approved" });
+    const res = await SELF.fetch(`https://example.com/admin/students/${id}/success`);
+    const html = await res.text();
+    expect(html).not.toContain("<strong><script>alert(1)</script>");
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+  });
+
+  it("escapes a malicious name on /scan's confirmation page (found by claude-review, round 3)", async () => {
+    const id = await insertStudent({ name: "<script>alert(1)</script>", status: "approved" });
+    const res = await SELF.fetch(`https://example.com/scan?student=${id}`);
+    const html = await res.text();
+    expect(html).not.toContain("<strong><script>alert(1)</script>");
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+  });
+
+  it("escapes a malicious name on the public /student card (found by claude-review, round 3)", async () => {
+    const id = await insertStudent({ name: "<script>alert(1)</script>", status: "approved" });
+    const res = await SELF.fetch(`https://example.com/student?id=${id}`);
+    const html = await res.text();
+    expect(html).not.toContain('sc-name">' + "<script>alert(1)</script>");
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+  });
+
+  it("escapes a malicious name on the printable /admin/print roster (found by claude-review, round 3)", async () => {
+    await insertStudent({ name: "<script>alert(1)</script>", status: "approved" });
+    const res = await SELF.fetch("https://example.com/admin/print");
+    const html = await res.text();
+    expect(html).not.toContain("<td><script>alert(1)</script>");
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+  });
+});
+
+describe("/admin/students/:id/process: booking-row array length mismatch (found by claude-review, round 3)", () => {
+  it("doesn't throw when b_teacher/b_schedule arrays are shorter than b_subject", async () => {
+    const id = await insertStudent({ name: "Mismatch Test", status: "pending" });
+    const form = new FormData();
+    form.set("name", "Mismatch Test");
+    form.set("phone", "01000000004");
+    form.set("parent_phone", "01111111115");
+    form.set("payment_method", "cash");
+    form.append("b_subject", "math");
+    form.append("b_subject", "physics");
+    form.append("b_teacher", "أ. أحمد");
+    // b_schedule and b_amount omitted entirely for the 2nd row on purpose
+    form.append("b_schedule", "السبت");
+
+    const res = await SELF.fetch(`https://example.com/admin/students/${id}/process`, { method: "POST", body: form });
+    expect(res.status).toBe(200);
+
+    const { results } = await env.DB.prepare("SELECT * FROM bookings WHERE student_id = ? ORDER BY id").bind(id).all();
+    expect(results.length).toBe(2);
+    expect(results[1].teacher_name).toBe("");
+    expect(results[1].amount).toBe(0);
+  });
 });
 
 describe("/admin/students/:id/process: booking amount can't go negative", () => {

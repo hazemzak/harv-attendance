@@ -504,7 +504,9 @@ function parseBookingRows(form) {
     if (!subjects[i] && !teachers[i] && !schedules[i] && !amounts[i]) continue;
     if (!KNOWN_SUBJECT_SLUGS.has(subjects[i])) continue;
     const amount = parseFloat(amounts[i]);
-    rows.push({ subject: subjects[i], teacher_name: teachers[i], schedule: schedules[i], amount: Number.isFinite(amount) && amount >= 0 ? amount : 0 });
+    // teachers[i]/schedules[i] can be undefined if a crafted POST sends mismatched
+    // array lengths across the 4 b_* fields — D1's .bind() rejects undefined outright.
+    rows.push({ subject: subjects[i], teacher_name: teachers[i] || "", schedule: schedules[i] || "", amount: Number.isFinite(amount) && amount >= 0 ? amount : 0 });
   }
   return rows;
 }
@@ -635,9 +637,9 @@ export default {
           ${photoImg}
           <div>
             <span class="badge-pending">${t.pending}</span><br>
-            <strong>${s.name}</strong><br>
-            <small>${[s.school, s.stage].filter(Boolean).join(" · ")}</small><br>
-            <small>${[s.phone, s.email].filter(Boolean).join(" · ")}</small>
+            <strong>${escapeHtml(s.name)}</strong><br>
+            <small>${[s.school, s.stage].filter(Boolean).map(escapeHtml).join(" · ")}</small><br>
+            <small>${[s.phone, s.email].filter(Boolean).map(escapeHtml).join(" · ")}</small>
             ${subjectsLine ? `<br><small>${subjectsLine}</small>` : ""}
             <div class="pending-actions">
               <a href="/admin/students/${s.id}/process${langQs}"><button type="button">${t.process}</button></a>
@@ -818,7 +820,7 @@ export default {
       const waParentHref = hasSeparateParent ? waLink(student.parent_phone, t.waParentText(student.name, studentPageUrl)) : null;
       const bookings = await getBookings(env, student.id);
       const body = `
-<div class="confirm" style="margin-bottom:20px"><strong>${t.heading}</strong>${student.name}</div>
+<div class="confirm" style="margin-bottom:20px"><strong>${t.heading}</strong>${escapeHtml(student.name)}</div>
 <div class="handoff-actions no-print">
   ${waHref ? `<a href="${waHref}" target="_blank"><button class="wa-btn">${t.wa}</button></a>` : ""}
   ${waParentHref ? `<a href="${waParentHref}" target="_blank"><button class="wa-btn">${t.waParent}</button></a>` : ""}
@@ -826,8 +828,8 @@ export default {
 </div>
 <div class="print-ticket">
   ${LOGO_B64 ? `<img src="data:image/png;base64,${LOGO_B64}" alt="Harv" style="height:40px;margin:0 auto 12px;display:block">` : ""}
-  <div class="pt-name">${student.name}</div>
-  ${student.class ? `<div class="pt-class">${student.class}</div>` : ""}
+  <div class="pt-name">${escapeHtml(student.name)}</div>
+  ${student.class ? `<div class="pt-class">${escapeHtml(student.class)}</div>` : ""}
   ${qrSvg(scanUrl)}
   <p class="pt-hint">${t.ticketHint}</p>
   ${bookings.length ? `<h2 style="font-size:17px;margin:16px 0 10px">${t.estamaraHeading}</h2>${bookingTableHtml(lang, bookings)}` : ""}
@@ -1099,12 +1101,12 @@ export default {
         return new Response(page("لم يتم العثور على الطالب", `<p class="empty">كود QR غير معروف.</p>`, { nav: false }), { status: 404, headers: { "content-type": "text/html;charset=utf-8" } });
       }
       if (student.status !== "approved") {
-        return new Response(page("التسجيل لسه معلّق", `<div class="confirm"><strong>${student.name}</strong>التسجيل أو الدفع لسه متأكدش — روح للاستقبال.</div>`, { nav: false }), { status: 403, headers: { "content-type": "text/html;charset=utf-8" } });
+        return new Response(page("التسجيل لسه معلّق", `<div class="confirm"><strong>${escapeHtml(student.name)}</strong>التسجيل أو الدفع لسه متأكدش — روح للاستقبال.</div>`, { nav: false }), { status: 403, headers: { "content-type": "text/html;charset=utf-8" } });
       }
       const { meta } = await env.DB.prepare("INSERT OR IGNORE INTO attendance (student_id) VALUES (?)").bind(studentId).run();
       const body = meta.changes > 0
-        ? `<div class="confirm"><strong>${student.name}</strong>تم تسجيل الحضور الساعة ${new Date().toLocaleTimeString("ar-EG")}</div>`
-        : `<div class="confirm"><strong>${student.name}</strong>تم تسجيل حضورك بالفعل اليوم</div>`;
+        ? `<div class="confirm"><strong>${escapeHtml(student.name)}</strong>تم تسجيل الحضور الساعة ${new Date().toLocaleTimeString("ar-EG")}</div>`
+        : `<div class="confirm"><strong>${escapeHtml(student.name)}</strong>تم تسجيل حضورك بالفعل اليوم</div>`;
       return new Response(page("تم تسجيل الحضور", body, { nav: false }), { headers: { "content-type": "text/html;charset=utf-8" } });
     }
 
@@ -1121,7 +1123,7 @@ export default {
 
     if (url.pathname === "/admin/print" && request.method === "GET") {
       const { results } = await env.DB.prepare("SELECT name, class FROM students ORDER BY name").all();
-      const rows = results.map((s, i) => `<tr><td>${i + 1}</td><td>${s.name}</td><td>${s.class || ""}</td><td></td><td></td><td></td><td><span class="roster-box"></span></td></tr>`).join("")
+      const rows = results.map((s, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(s.name)}</td><td>${escapeHtml(s.class || "")}</td><td></td><td></td><td></td><td><span class="roster-box"></span></td></tr>`).join("")
         || `<tr><td colspan="7">لا يوجد طلاب مسجلين بعد.</td></tr>`;
       const body = `
 <p class="no-print"><button onclick="window.print()">🖨️ اطبع الكشف</button></p>
@@ -1188,7 +1190,7 @@ export default {
         return new Response(page("لم يتم العثور على الطالب", `<p class="empty">البطاقة دي مش موجودة. اتأكد من الرابط أو ارجع لموظف الاستقبال.</p>`, { nav: false }), { status: 404, headers: { "content-type": "text/html;charset=utf-8" } });
       }
       if (student.status !== "approved") {
-        return new Response(page("التسجيل قيد المراجعة", `<div class="confirm"><strong>${student.name}</strong>لسه بنراجع بياناتك وتأكيد الدفع. تعالى للاستقبال لو محتاج تكمل الدفع.</div>`, { nav: false }), { headers: { "content-type": "text/html;charset=utf-8" } });
+        return new Response(page("التسجيل قيد المراجعة", `<div class="confirm"><strong>${escapeHtml(student.name)}</strong>لسه بنراجع بياناتك وتأكيد الدفع. تعالى للاستقبال لو محتاج تكمل الدفع.</div>`, { nav: false }), { headers: { "content-type": "text/html;charset=utf-8" } });
       }
       const bookings = await getBookings(env, student.id);
       // ponytail: app-wide dedup uses UTC date(scanned_at); match it here so status agrees with /scan
@@ -1228,8 +1230,8 @@ export default {
     <div class="sc-band"><span class="sc-overline">بطاقة حضور الطالب</span><span class="sc-brand">هارف</span></div>
     <div class="sc-body">
       ${subjectPills("ar", student.subjects)}
-      <div class="sc-name">${student.name}</div>
-      ${student.class ? `<div class="sc-class">${student.class}</div>` : ""}
+      <div class="sc-name">${escapeHtml(student.name)}</div>
+      ${student.class ? `<div class="sc-class">${escapeHtml(student.class)}</div>` : ""}
       ${status}
       <div class="sc-qr">${qrSvg(scanUrl)}</div>
       <p class="sc-hint">اعرض الكود ده لموظف الاستقبال عند دخولك، وهيتسجّل حضورك على طول.</p>
