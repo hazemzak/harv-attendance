@@ -11,7 +11,12 @@ CREATE TABLE students (
   status TEXT NOT NULL DEFAULT 'approved',
   subjects TEXT,
   payment_method TEXT,
-  parent_phone TEXT
+  parent_phone TEXT,
+  father_phone TEXT,
+  mother_phone TEXT,
+  home_phone TEXT,
+  address TEXT,
+  track TEXT
 );
 
 CREATE TABLE attendance (
@@ -44,3 +49,17 @@ CREATE TABLE promotions (
   active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- The paper estamara's per-subject table (المادة/الأستاذ/المواعيد/المبلغ) —
+-- one row per subject a student books. Total is SUM(amount), computed on read.
+CREATE TABLE bookings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  subject TEXT,
+  teacher_name TEXT,
+  schedule TEXT,
+  amount REAL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_bookings_student ON bookings(student_id);
