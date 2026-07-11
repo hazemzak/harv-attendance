@@ -163,6 +163,49 @@ describe("/admin/estamarat: management list", () => {
   });
 });
 
+describe("student name: stored-XSS regression (found by claude-review on PR #5, fixed 2026-07-11)", () => {
+  it("escapes a malicious name in the /admin/estamarat list", async () => {
+    await insertStudent({
+      name: "<script>alert(1)</script>",
+      status: "approved",
+    });
+    const res = await SELF.fetch("https://example.com/admin/estamarat");
+    const html = await res.text();
+    expect(html).not.toContain("<script>alert(1)</script>");
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+  });
+
+  it("escapes a malicious name in the /admin/students/:id/estamara page title", async () => {
+    const id = await insertStudent({
+      name: "<script>alert(1)</script>",
+      status: "approved",
+    });
+    const res = await SELF.fetch(`https://example.com/admin/students/${id}/estamara`);
+    const html = await res.text();
+    expect(html).not.toContain("<title><script>alert(1)</script>");
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+  });
+});
+
+describe("/admin/students/:id/process: booking amount can't go negative", () => {
+  it("clamps a negative fee to 0 instead of storing it raw", async () => {
+    const id = await insertStudent({ name: "Negative Amount Test", status: "pending" });
+    const form = new FormData();
+    form.set("name", "Negative Amount Test");
+    form.set("phone", "01000000003");
+    form.set("parent_phone", "01111111114");
+    form.set("payment_method", "cash");
+    form.set("b_subject", "math");
+    form.set("b_teacher", "x");
+    form.set("b_schedule", "x");
+    form.set("b_amount", "-500");
+    await SELF.fetch(`https://example.com/admin/students/${id}/process`, { method: "POST", body: form });
+
+    const row = await env.DB.prepare("SELECT amount FROM bookings WHERE student_id = ?").bind(id).first();
+    expect(row?.amount).toBe(0);
+  });
+});
+
 describe("/admin/students/:id/process: track whitelist", () => {
   it("drops an invalid track value instead of storing it raw", async () => {
     const id = await insertStudent({ name: "Track Test", status: "pending" });

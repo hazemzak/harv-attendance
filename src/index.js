@@ -446,7 +446,7 @@ function bookingRow(lang, i, b, teacherOptions) {
     : { teacher: "الأستاذ", schedule: "المواعيد", amount: "المبلغ", remove: "✕" };
   return `<tr>
     <td>${i + 1}</td>
-    <td><select name="b_subject">${subjectOptions(lang, b.subject || "")}</select></td>
+    <td><select name="b_subject" required>${subjectOptions(lang, b.subject || "")}</select></td>
     <td><input name="b_teacher" list="booking-teacher-list" placeholder="${L.teacher}" value="${escapeHtml(b.teacher_name || "")}"></td>
     <td><input name="b_schedule" placeholder="${L.schedule}" value="${escapeHtml(b.schedule || "")}"></td>
     <td><input name="b_amount" type="number" step="0.01" min="0" placeholder="${L.amount}" value="${b.amount ?? ""}" oninput="updateBookingTotal()"></td>
@@ -504,7 +504,7 @@ function parseBookingRows(form) {
     if (!subjects[i] && !teachers[i] && !schedules[i] && !amounts[i]) continue;
     if (!KNOWN_SUBJECT_SLUGS.has(subjects[i])) continue;
     const amount = parseFloat(amounts[i]);
-    rows.push({ subject: subjects[i], teacher_name: teachers[i], schedule: schedules[i], amount: Number.isFinite(amount) ? amount : 0 });
+    rows.push({ subject: subjects[i], teacher_name: teachers[i], schedule: schedules[i], amount: Number.isFinite(amount) && amount >= 0 ? amount : 0 });
   }
   return rows;
 }
@@ -771,12 +771,15 @@ export default {
       ).bind(name, school, stage, stage, track, phone, email, subjects, paymentMethod, parentPhone, fatherPhone, motherPhone, homePhone, address, processMatch[1]).run();
       // Re-processing an already-processed estamara replaces its booking rows
       // wholesale rather than trying to diff/merge them — idempotent by design.
-      await env.DB.prepare("DELETE FROM bookings WHERE student_id = ?").bind(processMatch[1]).run();
-      for (const b of bookingRows) {
-        await env.DB.prepare(
-          "INSERT INTO bookings (student_id, subject, teacher_name, schedule, amount) VALUES (?, ?, ?, ?, ?)"
-        ).bind(processMatch[1], b.subject, b.teacher_name, b.schedule, b.amount).run();
-      }
+      // Batched (not looped .run() calls) so the delete + inserts commit as one
+      // unit — a partial write here would silently drop the estamara's total.
+      await env.DB.batch([
+        env.DB.prepare("DELETE FROM bookings WHERE student_id = ?").bind(processMatch[1]),
+        ...bookingRows.map(b =>
+          env.DB.prepare("INSERT INTO bookings (student_id, subject, teacher_name, schedule, amount) VALUES (?, ?, ?, ?, ?)")
+            .bind(processMatch[1], b.subject, b.teacher_name, b.schedule, b.amount)
+        )
+      ]);
       return Response.redirect(url.origin + `/admin/students/${processMatch[1]}/success` + (lang === "en" ? "?lang=en" : ""), 303);
     }
 
@@ -864,7 +867,7 @@ export default {
         return `<div class="card ${i % 2 === 0 ? "stripe-a" : "stripe-b"}">
           <div>
             ${r.status === "pending" ? `<span class="badge-pending">${t.pendingBadge}</span><br>` : ""}
-            <strong>${r.name}</strong><br>
+            <strong>${escapeHtml(r.name)}</strong><br>
             <small>${[r.stage, trackLabel(r.track)].filter(Boolean).join(" · ")} · ${subjectCount} ${t.subjectsCount}</small><br>
             <small>${t.total}: <strong>${r.total.toFixed(2)}</strong></small>
             <div class="pending-actions">
@@ -916,7 +919,7 @@ export default {
       ${infoRow(t.homePhone, student.home_phone)}
       ${infoRow(t.address, student.address)}
       ${bookingTableHtml(lang, bookings)}`;
-      return new Response(page(student.name, body, { nav: false, lang }), { headers: { "content-type": "text/html;charset=utf-8" } });
+      return new Response(page(escapeHtml(student.name), body, { nav: false, lang }), { headers: { "content-type": "text/html;charset=utf-8" } });
     }
 
     const PROMO_I18N = {
