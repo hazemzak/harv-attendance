@@ -524,7 +524,7 @@ function parentPhoneField(lang, parentPhone) {
     ? "Parent/guardian WhatsApp number (required, must differ from the student's number)"
     : "رقم واتساب ولي الأمر (إجباري، ولازم يكون مختلف عن رقم الطالب)";
   return `<label>${label}</label>
-  <input name="parent_phone" type="tel" placeholder="01xxxxxxxxx" value="${parentPhone || ""}" required>`;
+  <input name="parent_phone" type="tel" placeholder="01xxxxxxxxx" value="${escapeHtml(parentPhone || "")}" required>`;
 }
 
 function waLink(phone, text) {
@@ -732,19 +732,19 @@ export default {
       const bookings = await getBookings(env, student.id);
       const body = `${photoImg}${refPanel}<form method="POST" action="/admin/students/${student.id}/process${langQs}">
         <label>${t.name}</label>
-        <input name="name" value="${student.name || ""}" required>
+        <input name="name" value="${escapeHtml(student.name || "")}" required>
         <label>${t.school}</label>
-        <input name="school" value="${student.school || ""}">
+        <input name="school" value="${escapeHtml(student.school || "")}">
         <label>${t.stage}</label>
         <div class="subjects-grid">${stageRadios(lang, stageVal)}</div>
         <label>${t.track}</label>
         <div class="subjects-grid">${trackRadios(lang, student.track || "")}</div>
         <label>${t.phone}</label>
-        <input name="phone" type="tel" value="${student.phone || ""}" required>
+        <input name="phone" type="tel" value="${escapeHtml(student.phone || "")}" required>
         ${parentPhoneField(lang, student.parent_phone)}
         ${contactFields(lang, student)}
         <label>${t.email}</label>
-        <input name="email" type="email" value="${student.email || ""}">
+        <input name="email" type="email" value="${escapeHtml(student.email || "")}">
         <label>${t.subjects}</label>
         <div class="subjects-grid">${subjectsCheckboxes(lang, student.subjects)}</div>
         <label>${t.payment}</label>

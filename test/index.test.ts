@@ -333,6 +333,19 @@ describe("stage: whitelist at write time (found by claude-review, round 4)", () 
   });
 });
 
+describe("attribute-breakout XSS: process-page pre-filled form fields (found in a self-audit after round 4)", () => {
+  it("escapes a name containing a double-quote instead of letting it break out of value=\"...\"", async () => {
+    const id = await insertStudent({
+      name: 'Breakout"><script>alert(1)</script>',
+      status: "pending",
+    });
+    const res = await SELF.fetch(`https://example.com/admin/students/${id}/process`);
+    const html = await res.text();
+    expect(html).not.toContain('"><script>alert(1)</script>');
+    expect(html).toContain("&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;");
+  });
+});
+
 describe("/admin/students/:id/process: booking amount can't go negative", () => {
   it("clamps a negative fee to 0 instead of storing it raw", async () => {
     const id = await insertStudent({ name: "Negative Amount Test", status: "pending" });
