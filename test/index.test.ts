@@ -185,6 +185,29 @@ describe("student name: stored-XSS regression (found by claude-review on PR #5, 
     expect(html).not.toContain("<title><script>alert(1)</script>");
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
   });
+
+  it("escapes a malicious name in the /admin approved-student roster card (found by claude-review, round 2)", async () => {
+    await insertStudent({
+      name: "<script>alert(1)</script>",
+      status: "approved",
+    });
+    const res = await SELF.fetch("https://example.com/admin");
+    const html = await res.text();
+    expect(html).not.toContain("<strong><script>alert(1)</script>");
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+  });
+
+  it("escapes a malicious name in the /admin/today attendance list (found by claude-review, round 2)", async () => {
+    const id = await insertStudent({
+      name: "<script>alert(1)</script>",
+      status: "approved",
+    });
+    await env.DB.prepare("INSERT INTO attendance (student_id) VALUES (?)").bind(id).run();
+    const res = await SELF.fetch("https://example.com/admin/today");
+    const html = await res.text();
+    expect(html).not.toContain("<strong><script>alert(1)</script>");
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+  });
 });
 
 describe("/admin/students/:id/process: booking amount can't go negative", () => {

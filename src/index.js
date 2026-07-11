@@ -649,7 +649,7 @@ export default {
 
       const cards = approved.map((s, i) => {
         const scanUrl = `${url.origin}/scan?student=${s.id}`;
-        return `<div class="card ${i % 2 === 0 ? "stripe-a" : "stripe-b"}">${qrSvg(scanUrl)}<div><a href="/admin/students/${s.id}/estamara${langQs}"><strong>${s.name}</strong></a><br><small>${s.class || ""}</small></div></div>`;
+        return `<div class="card ${i % 2 === 0 ? "stripe-a" : "stripe-b"}">${qrSvg(scanUrl)}<div><a href="/admin/students/${s.id}/estamara${langQs}"><strong>${escapeHtml(s.name)}</strong></a><br><small>${s.class || ""}</small></div></div>`;
       }).join("") || `<p class="empty">${t.empty}</p>`;
       const form = `<form method="POST" action="/admin/students${langQs}">
         <label>${t.addName}</label>
@@ -1115,7 +1115,7 @@ export default {
          WHERE date(a.scanned_at) = date('now')
          ORDER BY a.scanned_at DESC`
       ).all();
-      const rows = results.map((r, i) => `<div class="card ${i % 2 === 0 ? "stripe-a" : "stripe-b"}"><div><a href="/admin/students/${r.id}/estamara"><strong>${r.name}</strong></a><br><small>${r.scanned_at}</small></div></div>`).join("") || `<p class="empty">لا يوجد تسجيل حضور اليوم.</p>`;
+      const rows = results.map((r, i) => `<div class="card ${i % 2 === 0 ? "stripe-a" : "stripe-b"}"><div><a href="/admin/students/${r.id}/estamara"><strong>${escapeHtml(r.name)}</strong></a><br><small>${r.scanned_at}</small></div></div>`).join("") || `<p class="empty">لا يوجد تسجيل حضور اليوم.</p>`;
       return new Response(page("حضور اليوم", rows), { headers: { "content-type": "text/html;charset=utf-8" } });
     }
 
