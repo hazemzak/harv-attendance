@@ -365,6 +365,34 @@ describe("/admin/students/:id/process: booking amount can't go negative", () => 
   });
 });
 
+describe("/ no longer serves the dashboard unauthenticated (found post-deploy 2026-07-11)", () => {
+  it("redirects / to the gated /admin/dashboard instead of rendering revenue at the open root", async () => {
+    const id = await insertStudent({ name: "Dashboard Redirect Test", status: "approved" });
+    await env.DB.prepare(
+      "INSERT INTO bookings (student_id, subject, teacher_name, schedule, amount) VALUES (?, 'math', 'x', '', 12345)"
+    ).bind(id).run();
+
+    const res = await SELF.fetch("https://example.com/", { redirect: "manual" });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toContain("/admin/dashboard");
+
+    const html = await res.text();
+    expect(html).not.toContain("12345");
+  });
+
+  it("still renders the stat tiles (including revenue) at /admin/dashboard", async () => {
+    const id = await insertStudent({ name: "Dashboard Content Test", status: "approved" });
+    await env.DB.prepare(
+      "INSERT INTO bookings (student_id, subject, teacher_name, schedule, amount) VALUES (?, 'math', 'x', '', 500)"
+    ).bind(id).run();
+
+    const res = await SELF.fetch("https://example.com/admin/dashboard");
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("stat-tile");
+  });
+});
+
 describe("/admin/students/:id/process: track whitelist", () => {
   it("drops an invalid track value instead of storing it raw", async () => {
     const id = await insertStudent({ name: "Track Test", status: "pending" });

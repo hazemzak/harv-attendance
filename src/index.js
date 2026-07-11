@@ -568,45 +568,9 @@ export default {
     };
 
     if (url.pathname === "/" && request.method === "GET") {
-      const lang = langOf(url);
-      const t = DASH_I18N[lang];
-      const langQs = lang === "en" ? "?lang=en" : "";
-      const [totalStudents, pending, today, revenue] = await Promise.all([
-        env.DB.prepare("SELECT COUNT(*) AS n FROM students").first(),
-        env.DB.prepare("SELECT COUNT(*) AS n FROM students WHERE status = 'pending'").first(),
-        env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE date(scanned_at) = date('now')").first(),
-        env.DB.prepare("SELECT COALESCE(SUM(amount), 0) AS n FROM bookings").first()
-      ]);
-      const tile = (num, label) => `<div class="stat-tile"><div class="stat-num">${num}</div><div class="stat-label">${label}</div></div>`;
-      const body = `
-      <div class="stat-tiles">
-        ${tile(totalStudents.n, t.totalStudents)}
-        ${tile(pending.n, t.pending)}
-        ${tile(today.n, t.today)}
-        ${tile(revenue.n, t.revenue)}
-      </div>
-      <div class="dash-sections">
-        <div class="dash-card">
-          <h2>${t.attendanceTitle}</h2>
-          <div class="dash-links">
-            <a href="/admin${langQs}">${t.attendanceStudents}</a>
-            <a href="/admin/today${langQs}">${t.attendanceToday}</a>
-            <a href="/admin/print">${t.attendancePrint}</a>
-          </div>
-        </div>
-        <div class="dash-card">
-          <h2>${t.estamaratTitle}</h2>
-          <div class="dash-links">
-            <a href="/admin/estamarat${langQs}">${t.estamaratAll}</a>
-            <a href="/admin/promotions${langQs}">${t.promos}</a>
-          </div>
-        </div>
-        <div class="dash-card">
-          <h2>${t.guideTitle}</h2>
-          <div class="dash-links"><a href="/admin/guide">${t.guideLink}</a></div>
-        </div>
-      </div>`;
-      return new Response(page(t.title, body, { lang, toggleHref: toggleHref(url, lang) }), { headers: { "content-type": "text/html;charset=utf-8" } });
+      // ponytail: dashboard used to render here (no Access gate on "/"); relocated
+      // to /admin/dashboard so the existing /admin* Access path-match covers it.
+      return Response.redirect(new URL("/admin/dashboard" + url.search, request.url).toString(), 302);
     }
 
     const ADMIN_I18N = {
@@ -670,6 +634,48 @@ export default {
       </form>`;
       const regLink = `<div class="reg-link">${t.regLink}<br><a href="${url.origin}/register">${url.origin}/register</a></div>`;
       return new Response(page(t.title, regLink + pendingCards + form + cards, { lang, toggleHref: toggleHref(url, lang) }), { headers: { "content-type": "text/html;charset=utf-8" } });
+    }
+
+    if (url.pathname === "/admin/dashboard" && request.method === "GET") {
+      const lang = langOf(url);
+      const t = DASH_I18N[lang];
+      const langQs = lang === "en" ? "?lang=en" : "";
+      const [totalStudents, pending, today, revenue] = await Promise.all([
+        env.DB.prepare("SELECT COUNT(*) AS n FROM students").first(),
+        env.DB.prepare("SELECT COUNT(*) AS n FROM students WHERE status = 'pending'").first(),
+        env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE date(scanned_at) = date('now')").first(),
+        env.DB.prepare("SELECT COALESCE(SUM(amount), 0) AS n FROM bookings").first()
+      ]);
+      const tile = (num, label) => `<div class="stat-tile"><div class="stat-num">${num}</div><div class="stat-label">${label}</div></div>`;
+      const body = `
+      <div class="stat-tiles">
+        ${tile(totalStudents.n, t.totalStudents)}
+        ${tile(pending.n, t.pending)}
+        ${tile(today.n, t.today)}
+        ${tile(revenue.n, t.revenue)}
+      </div>
+      <div class="dash-sections">
+        <div class="dash-card">
+          <h2>${t.attendanceTitle}</h2>
+          <div class="dash-links">
+            <a href="/admin${langQs}">${t.attendanceStudents}</a>
+            <a href="/admin/today${langQs}">${t.attendanceToday}</a>
+            <a href="/admin/print">${t.attendancePrint}</a>
+          </div>
+        </div>
+        <div class="dash-card">
+          <h2>${t.estamaratTitle}</h2>
+          <div class="dash-links">
+            <a href="/admin/estamarat${langQs}">${t.estamaratAll}</a>
+            <a href="/admin/promotions${langQs}">${t.promos}</a>
+          </div>
+        </div>
+        <div class="dash-card">
+          <h2>${t.guideTitle}</h2>
+          <div class="dash-links"><a href="/admin/guide">${t.guideLink}</a></div>
+        </div>
+      </div>`;
+      return new Response(page(t.title, body, { lang, toggleHref: toggleHref(url, lang) }), { headers: { "content-type": "text/html;charset=utf-8" } });
     }
 
     if (url.pathname === "/admin/students" && request.method === "POST") {
