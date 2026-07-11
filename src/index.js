@@ -213,6 +213,33 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+// ponytail: adopt for NEW render functions going forward (not retrofitted onto the
+// ~30 existing escapeHtml() call sites below — those are already correct and locked
+// in by the XSS regression tests in test/index.test.ts; rewriting them the night
+// before a live staff test is unnecessary risk for zero functional gain).
+// `html` auto-escapes every interpolated value; wrap already-safe HTML (e.g. output
+// from another html`` template, or a trusted static fragment) in raw() to opt out.
+export function raw(value) {
+  return { __raw: String(value) };
+}
+export function html(strings, ...values) {
+  let out = strings[0];
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    if (v === undefined || v === null) {
+      // append nothing
+    } else if (v && typeof v === "object" && "__raw" in v) {
+      out += v.__raw;
+    } else if (Array.isArray(v)) {
+      out += v.map(x => (x && typeof x === "object" && "__raw" in x) ? x.__raw : escapeHtml(x)).join("");
+    } else {
+      out += escapeHtml(v);
+    }
+    out += strings[i + 1];
+  }
+  return out;
+}
+
 const STAGES = [
   { v: "تالتة إعدادي", ar: "تالتة إعدادي", en: "3rd Prep" },
   { v: "أولى ثانوي", ar: "أولى ثانوي", en: "1st Secondary" },

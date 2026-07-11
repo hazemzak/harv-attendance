@@ -1,5 +1,6 @@
 import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { html, raw } from "../src/index.js";
 
 // Cloudflare Access injects this header at the edge before /admin* requests reach
 // the Worker in production; SELF.fetch in tests bypasses Access entirely, so admin
@@ -425,5 +426,23 @@ describe("/admin*: in-app Access defense-in-depth (added 2026-07-12, follow-up t
   it("allows the same request through once the header is present", async () => {
     const res = await adminFetch("https://example.com/admin/dashboard");
     expect(res.status).toBe(200);
+  });
+});
+
+describe("html`` tagged template (added 2026-07-12, for future render functions)", () => {
+  it("escapes an interpolated value by default", () => {
+    const out = html`<strong>${"<script>alert(1)</script>"}</strong>`;
+    expect(out).toBe("<strong>&lt;script&gt;alert(1)&lt;/script&gt;</strong>");
+  });
+
+  it("leaves raw()-wrapped HTML untouched instead of double-escaping it", () => {
+    const inner = html`<em>${"safe"}</em>`;
+    const out = html`<div>${raw(inner)}</div>`;
+    expect(out).toBe("<div><em>safe</em></div>");
+  });
+
+  it("escapes every item in an interpolated array and joins them", () => {
+    const out = html`<ul>${["<b>a</b>", "b"]}</ul>`;
+    expect(out).toBe("<ul>&lt;b&gt;a&lt;/b&gt;b</ul>");
   });
 });
