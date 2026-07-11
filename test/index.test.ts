@@ -1,6 +1,13 @@
 import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
+// Cloudflare Access injects this header at the edge before /admin* requests reach
+// the Worker in production; SELF.fetch in tests bypasses Access entirely, so admin
+// calls need it added manually to simulate an authenticated session.
+function adminFetch(path: string, init?: RequestInit) {
+  return SELF.fetch(path, { ...init, headers: { ...(init?.headers || {}), "Cf-Access-Jwt-Assertion": "test" } });
+}
+
 async function insertStudent(fields: Record<string, string | null>) {
   const cols = Object.keys(fields);
   const placeholders = cols.map(() => "?").join(",");
@@ -17,7 +24,7 @@ describe("subjects: stored-XSS regression (found by claude-review on PR #3, fixe
       status: "pending",
       subjects: "<script>alert(1)</script>,math",
     });
-    const res = await SELF.fetch("https://example.com/admin");
+    const res = await adminFetch("https://example.com/admin");
     const html = await res.text();
     expect(html).not.toContain("<script>alert(1)</script>");
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
@@ -115,7 +122,7 @@ describe("/admin/students/:id/process: booking rows (estamara table)", () => {
     form.set("parent_phone", "01111111112");
     form.set("payment_method", "cash");
     for (const [k, v] of Object.entries(extra)) form.append(k, v);
-    return SELF.fetch(`https://example.com/admin/students/${id}/process`, { method: "POST", body: form });
+    return adminFetch(`https://example.com/admin/students/${id}/process`, { method: "POST", body: form });
   }
 
   it("inserts one booking row per subject with teacher/schedule/amount", async () => {
@@ -156,7 +163,7 @@ describe("/admin/estamarat: management list", () => {
     await env.DB.prepare("INSERT INTO bookings (student_id, subject, teacher_name, schedule, amount) VALUES (?, 'math', 'أ. أحمد', '', 300)").bind(id).run();
     await env.DB.prepare("INSERT INTO bookings (student_id, subject, teacher_name, schedule, amount) VALUES (?, 'physics', 'أ. سمير', '', 250)").bind(id).run();
 
-    const res = await SELF.fetch("https://example.com/admin/estamarat");
+    const res = await adminFetch("https://example.com/admin/estamarat");
     expect(res.status).toBe(200);
     const html = await res.text();
     expect(html).toContain("550.00");
@@ -169,7 +176,7 @@ describe("student name: stored-XSS regression (found by claude-review on PR #5, 
       name: "<script>alert(1)</script>",
       status: "approved",
     });
-    const res = await SELF.fetch("https://example.com/admin/estamarat");
+    const res = await adminFetch("https://example.com/admin/estamarat");
     const html = await res.text();
     expect(html).not.toContain("<script>alert(1)</script>");
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
@@ -180,7 +187,7 @@ describe("student name: stored-XSS regression (found by claude-review on PR #5, 
       name: "<script>alert(1)</script>",
       status: "approved",
     });
-    const res = await SELF.fetch(`https://example.com/admin/students/${id}/estamara`);
+    const res = await adminFetch(`https://example.com/admin/students/${id}/estamara`);
     const html = await res.text();
     expect(html).not.toContain("<title><script>alert(1)</script>");
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
@@ -191,7 +198,7 @@ describe("student name: stored-XSS regression (found by claude-review on PR #5, 
       name: "<script>alert(1)</script>",
       status: "approved",
     });
-    const res = await SELF.fetch("https://example.com/admin");
+    const res = await adminFetch("https://example.com/admin");
     const html = await res.text();
     expect(html).not.toContain("<strong><script>alert(1)</script>");
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
@@ -203,7 +210,7 @@ describe("student name: stored-XSS regression (found by claude-review on PR #5, 
       status: "approved",
     });
     await env.DB.prepare("INSERT INTO attendance (student_id) VALUES (?)").bind(id).run();
-    const res = await SELF.fetch("https://example.com/admin/today");
+    const res = await adminFetch("https://example.com/admin/today");
     const html = await res.text();
     expect(html).not.toContain("<strong><script>alert(1)</script>");
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
@@ -215,7 +222,7 @@ describe("student name: stored-XSS regression (found by claude-review on PR #5, 
       status: "pending",
       school: "<img src=x onerror=alert(2)>",
     });
-    const res = await SELF.fetch("https://example.com/admin");
+    const res = await adminFetch("https://example.com/admin");
     const html = await res.text();
     expect(html).not.toContain("<strong><script>alert(1)</script>");
     expect(html).not.toContain("<img src=x onerror=alert(2)>");
@@ -224,7 +231,7 @@ describe("student name: stored-XSS regression (found by claude-review on PR #5, 
 
   it("escapes a malicious name on the success/handoff page (found by claude-review, round 3)", async () => {
     const id = await insertStudent({ name: "<script>alert(1)</script>", status: "approved" });
-    const res = await SELF.fetch(`https://example.com/admin/students/${id}/success`);
+    const res = await adminFetch(`https://example.com/admin/students/${id}/success`);
     const html = await res.text();
     expect(html).not.toContain("<strong><script>alert(1)</script>");
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
@@ -248,7 +255,7 @@ describe("student name: stored-XSS regression (found by claude-review on PR #5, 
 
   it("escapes a malicious name on the printable /admin/print roster (found by claude-review, round 3)", async () => {
     await insertStudent({ name: "<script>alert(1)</script>", status: "approved" });
-    const res = await SELF.fetch("https://example.com/admin/print");
+    const res = await adminFetch("https://example.com/admin/print");
     const html = await res.text();
     expect(html).not.toContain("<td><script>alert(1)</script>");
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
@@ -269,7 +276,7 @@ describe("/admin/students/:id/process: booking-row array length mismatch (found 
     // b_schedule and b_amount omitted entirely for the 2nd row on purpose
     form.append("b_schedule", "السبت");
 
-    const res = await SELF.fetch(`https://example.com/admin/students/${id}/process`, { method: "POST", body: form });
+    const res = await adminFetch(`https://example.com/admin/students/${id}/process`, { method: "POST", body: form });
     expect(res.status).toBe(200);
 
     const { results } = await env.DB.prepare("SELECT * FROM bookings WHERE student_id = ? ORDER BY id").bind(id).all();
@@ -302,7 +309,7 @@ describe("stage: whitelist at write time (found by claude-review, round 4)", () 
     form.set("phone", "01000000006");
     form.set("parent_phone", "01111111117");
     form.set("payment_method", "cash");
-    await SELF.fetch(`https://example.com/admin/students/${id}/process`, { method: "POST", body: form });
+    await adminFetch(`https://example.com/admin/students/${id}/process`, { method: "POST", body: form });
 
     const row = await env.DB.prepare("SELECT stage FROM students WHERE id = ?").bind(id).first();
     expect(row?.stage).toBe("");
@@ -314,7 +321,7 @@ describe("stage: whitelist at write time (found by claude-review, round 4)", () 
       status: "approved",
       stage: "<script>alert(1)</script>",
     });
-    const res = await SELF.fetch("https://example.com/admin/estamarat");
+    const res = await adminFetch("https://example.com/admin/estamarat");
     const html = await res.text();
     expect(html).not.toContain("<script>alert(1)</script>");
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
@@ -326,7 +333,7 @@ describe("stage: whitelist at write time (found by claude-review, round 4)", () 
       status: "approved",
       class: "<script>alert(1)</script>",
     });
-    const res = await SELF.fetch("https://example.com/admin");
+    const res = await adminFetch("https://example.com/admin");
     const html = await res.text();
     expect(html).not.toContain("<script>alert(1)</script>");
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
@@ -339,7 +346,7 @@ describe("attribute-breakout XSS: process-page pre-filled form fields (found in 
       name: 'Breakout"><script>alert(1)</script>',
       status: "pending",
     });
-    const res = await SELF.fetch(`https://example.com/admin/students/${id}/process`);
+    const res = await adminFetch(`https://example.com/admin/students/${id}/process`);
     const html = await res.text();
     expect(html).not.toContain('"><script>alert(1)</script>');
     expect(html).toContain("&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;");
@@ -358,7 +365,7 @@ describe("/admin/students/:id/process: booking amount can't go negative", () => 
     form.set("b_teacher", "x");
     form.set("b_schedule", "x");
     form.set("b_amount", "-500");
-    await SELF.fetch(`https://example.com/admin/students/${id}/process`, { method: "POST", body: form });
+    await adminFetch(`https://example.com/admin/students/${id}/process`, { method: "POST", body: form });
 
     const row = await env.DB.prepare("SELECT amount FROM bookings WHERE student_id = ?").bind(id).first();
     expect(row?.amount).toBe(0);
@@ -386,7 +393,7 @@ describe("/ no longer serves the dashboard unauthenticated (found post-deploy 20
       "INSERT INTO bookings (student_id, subject, teacher_name, schedule, amount) VALUES (?, 'math', 'x', '', 500)"
     ).bind(id).run();
 
-    const res = await SELF.fetch("https://example.com/admin/dashboard");
+    const res = await adminFetch("https://example.com/admin/dashboard");
     expect(res.status).toBe(200);
     const html = await res.text();
     expect(html).toContain("stat-tile");
@@ -402,9 +409,21 @@ describe("/admin/students/:id/process: track whitelist", () => {
     form.set("parent_phone", "01111111113");
     form.set("payment_method", "cash");
     form.set("track", "<script>alert(1)</script>");
-    await SELF.fetch(`https://example.com/admin/students/${id}/process`, { method: "POST", body: form });
+    await adminFetch(`https://example.com/admin/students/${id}/process`, { method: "POST", body: form });
 
     const row = await env.DB.prepare("SELECT track FROM students WHERE id = ?").bind(id).first();
     expect(row?.track).toBe("");
+  });
+});
+
+describe("/admin*: in-app Access defense-in-depth (added 2026-07-12, follow-up to the /admin dashboard leak)", () => {
+  it("rejects an /admin request with no Cf-Access-Jwt-Assertion header even though Cloudflare Access is the primary gate", async () => {
+    const res = await SELF.fetch("https://example.com/admin/dashboard");
+    expect(res.status).toBe(403);
+  });
+
+  it("allows the same request through once the header is present", async () => {
+    const res = await adminFetch("https://example.com/admin/dashboard");
+    expect(res.status).toBe(200);
   });
 });

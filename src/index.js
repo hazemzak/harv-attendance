@@ -546,6 +546,13 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
+    // ponytail: defense-in-depth — Access gates /admin* at Cloudflare's edge, but
+    // nothing in the Worker verified that until now (see the 2026-07-11 dashboard
+    // leak). If this header is missing, the request never went through Access.
+    if (url.pathname.startsWith("/admin") && !request.headers.get("Cf-Access-Jwt-Assertion")) {
+      return new Response("Forbidden", { status: 403 });
+    }
+
     const DASH_I18N = {
       ar: {
         title: "لوحة التحكم",
@@ -1193,7 +1200,10 @@ export default {
 <h2 style="font-size:20px;margin:24px 0 10px">لو تهت</h2>
 <ul style="line-height:2">
   <li>دوس على شعار هارف فوق في أي وقت، وهيرجعك للشاشة الرئيسية على طول.</li>
-</ul>`;
+</ul>
+
+<h2 style="font-size:20px;margin:24px 0 10px">لو ظهرلك شاشة تسجيل دخول</h2>
+<p>ده طبيعي، بيحصل كل شهر تقريبًا. اكتب إيميلك، وهيبعتلك كود من 6 أرقام على نفس الإيميل — افتح الإيميل واكتب الكود.</p>`;
       return new Response(page("دليل الموظفين", body), { headers: { "content-type": "text/html;charset=utf-8" } });
     }
 
