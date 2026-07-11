@@ -236,6 +236,14 @@ function sanitizeTrack(v) {
   return TRACKS.some(t => t.v === v) ? v : "";
 }
 
+// Whitelisted at write time (same pattern as sanitizeTrack/sanitizeSubjects) —
+// stage was previously stored raw despite the UI only offering STAGES' 5 fixed
+// values, letting a crafted /register or /process POST plant a stored-XSS
+// payload that would resurface at any future stage/class render site.
+function sanitizeStage(v) {
+  return STAGES.some(s => s.v === v) ? v : "";
+}
+
 const PAYMENT_METHODS = {
   cash: { ar: "كاش", en: "Cash" },
   instapay: { ar: "إنستاباي", en: "InstaPay" },
@@ -651,7 +659,7 @@ export default {
 
       const cards = approved.map((s, i) => {
         const scanUrl = `${url.origin}/scan?student=${s.id}`;
-        return `<div class="card ${i % 2 === 0 ? "stripe-a" : "stripe-b"}">${qrSvg(scanUrl)}<div><a href="/admin/students/${s.id}/estamara${langQs}"><strong>${escapeHtml(s.name)}</strong></a><br><small>${s.class || ""}</small></div></div>`;
+        return `<div class="card ${i % 2 === 0 ? "stripe-a" : "stripe-b"}">${qrSvg(scanUrl)}<div><a href="/admin/students/${s.id}/estamara${langQs}"><strong>${escapeHtml(s.name)}</strong></a><br><small>${escapeHtml(s.class || "")}</small></div></div>`;
       }).join("") || `<p class="empty">${t.empty}</p>`;
       const form = `<form method="POST" action="/admin/students${langQs}">
         <label>${t.addName}</label>
@@ -753,7 +761,7 @@ export default {
       const form = await request.formData();
       const name = (form.get("name") || "").toString().trim();
       const school = (form.get("school") || "").toString().trim();
-      const stage = (form.get("stage") || "").toString().trim();
+      const stage = sanitizeStage((form.get("stage") || "").toString().trim());
       const track = sanitizeTrack((form.get("track") || "").toString().trim());
       const phone = (form.get("phone") || "").toString().trim();
       const email = (form.get("email") || "").toString().trim();
@@ -870,7 +878,7 @@ export default {
           <div>
             ${r.status === "pending" ? `<span class="badge-pending">${t.pendingBadge}</span><br>` : ""}
             <strong>${escapeHtml(r.name)}</strong><br>
-            <small>${[r.stage, trackLabel(r.track)].filter(Boolean).join(" · ")} · ${subjectCount} ${t.subjectsCount}</small><br>
+            <small>${[r.stage, trackLabel(r.track)].filter(Boolean).map(escapeHtml).join(" · ")} · ${subjectCount} ${t.subjectsCount}</small><br>
             <small>${t.total}: <strong>${r.total.toFixed(2)}</strong></small>
             <div class="pending-actions">
               <a href="/admin/students/${r.id}/estamara${langQs}"><button type="button">${t.view}</button></a>
@@ -1064,7 +1072,7 @@ export default {
         return new Response(page(t.thanksTitle, `<div class="confirm"><strong>${t.thanks}</strong>${t.thanksBody}</div>`, { nav: false, lang }), { headers: { "content-type": "text/html;charset=utf-8" } });
       }
       const name = (form.get("name") || "").toString().trim();
-      const stage = (form.get("stage") || "").toString().trim();
+      const stage = sanitizeStage((form.get("stage") || "").toString().trim());
       if (!name || !stage) {
         return new Response(page(t.errTitle, `<p class="empty">${t.err}</p>`, { nav: false, lang }), { status: 400, headers: { "content-type": "text/html;charset=utf-8" } });
       }

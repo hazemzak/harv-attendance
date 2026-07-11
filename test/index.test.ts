@@ -279,6 +279,60 @@ describe("/admin/students/:id/process: booking-row array length mismatch (found 
   });
 });
 
+describe("stage: whitelist at write time (found by claude-review, round 4)", () => {
+  it("/register rejects a stage value that isn't a known STAGES slug", async () => {
+    const form = new FormData();
+    form.set("name", "Stage Whitelist Test");
+    form.set("stage", "<script>alert(1)</script>");
+    form.set("phone", "01000000005");
+    form.set("parent_phone", "01111111116");
+
+    const res = await SELF.fetch("https://example.com/register", { method: "POST", body: form });
+    expect(res.status).toBe(400);
+
+    const row = await env.DB.prepare("SELECT id FROM students WHERE name = 'Stage Whitelist Test'").first();
+    expect(row).toBeNull();
+  });
+
+  it("/admin/students/:id/process drops an unknown stage value instead of storing it raw", async () => {
+    const id = await insertStudent({ name: "Process Stage Test", status: "pending" });
+    const form = new FormData();
+    form.set("name", "Process Stage Test");
+    form.set("stage", "<script>alert(1)</script>");
+    form.set("phone", "01000000006");
+    form.set("parent_phone", "01111111117");
+    form.set("payment_method", "cash");
+    await SELF.fetch(`https://example.com/admin/students/${id}/process`, { method: "POST", body: form });
+
+    const row = await env.DB.prepare("SELECT stage FROM students WHERE id = ?").bind(id).first();
+    expect(row?.stage).toBe("");
+  });
+
+  it("escapes stage on the /admin/estamarat list even for a legacy row bypassing the whitelist", async () => {
+    await insertStudent({
+      name: "Legacy Stage Test",
+      status: "approved",
+      stage: "<script>alert(1)</script>",
+    });
+    const res = await SELF.fetch("https://example.com/admin/estamarat");
+    const html = await res.text();
+    expect(html).not.toContain("<script>alert(1)</script>");
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+  });
+
+  it("escapes class on the /admin approved-student roster even for a legacy row bypassing the whitelist", async () => {
+    await insertStudent({
+      name: "Legacy Class Test",
+      status: "approved",
+      class: "<script>alert(1)</script>",
+    });
+    const res = await SELF.fetch("https://example.com/admin");
+    const html = await res.text();
+    expect(html).not.toContain("<script>alert(1)</script>");
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+  });
+});
+
 describe("/admin/students/:id/process: booking amount can't go negative", () => {
   it("clamps a negative fee to 0 instead of storing it raw", async () => {
     const id = await insertStudent({ name: "Negative Amount Test", status: "pending" });
