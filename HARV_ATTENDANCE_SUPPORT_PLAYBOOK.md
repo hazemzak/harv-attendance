@@ -1,4 +1,4 @@
-# Support playbook
+# harv-attendance — support playbook
 
 Written during development, not after launch — every feature that ships, or bug that gets fixed, gets a row here the same sprint, per the Faction Group 3-tier model (source video: facebook.com/reel/1023018453988059, watched 2026-07-10 — see design-system vault `wiki/log.md` 2026-07-10).
 

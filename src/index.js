@@ -1187,7 +1187,7 @@ export default {
     // ponytail: Arabic-only by design (agreed with Hazem) — this is the printed
     // staff one-pager, not a dual-language admin screen. In-app contextual help
     // (short hint banners on the dashboard/process pages) is a planned follow-up,
-    // not built yet — see TO DO.md / SUPPORT_PLAYBOOK.md.
+    // not built yet — see TO DO.md / HARV_ATTENDANCE_SUPPORT_PLAYBOOK.md.
     if (url.pathname === "/admin/guide" && request.method === "GET") {
       const body = `
 <p class="no-print"><button onclick="window.print()">🖨️ اطبع الدليل</button></p>
