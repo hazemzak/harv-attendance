@@ -25,6 +25,19 @@ function adminFetch(path: string, init?: RequestInit) {
   );
 }
 
+// /admin/scan-mark is POST-only (claude-review, PR #10 finding #2 — a
+// mutating GET was CSRF-able), so tests post a form-encoded body instead of
+// a query string.
+function scanMarkFetch(student: number | string, group?: number | string) {
+  const body = new URLSearchParams({ student: String(student) });
+  if (group !== undefined) body.set("group", String(group));
+  return adminFetch("https://example.com/admin/scan-mark", {
+    method: "POST",
+    body: body.toString(),
+    headers: { "Content-Type": "application/x-www-form-urlencoded" }
+  });
+}
+
 // clerkFetch() is defined further down this file (used by the rooms/groups/
 // bookings work) — reused here instead of a second near-identical definition.
 
@@ -81,6 +94,38 @@ describe("/register: subjects whitelist", () => {
 
     const row = await env.DB.prepare("SELECT subjects FROM students WHERE name = 'Whitelist Test'").first();
     expect(row?.subjects).toBe("math");
+  });
+});
+
+describe("/register: photo content-type whitelist (claude-review, PR #10 finding #1)", () => {
+  it("normalizes a spoofed photo content-type to image/jpeg instead of trusting it verbatim", async () => {
+    const form = new FormData();
+    form.set("name", "Photo Type Spoof Test");
+    form.set("school", "Test School");
+    form.set("stage", "أولى ثانوي");
+    form.set("phone", "01000000009");
+    form.set("parent_phone", "01111111119");
+    // A real attack would set type to text/html to get stored bytes served
+    // back with an attacker-chosen content-type at /admin/students/:id/photo.
+    form.set("photo", new File([new Uint8Array([1, 2, 3])], "x.html", { type: "text/html" }));
+
+    await SELF.fetch("https://example.com/register", { method: "POST", body: form });
+    const row = await env.DB.prepare("SELECT photo_type FROM students WHERE name = 'Photo Type Spoof Test'").first();
+    expect(row?.photo_type).toBe("image/jpeg");
+  });
+
+  it("keeps a real allowed content-type as-is", async () => {
+    const form = new FormData();
+    form.set("name", "Photo Type Real Test");
+    form.set("school", "Test School");
+    form.set("stage", "أولى ثانوي");
+    form.set("phone", "01000000010");
+    form.set("parent_phone", "01111111120");
+    form.set("photo", new File([new Uint8Array([1, 2, 3])], "x.png", { type: "image/png" }));
+
+    await SELF.fetch("https://example.com/register", { method: "POST", body: form });
+    const row = await env.DB.prepare("SELECT photo_type FROM students WHERE name = 'Photo Type Real Test'").first();
+    expect(row?.photo_type).toBe("image/png");
   });
 });
 
@@ -482,6 +527,209 @@ describe("/admin*: in-app Access defense-in-depth (added 2026-07-12, follow-up t
   });
 });
 
+describe("/admin/scan-mark: JSON endpoint backing the /admin/counter hardware-scanner page (added 2026-07-13)", () => {
+  it("rejects with no Cf-Access-Jwt-Assertion header, same as any other /admin* route", async () => {
+    const res = await SELF.fetch("https://example.com/admin/scan-mark", {
+      method: "POST", body: "student=1", headers: { "Content-Type": "application/x-www-form-urlencoded" }
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("no longer accepts GET — a mutating GET was CSRF-able (claude-review, PR #10 finding #2)", async () => {
+    const res = await adminFetch("https://example.com/admin/scan-mark?student=1");
+    expect(res.status).toBe(404);
+  });
+
+  it("returns not_found for an unknown id", async () => {
+    const res = await scanMarkFetch(999999);
+    expect(await res.json()).toEqual({ result: "not_found" });
+  });
+
+  it("returns pending for an unapproved student and records no attendance", async () => {
+    const id = await insertStudent({ name: "Counter Pending Test", status: "pending" });
+    const res = await scanMarkFetch(id);
+    expect(await res.json()).toEqual({ result: "pending", name: "Counter Pending Test" });
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE student_id = ?").bind(id).first();
+    expect(count?.n).toBe(0);
+  });
+
+  it("marks attendance on first scan, then reports already on a second scan same day (and includes a live running count, added 2026-07-14)", async () => {
+    const id = await insertStudent({ name: "Counter Marked Test", status: "approved" });
+    const first = await scanMarkFetch(id);
+    // count is the global (ungrouped) today-total, which earlier tests in this
+    // shared-state file also contribute to — check it's a real number, not an
+    // exact value tied to file-execution order.
+    expect(await first.json()).toEqual({ result: "marked", name: "Counter Marked Test", stage: "", photoUrl: null, count: expect.any(Number) });
+    const second = await scanMarkFetch(id);
+    expect(await second.json()).toEqual({ result: "already", name: "Counter Marked Test", stage: "", photoUrl: null, count: expect.any(Number) });
+  });
+
+  it("scopes the live count to the pinned group, isolated from other groups/ungrouped scans", async () => {
+    const { meta } = await env.DB.prepare("INSERT INTO groups (teacher_name, subject, active) VALUES ('أ. عداد', 'math', 1)").run();
+    const groupId = meta.last_row_id;
+    const s1 = await insertStudent({ name: "Count Scope 1", status: "approved" });
+    const s2 = await insertStudent({ name: "Count Scope 2", status: "approved" });
+    const r1 = await (await scanMarkFetch(s1, groupId)).json() as any;
+    expect(r1.count).toBe(1);
+    const r2 = await (await scanMarkFetch(s2, groupId)).json() as any;
+    expect(r2.count).toBe(2);
+  });
+
+  it("rejects scanning against a deactivated group instead of recording attendance (claude-review, PR #10 finding #3)", async () => {
+    const { meta } = await env.DB.prepare("INSERT INTO groups (teacher_name, subject, active) VALUES ('أ. متوقف', 'math', 0)").run();
+    const id = await insertStudent({ name: "Inactive Group Scan Test", status: "approved" });
+    const res = await (await scanMarkFetch(id, meta.last_row_id)).json() as any;
+    expect(res.result).toBe("invalid_group");
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE student_id = ?").bind(id).first();
+    expect(count?.n).toBe(0);
+  });
+});
+
+describe("scan confirmation carries richer identity + room data (added 2026-07-14)", () => {
+  it("includes stage in the scan-mark response for identity confirmation", async () => {
+    const id = await insertStudent({ name: "Stage Scan Test", status: "approved", stage: "تالتة ثانوي" });
+    const json = await (await scanMarkFetch(id)).json() as any;
+    expect(json.stage).toBe("تالتة ثانوي");
+  });
+
+  it("includes a photoUrl for a student with a stored photo, and null for one without", async () => {
+    const idWithPhoto = await insertStudent({ name: "Photo Scan Test", status: "approved" });
+    await env.DB.prepare("UPDATE students SET photo = ?, photo_type = 'image/jpeg' WHERE id = ?")
+      .bind(new Uint8Array([1, 2, 3]).buffer, idWithPhoto).run();
+    const withPhoto = await (await scanMarkFetch(idWithPhoto)).json() as any;
+    expect(withPhoto.photoUrl).toBe(`/admin/students/${idWithPhoto}/photo`);
+
+    const idNoPhoto = await insertStudent({ name: "No Photo Scan Test", status: "approved" });
+    const noPhoto = await (await scanMarkFetch(idNoPhoto)).json() as any;
+    expect(noPhoto.photoUrl).toBeNull();
+  });
+
+  it("serves the stored photo bytes at /admin/students/:id/photo, and 404s when there's none", async () => {
+    const id = await insertStudent({ name: "Photo Bytes Test", status: "approved" });
+    await env.DB.prepare("UPDATE students SET photo = ?, photo_type = 'image/png' WHERE id = ?")
+      .bind(new Uint8Array([9, 9, 9]).buffer, id).run();
+    const res = await adminFetch(`https://example.com/admin/students/${id}/photo`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/png");
+
+    const idNoPhoto = await insertStudent({ name: "No Photo Bytes Test", status: "approved" });
+    const res2 = await adminFetch(`https://example.com/admin/students/${idNoPhoto}/photo`);
+    expect(res2.status).toBe(404);
+  });
+
+  it("attaches roomName from the group's assigned room on a grouped scan", async () => {
+    const { meta: roomMeta } = await env.DB.prepare("INSERT INTO rooms (name) VALUES ('قاعة 1')").run();
+    const { meta: groupMeta } = await env.DB.prepare(
+      "INSERT INTO groups (teacher_name, subject, active, room_id) VALUES ('أ. روم تيست', 'math', 1, ?)"
+    ).bind(roomMeta.last_row_id).run();
+    const id = await insertStudent({ name: "Room Scan Test", status: "approved" });
+    const res = await (await scanMarkFetch(id, groupMeta.last_row_id)).json() as any;
+    expect(res.roomName).toBe("قاعة 1");
+  });
+
+  it("names the room in the /admin/counter pinned banner", async () => {
+    const { meta: roomMeta } = await env.DB.prepare("INSERT INTO rooms (name) VALUES ('قاعة 2')").run();
+    const { meta: groupMeta } = await env.DB.prepare(
+      "INSERT INTO groups (teacher_name, subject, active, room_id) VALUES ('أ. بانر تيست', 'math', 1, ?)"
+    ).bind(roomMeta.last_row_id).run();
+    const html = await (await adminFetch(`https://example.com/admin/counter?group=${groupMeta.last_row_id}`)).text();
+    expect(html).toContain("قاعة 2");
+  });
+
+  it("shows the room name next to a grouped student's row on /admin/today", async () => {
+    const { meta: roomMeta } = await env.DB.prepare("INSERT INTO rooms (name) VALUES ('قاعة 3')").run();
+    const { meta: groupMeta } = await env.DB.prepare(
+      "INSERT INTO groups (teacher_name, subject, active, room_id) VALUES ('أ. تودي تيست', 'math', 1, ?)"
+    ).bind(roomMeta.last_row_id).run();
+    const id = await insertStudent({ name: "Today Room Test", status: "approved" });
+    await scanMarkFetch(id, groupMeta.last_row_id);
+    const html = await (await adminFetch("https://example.com/admin/today")).text();
+    const cardStart = html.indexOf("Today Room Test");
+    const cardEnd = html.indexOf("</div></div>", cardStart);
+    expect(html.slice(cardStart, cardEnd)).toContain("قاعة 3");
+  });
+
+  it("shows the room name in the /admin/attendance per-group header", async () => {
+    const { meta: roomMeta } = await env.DB.prepare("INSERT INTO rooms (name) VALUES ('قاعة 4')").run();
+    const { meta: groupMeta } = await env.DB.prepare(
+      "INSERT INTO groups (teacher_name, subject, active, room_id) VALUES ('أ. اتيندنس تيست', 'math', 1, ?)"
+    ).bind(roomMeta.last_row_id).run();
+    const html = await (await adminFetch(`https://example.com/admin/attendance?group=${groupMeta.last_row_id}`)).text();
+    expect(html).toContain("قاعة 4");
+  });
+
+  it("the counter page renders a recently-scanned table for a student marked into the pinned group", async () => {
+    const { meta: groupMeta } = await env.DB.prepare(
+      "INSERT INTO groups (teacher_name, subject, active) VALUES ('أ. ريسنت تيست', 'math', 1)"
+    ).run();
+    const id = await insertStudent({ name: "Recent Scan Test", status: "approved", stage: "أولى ثانوي" });
+    await scanMarkFetch(id, groupMeta.last_row_id);
+    const html = await (await adminFetch(`https://example.com/admin/counter?group=${groupMeta.last_row_id}`)).text();
+    expect(html).toContain('id="counter-recent-body"');
+    expect(html).toContain("Recent Scan Test");
+    expect(html).toContain("أولى ثانوي");
+  });
+
+  it("isolates the recently-scanned table per group — a scan in one group doesn't show up when pinned to another", async () => {
+    const { meta: groupAMeta } = await env.DB.prepare(
+      "INSERT INTO groups (teacher_name, subject, active) VALUES ('أ. ايزوليشن ا', 'math', 1)"
+    ).run();
+    const { meta: groupBMeta } = await env.DB.prepare(
+      "INSERT INTO groups (teacher_name, subject, active) VALUES ('أ. ايزوليشن ب', 'math', 1)"
+    ).run();
+    const id = await insertStudent({ name: "Isolation Scan Test", status: "approved" });
+    await scanMarkFetch(id, groupAMeta.last_row_id);
+    const htmlB = await (await adminFetch(`https://example.com/admin/counter?group=${groupBMeta.last_row_id}`)).text();
+    expect(htmlB).not.toContain("Isolation Scan Test");
+  });
+});
+
+describe("/admin/counter: hardware-scanner kiosk page (added 2026-07-13)", () => {
+  it("rejects with no Cf-Access-Jwt-Assertion header", async () => {
+    const res = await SELF.fetch("https://example.com/admin/counter");
+    expect(res.status).toBe(403);
+  });
+
+  // 2026-07-14: a bare /admin/counter hit no longer jumps straight into scan
+  // mode — it shows a group picker first, per Hazem's "make sure whoever's
+  // scanning knows what's going on where." The scan UI now needs either a
+  // real ?group=ID or an explicit ?general=1 opt-in.
+  it("shows a group picker (not the scan input) on a bare hit with no group chosen yet", async () => {
+    const res = await adminFetch("https://example.com/admin/counter");
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).not.toContain('id="counter-input"');
+    expect(html).toContain("امسح عام من غير مجموعة"); // the explicit general-mode opt-out link
+  });
+
+  it("renders the always-focused scan input once a group is picked", async () => {
+    const { meta } = await env.DB.prepare("INSERT INTO groups (teacher_name, subject, active) VALUES ('أ. سكانر', 'math', 1)").run();
+    const res = await adminFetch(`https://example.com/admin/counter?group=${meta.last_row_id}`);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('id="counter-input"');
+  });
+
+  it("renders the scan input in explicit general (unpinned) mode", async () => {
+    const res = await adminFetch("https://example.com/admin/counter?general=1");
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('id="counter-input"');
+  });
+
+  // Regression (reported by Hazem clicking through in a real browser: "the page
+  // goes away"): .counter-input had no explicit width, so it inherited the
+  // global input{width:100%} rule. Being position:absolute with no positioned
+  // ancestor, that 100% resolved against the initial containing block and blew
+  // the whole page out to ~2400px wide, pushing all visible content off-screen.
+  it("gives .counter-input an explicit width instead of inheriting the global input{width:100%} rule", async () => {
+    const res = await adminFetch("https://example.com/admin/counter");
+    const html = await res.text();
+    const rule = html.match(/\.counter-input\{[^}]*\}/)?.[0] || "";
+    expect(rule).toMatch(/width:\s*1px/);
+  });
+});
+
 describe("/admin/dashboard: owner-only server-side gate (found by manual review 2026-07-14, forbiddenRole() was dead code)", () => {
   it("rejects a clerk-role staff member with 403, not just hiding the nav link", async () => {
     const res = await clerkFetch("https://example.com/admin/dashboard");
@@ -648,6 +896,92 @@ describe("html`` tagged template (added 2026-07-12, for future render functions)
   it("escapes every item in an interpolated array and joins them", () => {
     const out = html`<ul>${["<b>a</b>", "b"]}</ul>`;
     expect(out).toBe("<ul>&lt;b&gt;a&lt;/b&gt;b</ul>");
+  });
+});
+
+describe("/scan + /admin/scan-mark: per-session (group-scoped) attendance (added 2026-07-13, migration 0010_attendance_group.sql)", () => {
+  async function makeGroup(teacherName: string) {
+    const { meta } = await env.DB.prepare(
+      "INSERT INTO groups (teacher_name, subject, active) VALUES (?, 'math', 1)"
+    ).bind(teacherName).run();
+    return meta.last_row_id as number;
+  }
+
+  it("scanning into two different groups the same day records two rows", async () => {
+    const id = await insertStudent({ name: "Two Groups Test", status: "approved" });
+    const g1 = await makeGroup("أ. أول");
+    const g2 = await makeGroup("أ. تاني");
+
+    await SELF.fetch(`https://example.com/scan?student=${id}&group=${g1}`);
+    await SELF.fetch(`https://example.com/scan?student=${id}&group=${g2}`);
+
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE student_id = ?").bind(id).first();
+    expect(count?.n).toBe(2);
+  });
+
+  it("scanning the same group twice the same day still dedupes to one row", async () => {
+    const id = await insertStudent({ name: "Same Group Twice Test", status: "approved" });
+    const g1 = await makeGroup("أ. تالت");
+
+    await SELF.fetch(`https://example.com/scan?student=${id}&group=${g1}`);
+    const second = await SELF.fetch(`https://example.com/scan?student=${id}&group=${g1}`);
+    const secondJson = await SELF.fetch("https://example.com/admin/scan-mark", {
+      method: "POST", body: `student=${id}&group=${g1}`,
+      headers: { "Cf-Access-Jwt-Assertion": "test", "Content-Type": "application/x-www-form-urlencoded" }
+    }).then(r => r.json()) as any;
+
+    expect(second.status).toBe(200);
+    expect(secondJson.result).toBe("already");
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE student_id = ? AND group_id = ?").bind(id, g1).first();
+    expect(count?.n).toBe(1);
+  });
+
+  it("snapshots the group's teacher_name onto the attendance row at scan time", async () => {
+    const id = await insertStudent({ name: "Snapshot Test", status: "approved" });
+    const g1 = await makeGroup("أ. سناب شوت");
+    await SELF.fetch(`https://example.com/scan?student=${id}&group=${g1}`);
+    const row = await env.DB.prepare("SELECT teacher_name FROM attendance WHERE student_id = ?").bind(id).first();
+    expect(row?.teacher_name).toBe("أ. سناب شوت");
+  });
+
+  it("a grouped scan and a later ungrouped scan for the same student the same day are independent (regression: NULL group_id isn't covered by the unique index, guarded in code)", async () => {
+    const id = await insertStudent({ name: "Mixed Scan Test", status: "approved" });
+    const g1 = await makeGroup("أ. مختلط");
+    await SELF.fetch(`https://example.com/scan?student=${id}&group=${g1}`);
+    await SELF.fetch(`https://example.com/scan?student=${id}`);
+    await SELF.fetch(`https://example.com/scan?student=${id}`); // second ungrouped scan same day — must still dedupe
+
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE student_id = ?").bind(id).first();
+    expect(count?.n).toBe(2); // one grouped + one ungrouped, not three
+  });
+});
+
+describe("/admin/attendance: per-group report (added 2026-07-13)", () => {
+  it("blocks unauthenticated access", async () => {
+    const res = await SELF.fetch("https://example.com/admin/attendance");
+    expect(res.status).toBe(403);
+  });
+
+  it("lists an enrolled student as absent when they haven't scanned in, and present after they do", async () => {
+    const { meta } = await env.DB.prepare(
+      "INSERT INTO groups (teacher_name, subject, active) VALUES ('أ. ريبورت', 'math', 1)"
+    ).run();
+    const groupId = meta.last_row_id;
+    const studentId = await insertStudent({ name: "Report Test", status: "approved" });
+    await env.DB.prepare(
+      "INSERT INTO bookings (student_id, subject, teacher_name, amount, group_id, status) VALUES (?, 'math', 'أ. ريبورت', 300, ?, 'active')"
+    ).bind(studentId, groupId).run();
+
+    const before = await adminFetch(`https://example.com/admin/attendance?group=${groupId}`);
+    const beforeHtml = await before.text();
+    expect(beforeHtml).toContain("Report Test");
+    expect(beforeHtml).toContain("0/1");
+
+    await SELF.fetch(`https://example.com/scan?student=${studentId}&group=${groupId}`);
+
+    const after = await adminFetch(`https://example.com/admin/attendance?group=${groupId}`);
+    const afterHtml = await after.text();
+    expect(afterHtml).toContain("1/1");
   });
 });
 

@@ -1354,6 +1354,13 @@ export default {
     // confirmation (and anything else that just needs a small identity thumbnail)
     // can reference an <img src> instead of every scan JSON response embedding a
     // full base64 blob — a scan already fires often; keep that payload small.
+    const studentPhotoMatch = url.pathname.match(/^\/admin\/students\/(\d+)\/photo$/);
+    if (studentPhotoMatch && request.method === "GET") {
+      const student = await env.DB.prepare("SELECT photo, photo_type FROM students WHERE id = ?").bind(studentPhotoMatch[1]).first();
+      if (!student || !student.photo) return new Response("", { status: 404 });
+      return new Response(student.photo, { headers: { "content-type": student.photo_type || "image/jpeg" } });
+    }
+
     // Deliberately not owner-gated (claude-review, PR #8, asked to confirm this
     // wasn't an oversight): balance/payment recording here is a single
     // student's day-to-day front-desk transaction, not a business-wide
@@ -1800,7 +1807,14 @@ export default {
       let photoBuf = null, photoType = null;
       if (photoFile && typeof photoFile === "object" && photoFile.size > 0) {
         photoBuf = await photoFile.arrayBuffer();
-        photoType = photoFile.type || "image/jpeg";
+        // Whitelisted, not trusted verbatim from the client (claude-review,
+        // PR #10 finding #1) — an anonymous /register submitter could otherwise
+        // set an arbitrary content-type (e.g. text/html) on the stored bytes,
+        // which /admin/students/:id/photo would later serve back with that
+        // same attacker-chosen type — stored XSS if a staff member opens the
+        // photo URL directly instead of via an <img> tag.
+        const ALLOWED_PHOTO_TYPES = ["image/jpeg", "image/png", "image/webp"];
+        photoType = ALLOWED_PHOTO_TYPES.includes(photoFile.type) ? photoFile.type : "image/jpeg";
       }
       const inserted = await env.DB.prepare(
         `INSERT INTO students (name, class, school, stage, phone, email, subjects, parent_phone, track, father_phone, mother_phone, home_phone, address, photo, photo_type, status)
@@ -1858,6 +1872,191 @@ export default {
     // USB scanner at the front-desk laptop, via /admin/scan-mark below) — one
     // place for the lookup + approval-gate + dedup insert so both flows can
     // never drift on the actual attendance-marking rule.
+    // POST, not GET (claude-review, PR #10 finding #2) — this mutates the
+    // database (inserts an attendance row), and the CF Access session is
+    // cookie-based, so a GET with side effects was CSRF-able (e.g. an <img
+    // src="...scan-mark?student=123"> on any page a logged-in staff member
+    // visits would silently mark a student present).
+    if (url.pathname === "/admin/scan-mark" && request.method === "POST") {
+      const form = await request.formData();
+      const groupParam = parseInt((form.get("group") || "").toString(), 10);
+      const hasGroup = Number.isFinite(groupParam);
+      const r = await markAttendance(env, (form.get("student") || "").toString(), hasGroup ? groupParam : null);
+      // Live running count for the counter kiosk, so whoever's scanning always
+      // knows how many have come through today for this class (or overall, if
+      // scanning unpinned) — server-truth on every scan, not a client tally
+      // that could drift on page reload or a second device scanning the same
+      // group. Only attached for real attendance outcomes (marked/already) —
+      // not_found/pending responses stay exactly as before.
+      if (r.result === "marked" || r.result === "already") {
+        const countRow = hasGroup
+          ? await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE group_id = ? AND date(scanned_at) = date('now')").bind(groupParam).first()
+          : await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE group_id IS NULL AND date(scanned_at) = date('now')").first();
+        r.count = countRow.n;
+      }
+      return new Response(JSON.stringify(r), { headers: { "content-type": "application/json" } });
+    }
+
+    // Front-desk laptop + a plug-in USB/handheld QR scanner (keyboard-emulating
+    // "wedge" mode, the standard for these devices — no driver, types the QR's
+    // decoded text + Enter into whatever has focus). This page keeps a single
+    // input focused at all times so staff never have to click anything between
+    // scans; each scan POSTs to /admin/scan-mark and the result banner updates
+    // in place. QR payload is the full /scan?student=ID URL (same one already
+    // encoded for the phone-camera flow) — the id is pulled out of it here so
+    // the QR format never has to change.
+    if (url.pathname === "/admin/counter" && request.method === "GET") {
+      const groupParam = parseInt(url.searchParams.get("group") || "", 10);
+      // room_name joined in here so the pinned banner, the confirmation card,
+      // and the recent-scans table can all name the actual room — with several
+      // lecture halls (1-4) potentially scanning at once, "just a name and a
+      // time" isn't enough to tell two concurrent scans apart at a glance.
+      // active = 1 filter (claude-review, PR #10 finding #3) — a stale or
+      // bookmarked ?group=ID for a deactivated group could otherwise still be
+      // pinned and used to record attendance, silently bypassing the
+      // deactivation toggle on /admin/groups.
+      const pinnedGroup = Number.isFinite(groupParam)
+        ? await env.DB.prepare(
+            `SELECT g.id, g.teacher_name, g.subject, g.day, g.time, r.name AS room_name
+             FROM groups g LEFT JOIN rooms r ON r.id = g.room_id WHERE g.id = ? AND g.active = 1`
+          ).bind(groupParam).first()
+        : null;
+      // No group in the URL and none picked yet — offer a lightweight picker
+      // right here (mirrors /admin/attendance's picker) instead of sending
+      // whoever's about to scan to the full groups-management page. Answers
+      // Hazem's "make sure they know what's going on where" directly: you pick
+      // your class before you start scanning, not after.
+      let pinnedBanner;
+      if (pinnedGroup) {
+        const roomBadge = pinnedGroup.room_name ? ` · 🚪 ${escapeHtml(pinnedGroup.room_name)}` : "";
+        pinnedBanner = `<p class="counter-pinned">🗂️ ${escapeHtml(pinnedGroup.teacher_name)} — ${subjectsDisplay("ar", pinnedGroup.subject)} · ${escapeHtml([pinnedGroup.day, pinnedGroup.time].filter(Boolean).join(" "))}${roomBadge} <a href="/admin/counter">(إلغاء التثبيت)</a></p>`;
+      } else if (Number.isFinite(groupParam)) {
+        pinnedBanner = `<p class="counter-pinned">المجموعة دي مش موجودة. <a href="/admin/counter">اختار تاني</a></p>`;
+      } else {
+        const activeGroups = await getGroupsWithSeats(env, { activeOnly: true });
+        const picker = activeGroups.length
+          ? `<div class="pending-actions" style="justify-content:center;flex-wrap:wrap">${activeGroups.map(g =>
+              `<a href="/admin/counter?group=${g.id}"><button type="button">${escapeHtml(g.teacher_name)} — ${subjectsDisplay("ar", g.subject)}</button></a>`
+            ).join("")}</div>`
+          : "";
+        pinnedBanner = `<p class="counter-pinned">اختار المجموعة اللي هتمسح لها، أو <a href="/admin/counter?general=1">امسح عام من غير مجموعة</a>.</p>${picker}`;
+      }
+      const isGeneralMode = !pinnedGroup && url.searchParams.get("general") === "1";
+      const showScanUi = pinnedGroup || isGeneralMode;
+      const initialCount = showScanUi
+        ? (pinnedGroup
+            ? await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE group_id = ? AND date(scanned_at) = date('now')").bind(pinnedGroup.id).first()
+            : await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE group_id IS NULL AND date(scanned_at) = date('now')").first())
+        : { n: 0 };
+      // Recently-scanned table (2026-07-14): staff asked to see who just came
+      // through, not just a running number — scoped to this counter's own
+      // context (its pinned group/room, or general/ungrouped), same as the count above.
+      const recentScans = showScanUi
+        ? await env.DB.prepare(
+            pinnedGroup
+              ? `SELECT s.id, s.name, s.stage, s.class, a.scanned_at FROM attendance a JOIN students s ON s.id = a.student_id
+                 WHERE a.group_id = ? AND date(a.scanned_at) = date('now') ORDER BY a.scanned_at DESC LIMIT 10`
+              : `SELECT s.id, s.name, s.stage, s.class, a.scanned_at FROM attendance a JOIN students s ON s.id = a.student_id
+                 WHERE a.group_id IS NULL AND date(a.scanned_at) = date('now') ORDER BY a.scanned_at DESC LIMIT 10`
+          ).bind(...(pinnedGroup ? [pinnedGroup.id] : [])).all()
+        : { results: [] };
+      const recentRowsHtml = recentScans.results.map(r =>
+        `<tr><td><a href="/admin/students/${r.id}/estamara">${escapeHtml(r.name)}</a></td><td>${escapeHtml(r.stage || r.class || "")}</td><td>${escapeHtml(r.scanned_at)}</td></tr>`
+      ).join("");
+      const body = `<style>
+.counter-wrap{max-width:480px;margin:0 auto;text-align:center}
+.counter-pinned{font-size:14px;color:var(--muted)}
+.counter-input{opacity:0;position:absolute;pointer-events:none;width:1px;padding:0;margin:0;border:0}
+.counter-status{border:3px solid var(--line);border-radius:16px;padding:32px 20px;font-size:20px;min-height:120px;display:flex;align-items:center;justify-content:center;gap:14px}
+.counter-status.ok{border-color:#1F9D55;background:#F0FBF4}
+.counter-status.warn{border-color:var(--red);background:#FFF5F5}
+.counter-count{font-size:15px;color:var(--muted);margin-top:12px}
+.counter-photo{width:48px;height:48px;border-radius:50%;object-fit:cover;flex-shrink:0}
+.counter-recent{width:100%;border-collapse:collapse;margin-top:24px;font-size:14px;text-align:start}
+.counter-recent th,.counter-recent td{border-bottom:1px solid var(--line);padding:8px 6px;text-align:start}
+.counter-recent th{color:var(--muted);font-weight:600}
+</style>
+<div class="counter-wrap">
+  ${pinnedBanner}
+  ${showScanUi ? `
+  <p>وجّه سكانر الاستقبال على كود QR بتاع الطالب — الشاشة دي مش محتاجة أي دوسة بينهم.</p>
+  <div id="counter-status" class="counter-status"><span>جاهز للمسح</span></div>
+  <p class="counter-count">عدد اللي حضروا النهاردة: <strong id="counter-count">${initialCount.n}</strong></p>
+  <input id="counter-input" class="counter-input" autocomplete="off" data-group="${pinnedGroup ? pinnedGroup.id : ""}">
+  <table class="counter-recent">
+    <thead><tr><th>الاسم</th><th>الصف</th><th>الوقت</th></tr></thead>
+    <tbody id="counter-recent-body">${recentRowsHtml}</tbody>
+  </table>
+  <p class="empty" id="counter-recent-empty" ${recentScans.results.length ? "hidden" : ""}>محدش اتسجل لسه.</p>
+  <script>
+  (function(){
+    var input = document.getElementById("counter-input");
+    var status = document.getElementById("counter-status");
+    var countEl = document.getElementById("counter-count");
+    var recentBody = document.getElementById("counter-recent-body");
+    var recentEmpty = document.getElementById("counter-recent-empty");
+    function focusInput(){ input.focus(); }
+    focusInput();
+    document.addEventListener("click", focusInput);
+    input.addEventListener("blur", function(){ setTimeout(focusInput, 50); });
+    // textContent throughout (never innerHTML with a concatenated student
+    // name) — a scan result carries a real DB value we don't control the
+    // shape of, same reasoning as the escapeHtml() convention server-side.
+    function setStatus(cls, photoUrl, text){
+      status.className = "counter-status " + cls;
+      status.textContent = "";
+      if (photoUrl) {
+        var img = document.createElement("img");
+        img.className = "counter-photo";
+        img.src = photoUrl;
+        status.appendChild(img);
+      }
+      var span = document.createElement("span");
+      span.textContent = text;
+      status.appendChild(span);
+    }
+    function prependRecent(r){
+      recentEmpty.hidden = true;
+      var tr = document.createElement("tr");
+      [r.name, r.stage || "", new Date().toLocaleTimeString("ar-EG")].forEach(function(v){
+        var td = document.createElement("td");
+        td.textContent = v;
+        tr.appendChild(td);
+      });
+      recentBody.insertBefore(tr, recentBody.firstChild);
+      while (recentBody.children.length > 10) recentBody.removeChild(recentBody.lastChild);
+    }
+    input.addEventListener("keydown", function(e){
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      var raw = input.value.trim();
+      input.value = "";
+      var id = null;
+      try { id = new URL(raw).searchParams.get("student"); } catch (err) {}
+      if (!id) { var m = raw.match(/student=(\\d+)/); if (m) id = m[1]; }
+      if (!id && /^\\d+$/.test(raw)) id = raw;
+      if (!id) { setStatus("warn", null, "كود مش معروف"); return; }
+      var body = "student=" + encodeURIComponent(id);
+      if (input.dataset.group) body += "&group=" + encodeURIComponent(input.dataset.group);
+      fetch("/admin/scan-mark", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: body })
+        .then(function(r){ return r.json(); })
+        .then(function(r){
+          if (typeof r.count === "number") countEl.textContent = r.count;
+          if (r.result === "not_found") { setStatus("warn", null, "الطالب غير موجود"); return; }
+          if (r.result === "pending") { setStatus("warn", null, r.name + " — التسجيل أو الدفع لسه معلّق"); return; }
+          if (r.result === "invalid_group") { setStatus("warn", null, "المجموعة دي مش متاحة للمسح دلوقتي"); return; }
+          var label = r.name + (r.stage ? " · " + r.stage : "") + (r.result === "marked" ? " — تم تسجيل الحضور ✅" : " — مسجل حضور بالفعل اليوم");
+          setStatus("ok", r.photoUrl, label);
+          prependRecent(r);
+        })
+        .catch(function(){ setStatus("warn", null, "في مشكلة في الاتصال — جرب تاني"); });
+    });
+  })();
+  </script>` : ""}
+</div>`;
+      return new Response(page("سكانر الاستقبال", body, { isOwner: roleAllowed(staffRole, ["owner"]) }), { headers: { "content-type": "text/html;charset=utf-8" } });
+    }
+
     if (url.pathname === "/admin/today" && request.method === "GET") {
       // room_name surfaces which of the (potentially several concurrent)
       // lecture halls each scan belongs to — this view flattens every group
@@ -1883,6 +2082,46 @@ export default {
     // Per-group, per-date view: enrolled (active bookings on this group) crossed
     // with who actually scanned in on that date — the "who's missing" report the
     // old CenterStudent app never had (it only tracked aggregate session counts).
+    if (url.pathname === "/admin/attendance" && request.method === "GET") {
+      const lang = langOf(url);
+      const t = ATTENDANCE_I18N[lang];
+      const langQs = lang === "en" ? "?lang=en" : "";
+      const groupId = parseInt(url.searchParams.get("group") || "", 10);
+      const date = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("date") || "") ? url.searchParams.get("date") : new Date().toISOString().slice(0, 10);
+      if (!Number.isFinite(groupId)) {
+        const groups = await getGroupsWithSeats(env, { activeOnly: true });
+        const links = groups.map(g => `<a href="/admin/attendance?group=${g.id}${langQs.replace("?", "&")}"><button type="button">${escapeHtml(g.teacher_name)} — ${subjectsDisplay(lang, g.subject)}</button></a>`).join(" ");
+        return new Response(page(t.title, `<p>${t.pickGroup}</p><div class="pending-actions">${links}</div>`, { lang, toggleHref: toggleHref(url, lang), isOwner: roleAllowed(staffRole, ["owner"]) }), { headers: { "content-type": "text/html;charset=utf-8" } });
+      }
+      const group = await env.DB.prepare(
+        `SELECT g.id, g.teacher_name, g.subject, g.day, g.time, r.name AS room_name
+         FROM groups g LEFT JOIN rooms r ON r.id = g.room_id WHERE g.id = ?`
+      ).bind(groupId).first();
+      const { results: enrolled } = await env.DB.prepare(
+        `SELECT s.id, s.name, a.scanned_at
+         FROM bookings b
+         JOIN students s ON s.id = b.student_id
+         LEFT JOIN attendance a ON a.student_id = s.id AND a.group_id = b.group_id AND date(a.scanned_at) = ?
+         WHERE b.group_id = ? AND b.status = 'active'
+         ORDER BY (a.scanned_at IS NULL) DESC, s.name`
+      ).bind(date, groupId).all();
+      const presentCount = enrolled.filter(r => r.scanned_at).length;
+      const rows = enrolled.map((r, i) => `<div class="card ${i % 2 === 0 ? "stripe-a" : "stripe-b"}"><div>
+        <a href="/admin/students/${r.id}/estamara"><strong>${escapeHtml(r.name)}</strong></a><br>
+        <small>${r.scanned_at ? `${t.present} — ${r.scanned_at}` : `<span style="color:var(--red)">${t.absent}</span>`}</small>
+      </div></div>`).join("") || `<p class="empty">${t.empty}</p>`;
+      const header = group
+        ? `<p><strong>${escapeHtml(group.teacher_name)} — ${subjectsDisplay(lang, group.subject)}</strong> · ${escapeHtml([group.day, group.time].filter(Boolean).join(" "))}${group.room_name ? ` · 🚪 ${escapeHtml(group.room_name)}` : ""}<br>
+           <form method="GET" style="display:inline-flex;gap:8px;align-items:center;margin-top:8px">
+             <input type="hidden" name="group" value="${groupId}">
+             <input type="date" name="date" value="${date}">
+             <button type="submit">🔄</button>
+           </form>
+           ${presentCount}/${enrolled.length} ${t.present}</p>`
+        : "";
+      return new Response(page(t.title, header + rows, { lang, toggleHref: toggleHref(url, lang), isOwner: roleAllowed(staffRole, ["owner"]) }), { headers: { "content-type": "text/html;charset=utf-8" } });
+    }
+
     if (url.pathname === "/admin/print" && request.method === "GET") {
       const { results } = await env.DB.prepare("SELECT name, class FROM students ORDER BY name").all();
       const rows = results.map((s, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(s.name)}</td><td>${escapeHtml(s.class || "")}</td><td></td><td></td><td></td><td><span class="roster-box"></span></td></tr>`).join("")
