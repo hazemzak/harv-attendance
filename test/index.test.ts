@@ -1437,6 +1437,22 @@ describe("/admin/teachers/:id/settlement: payout math (added 2026-07-13)", () =>
     expect(row?.note).toContain("January");
   });
 
+  it("the settlement page's default date range matches what /admin/teachers just flagged as owed, not a 'today only' window (claude-review finding #1 on a later PR #12 review round)", async () => {
+    const { teacherId, groupId } = await makeTeacherWithGroup("per_session", 15);
+    const student = await insertStudent({ name: "Settle Range Test", status: "approved" });
+    // 3 days ago — a settlement default of "today" alone would miss this
+    // entirely, even though the list page's "since last payout" range covers it.
+    await env.DB.prepare(
+      "INSERT INTO attendance (student_id, group_id, scanned_at) VALUES (?, ?, datetime('now', '-3 days'))"
+    ).bind(student, groupId).run();
+
+    const listHtml = await (await adminFetch("https://example.com/admin/teachers")).text();
+    expect(listHtml).toContain("15.00");
+
+    const settlementHtml = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`)).text();
+    expect(settlementHtml).toContain("15.00");
+  });
+
   it("a settlement's 'to' date persists as period_to, not the recording timestamp (claude-review finding #2 on PR #12)", async () => {
     const { teacherId } = await makeTeacherWithGroup("per_session", 20);
     const form = new FormData();

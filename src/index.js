@@ -1804,15 +1804,7 @@ export default {
       // finding #4 on PR #12).
       const withStatus = await Promise.all(results.map(async tch => {
         if (!tch.share_type) return { ...tch, needsAttention: true, owed: 0 };
-        // period_to (the period a payout settles) falls back to occurred_at
-        // (when it was recorded) for older rows with no period_to on file.
-        // note LIKE match is escaped since tch.name is free-text staff input,
-        // not a slug — an unescaped % or _ in a name could over-match another
-        // teacher's payout note (claude-review finding #5 on PR #12).
-        const lastPayout = await env.DB.prepare(
-          "SELECT MAX(COALESCE(period_to, occurred_at)) AS d FROM ledger WHERE category = 'teacher_payout' AND note LIKE ? ESCAPE '\\'"
-        ).bind(tch.name.replace(/[%_]/g, "\\$&") + "%").first();
-        const from = lastPayout.d ? lastPayout.d.slice(0, 10) : "2000-01-01";
+        const from = await lastPayoutFrom(env, tch.name);
         const { owed } = await computeTeacherOwed(env, tch.id, tch.name, tch.share_type, tch.share_value, from, today);
         return { ...tch, needsAttention: owed > 0, owed };
       }));
@@ -1865,6 +1857,24 @@ export default {
       }
     };
 
+    // Shared between /admin/teachers' list (which flags "needs attention")
+    // and the settlement GET route's default range — factored out so the two
+    // can never disagree (claude-review finding #1 on a later PR #12 review
+    // round: the settlement link carried no from/to, so its old default of
+    // "today" silently showed a different, usually smaller, owed amount than
+    // what the list just flagged, and submitting it persisted today as the
+    // new payout baseline without the real gap actually being paid).
+    // period_to falls back to occurred_at for older rows with no period_to on
+    // file. note LIKE match is escaped since teacherName is free-text staff
+    // input, not a slug — an unescaped % or _ could over-match another
+    // teacher's payout note (claude-review finding #5 on PR #12).
+    async function lastPayoutFrom(env, teacherName) {
+      const lastPayout = await env.DB.prepare(
+        "SELECT MAX(COALESCE(period_to, occurred_at)) AS d FROM ledger WHERE category = 'teacher_payout' AND note LIKE ? ESCAPE '\\'"
+      ).bind(teacherName.replace(/[%_]/g, "\\$&") + "%").first();
+      return lastPayout.d ? lastPayout.d.slice(0, 10) : "2000-01-01";
+    }
+
     // Owed math: 'per_session' = share_value EGP × attendance rows logged
     // against this teacher's groups in [from, to]. 'percent' = share_value% of
     // cash actually COLLECTED (payments, not billed bookings.amount — claude-review
@@ -1903,8 +1913,8 @@ export default {
       const langQs = lang === "en" ? "?lang=en" : "";
       const teacher = await env.DB.prepare("SELECT id, name, subject, share_type, share_value FROM teachers WHERE id = ?").bind(settlementMatch[1]).first();
       if (!teacher) return new Response("Not found", { status: 404 });
-      const from = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("from") || "") ? url.searchParams.get("from") : new Date().toISOString().slice(0, 10);
-      const to = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("to") || "") ? url.searchParams.get("to") : from;
+      const from = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("from") || "") ? url.searchParams.get("from") : await lastPayoutFrom(env, teacher.name);
+      const to = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("to") || "") ? url.searchParams.get("to") : new Date().toISOString().slice(0, 10);
       const { owed, detail } = await computeTeacherOwed(env, teacher.id, teacher.name, teacher.share_type, teacher.share_value, from, to);
       const shareForm = `<form method="POST" action="/admin/teachers/${teacher.id}/share${langQs}">
         <label>${t.shareType}</label>
