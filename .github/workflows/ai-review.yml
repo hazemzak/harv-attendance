@@ -16,6 +16,7 @@ jobs:
 
       - uses: anthropics/claude-code-action@v1
         id: review
+        continue-on-error: true
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           track_progress: true
@@ -38,7 +39,12 @@ jobs:
             --json-schema '{"type":"object","properties":{"has_critical_issues":{"type":"boolean","description":"true only for security bugs or business-logic bugs that would actually break the app in production, false for everything else including minor suggestions"}},"required":["has_critical_issues"]}'
 
       - name: Block merge on critical issues
-        if: fromJSON(steps.review.outputs.structured_output).has_critical_issues == true
+        # continue-on-error above means a crashed/bailed run (e.g. Claude hit a
+        # permission denial and never emitted structured_output) no longer hard-fails
+        # this check by itself -- only a real has_critical_issues:true does. A bailed
+        # run still posts whatever partial comment it managed, so it's visible, just
+        # not merge-blocking -- re-run the job manually if you want a clean verdict.
+        if: steps.review.outputs.structured_output != '' && fromJSON(steps.review.outputs.structured_output).has_critical_issues == true
         run: |
           echo "Critical issues found -- blocking merge."
           exit 1

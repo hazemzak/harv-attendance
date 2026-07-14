@@ -38,6 +38,9 @@ function scanMarkFetch(student: number | string, group?: number | string) {
   });
 }
 
+// clerkFetch() is defined further down this file (used by the rooms/groups/
+// bookings work) — reused here instead of a second near-identical definition.
+
 async function insertStudent(fields: Record<string, string | null>) {
   const cols = Object.keys(fields);
   const placeholders = cols.map(() => "?").join(",");
@@ -709,6 +712,18 @@ describe("/admin/counter: hardware-scanner kiosk page (added 2026-07-13)", () =>
     const html = await res.text();
     const rule = html.match(/\.counter-input\{[^}]*\}/)?.[0] || "";
     expect(rule).toMatch(/width:\s*1px/);
+  });
+});
+
+describe("/admin/dashboard: owner-only server-side gate (found by manual review 2026-07-14, forbiddenRole() was dead code)", () => {
+  it("rejects a clerk-role staff member with 403, not just hiding the nav link", async () => {
+    const res = await clerkFetch("https://example.com/admin/dashboard");
+    expect(res.status).toBe(403);
+  });
+
+  it("still allows an owner through", async () => {
+    const res = await adminFetch("https://example.com/admin/dashboard");
+    expect(res.status).toBe(200);
   });
 });
 
