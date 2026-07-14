@@ -38,6 +38,9 @@ function scanMarkFetch(student: number | string, group?: number | string) {
   });
 }
 
+// clerkFetch() is defined further down this file (used by the rooms/groups/
+// bookings work) — reused here instead of a second near-identical definition.
+
 async function insertStudent(fields: Record<string, string | null>) {
   const cols = Object.keys(fields);
   const placeholders = cols.map(() => "?").join(",");
