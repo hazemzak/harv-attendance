@@ -13,7 +13,7 @@ ALTER TABLE teachers ADD COLUMN share_value REAL;
 -- separate password system, unlike the old app's hand-rolled `use` table
 -- (a crackable password string sitting in a shared file).
 CREATE TABLE staff (
-  email TEXT PRIMARY KEY,
+  email TEXT PRIMARY KEY COLLATE NOCASE,
   name TEXT,
   role TEXT NOT NULL CHECK (role IN ('owner', 'clerk', 'viewer')),
   active INTEGER NOT NULL DEFAULT 1
