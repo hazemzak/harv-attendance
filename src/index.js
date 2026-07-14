@@ -1869,10 +1869,14 @@ export default {
     // input, not a slug — an unescaped % or _ could over-match another
     // teacher's payout note (claude-review finding #5 on PR #12).
     async function lastPayoutFrom(env, teacherName) {
+      // +1 day (claude-review, PR #12 follow-up round): computeTeacherOwed's
+      // BETWEEN is inclusive on both ends, so returning the last period's
+      // exact end date would let the boundary day get counted — and paid —
+      // twice across two consecutive settlements.
       const lastPayout = await env.DB.prepare(
-        "SELECT MAX(COALESCE(period_to, occurred_at)) AS d FROM ledger WHERE category = 'teacher_payout' AND note LIKE ? ESCAPE '\\'"
+        "SELECT date(MAX(COALESCE(period_to, occurred_at)), '+1 day') AS d FROM ledger WHERE category = 'teacher_payout' AND note LIKE ? ESCAPE '\\'"
       ).bind(teacherName.replace(/[%_]/g, "\\$&") + "%").first();
-      return lastPayout.d ? lastPayout.d.slice(0, 10) : "2000-01-01";
+      return lastPayout.d || "2000-01-01";
     }
 
     // Owed math: 'per_session' = share_value EGP × attendance rows logged

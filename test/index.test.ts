@@ -1453,6 +1453,28 @@ describe("/admin/teachers/:id/settlement: payout math (added 2026-07-13)", () =>
     expect(settlementHtml).toContain("15.00");
   });
 
+  it("the next settlement excludes the day already paid through, instead of double-counting/double-paying it (claude-review, follow-up round on PR #12)", async () => {
+    const { teacherId, groupId } = await makeTeacherWithGroup("per_session", 10);
+    const student = await insertStudent({ name: "Boundary Day Test", status: "approved" });
+    const periodTo = await env.DB.prepare("SELECT date('now', '-2 days') AS d").first();
+    // Attendance on the day the payout below settles through.
+    await env.DB.prepare(
+      "INSERT INTO attendance (student_id, group_id, scanned_at) VALUES (?, ?, datetime('now', '-2 days'))"
+    ).bind(student, groupId).run();
+
+    const payoutForm = new FormData();
+    payoutForm.set("from", "2000-01-01");
+    payoutForm.set("to", periodTo.d as string);
+    payoutForm.set("amount", "10");
+    await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`, { method: "POST", body: payoutForm });
+
+    // A second, later session — the only one the next settlement should count.
+    await env.DB.prepare("INSERT INTO attendance (student_id, group_id) VALUES (?, ?)").bind(student, groupId).run();
+
+    const settlementHtml = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`)).text();
+    expect(settlementHtml).toContain("10.00"); // only the new session — 20.00 would mean the paid day was counted again
+  });
+
   it("a settlement's 'to' date persists as period_to, not the recording timestamp (claude-review finding #2 on PR #12)", async () => {
     const { teacherId } = await makeTeacherWithGroup("per_session", 20);
     const form = new FormData();
