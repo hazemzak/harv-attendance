@@ -1916,18 +1916,30 @@ export default {
       const groupIds = (await env.DB.prepare("SELECT id FROM groups WHERE teacher_id = ? OR (teacher_id IS NULL AND teacher_name = ?)").bind(teacherId, teacherName).all()).results.map(g => g.id);
       if (!groupIds.length) return { owed: 0, detail: 0 };
       const placeholders = groupIds.map(() => "?").join(",");
+      let owed, detail;
       if (shareType === "per_session") {
         const row = await env.DB.prepare(
           `SELECT COUNT(*) AS n FROM attendance WHERE group_id IN (${placeholders}) AND date(scanned_at) BETWEEN ? AND ?`
         ).bind(...groupIds, from, to).first();
-        return { owed: row.n * shareValue, detail: row.n };
+        owed = row.n * shareValue; detail = row.n;
+      } else {
+        const row = await env.DB.prepare(
+          `SELECT COALESCE(SUM(p.amount), 0) AS n FROM payments p
+           JOIN bookings b ON b.id = p.booking_id
+           WHERE b.group_id IN (${placeholders}) AND date(p.created_at) BETWEEN ? AND ?`
+        ).bind(...groupIds, from, to).first();
+        owed = row.n * shareValue / 100; detail = row.n;
       }
-      const row = await env.DB.prepare(
-        `SELECT COALESCE(SUM(p.amount), 0) AS n FROM payments p
-         JOIN bookings b ON b.id = p.booking_id
-         WHERE b.group_id IN (${placeholders}) AND date(p.created_at) BETWEEN ? AND ?`
-      ).bind(...groupIds, from, to).first();
-      return { owed: row.n * shareValue / 100, detail: row.n };
+      // Net out partial payouts already recorded toward this still-open period
+      // (claude-review finding #1, same session): a partial payment leaves
+      // period_to NULL so the period stays open (see lastPayoutFrom/settlement
+      // POST below) -- without subtracting it here, the settlement page keeps
+      // showing the FULL original owed amount forever, risking a real
+      // double-payout if the owner pays the displayed total again.
+      const partial = await env.DB.prepare(
+        "SELECT COALESCE(SUM(amount), 0) AS n FROM ledger WHERE category = 'teacher_payout' AND period_to IS NULL AND date(occurred_at) >= ? AND note LIKE ? ESCAPE '\\'"
+      ).bind(from, teacherName.replace(/[%_]/g, "\\$&") + "%").first();
+      return { owed: Math.max(0, owed - partial.n), detail };
     }
 
     // teachers.id is a TEXT slug (e.g. imported from data/teachers.json), not

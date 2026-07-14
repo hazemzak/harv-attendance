@@ -1500,10 +1500,13 @@ describe("/admin/teachers/:id/settlement: payout math (added 2026-07-13)", () =>
     expect(row?.period_to).toBeNull(); // underpaid -- must not record a closing period_to
 
     // The next settlement (no explicit from/to, so it uses lastPayoutFrom())
-    // must still show the full 40 owed, not 0 or just the new sessions --
-    // both attendance rows are still unsettled since the period never closed.
+    // must show the REMAINING 20 owed (40 total minus the 20 already paid
+    // toward this still-open period), not the full original 40 again --
+    // showing the full amount again would let the owner double-pay the
+    // teacher (claude-review finding #1, this session's continuation).
     const settlementHtml = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`)).text();
-    expect(settlementHtml).toContain("40.00");
+    expect(settlementHtml).toContain("20.00");
+    expect(settlementHtml).not.toContain("40.00");
   });
 
   it("paying at least what's owed does close the period, recording the submitted 'to' as period_to", async () => {
