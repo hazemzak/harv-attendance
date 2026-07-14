@@ -9,7 +9,7 @@
 CREATE TABLE payments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
-  booking_id INTEGER REFERENCES bookings(id),
+  booking_id INTEGER REFERENCES bookings(id) ON DELETE SET NULL,
   amount REAL NOT NULL CHECK (amount >= 0),
   method TEXT,
   note TEXT,
