@@ -1217,6 +1217,18 @@ export default {
       await env.DB.prepare(
         `UPDATE students SET name = ?, school = ?, stage = ?, class = ?, track = ?, phone = ?, email = ?, subjects = ?, payment_method = ?, parent_phone = ?, father_phone = ?, mother_phone = ?, home_phone = ?, address = ?, status = 'approved' WHERE id = ?`
       ).bind(name, school, stage, stage, track, phone, email, subjects, paymentMethod, parentPhone, fatherPhone, motherPhone, homePhone, address, processMatch[1]).run();
+      // group_id validated against real, active groups before it's attached to
+      // a booking (claude-review, PR #8 finding #5) — a stray/mistyped id would
+      // otherwise silently produce an orphaned reference and skew
+      // getGroupsWithSeats()'s enrolled-seat counts. Batched into one query
+      // rather than per-row to avoid N+1 across a student's booking rows.
+      const candidateGroupIds = [...new Set(bookingRows.map(b => b.group_id).filter(id => id !== null))];
+      let validGroupIds = new Set();
+      if (candidateGroupIds.length) {
+        const placeholders = candidateGroupIds.map(() => "?").join(",");
+        const { results } = await env.DB.prepare(`SELECT id FROM groups WHERE id IN (${placeholders}) AND active = 1`).bind(...candidateGroupIds).all();
+        validGroupIds = new Set(results.map(r => r.id));
+      }
       // Re-processing an already-processed estamara replaces its *active* booking
       // rows wholesale rather than trying to diff/merge them — idempotent by design.
       // Scoped to status='active' so a student's dropped-booking history (see
@@ -1227,7 +1239,7 @@ export default {
         env.DB.prepare("DELETE FROM bookings WHERE student_id = ? AND status = 'active'").bind(processMatch[1]),
         ...bookingRows.map(b =>
           env.DB.prepare("INSERT INTO bookings (student_id, subject, teacher_name, schedule, amount, group_id) VALUES (?, ?, ?, ?, ?, ?)")
-            .bind(processMatch[1], b.subject, b.teacher_name, b.schedule, b.amount, b.group_id)
+            .bind(processMatch[1], b.subject, b.teacher_name, b.schedule, b.amount, validGroupIds.has(b.group_id) ? b.group_id : null)
         )
       ]);
       return Response.redirect(url.origin + `/admin/students/${processMatch[1]}/success` + (lang === "en" ? "?lang=en" : ""), 303);

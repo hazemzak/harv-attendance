@@ -630,3 +630,74 @@ describe("roster: one-tap WhatsApp send per row (added 2026-07-14)", () => {
   });
 });
 
+describe("getStudentBalance (claude-review, PR #8 finding #2 — money-facing function with no direct test)", () => {
+  it("balance = active bookings' fees minus discounts minus payments", async () => {
+    const id = await insertStudent({ name: "Balance Unit Test", status: "approved" });
+    await env.DB.prepare(
+      "INSERT INTO bookings (student_id, subject, amount, discount_amount, status) VALUES (?, 'math', 300, 50, 'active')"
+    ).bind(id).run();
+    await env.DB.prepare("INSERT INTO payments (student_id, amount) VALUES (?, 75)").bind(id).run();
+
+    const { owed, paid, balance } = await getStudentBalance(env, id);
+    expect(owed).toBe(250); // 300 - 50 discount
+    expect(paid).toBe(75);
+    expect(balance).toBe(175); // 250 - 75
+  });
+
+  it("a dropped (non-active) booking doesn't count toward owed", async () => {
+    const id = await insertStudent({ name: "Balance Dropped Test", status: "approved" });
+    await env.DB.prepare(
+      "INSERT INTO bookings (student_id, subject, amount, status) VALUES (?, 'math', 300, 'dropped')"
+    ).bind(id).run();
+
+    const { owed, balance } = await getStudentBalance(env, id);
+    expect(owed).toBe(0);
+    expect(balance).toBe(0);
+  });
+});
+
+describe("/admin/students/:id/process: booking group_id validated against real, active groups (claude-review, PR #8 finding #5)", () => {
+  function processForm(overrides = {}) {
+    const form = new FormData();
+    form.set("name", "Group Validation Test");
+    form.set("stage", "أولى ثانوي");
+    form.set("phone", "01000000088");
+    form.set("parent_phone", "01111111199");
+    form.set("b_subject", "math");
+    form.set("b_teacher", "أ. تجربة");
+    form.set("b_schedule", "");
+    form.set("b_amount", "200");
+    for (const [k, v] of Object.entries(overrides)) form.set(k, v as string);
+    return form;
+  }
+
+  it("drops a nonexistent group id instead of attaching an orphaned reference", async () => {
+    const id = await insertStudent({ name: "Group Validation Test", status: "pending" });
+    await adminFetch(`https://example.com/admin/students/${id}/process`, {
+      method: "POST", body: processForm({ b_group: "999999" })
+    });
+    const row = await env.DB.prepare("SELECT group_id FROM bookings WHERE student_id = ?").bind(id).first();
+    expect(row?.group_id).toBeFalsy();
+  });
+
+  it("drops a deactivated group id the same way", async () => {
+    const id = await insertStudent({ name: "Group Validation Test", status: "pending" });
+    const { meta } = await env.DB.prepare("INSERT INTO groups (teacher_name, subject, active) VALUES ('أ. تجربة', 'math', 0)").run();
+    await adminFetch(`https://example.com/admin/students/${id}/process`, {
+      method: "POST", body: processForm({ b_group: String(meta.last_row_id) })
+    });
+    const row = await env.DB.prepare("SELECT group_id FROM bookings WHERE student_id = ?").bind(id).first();
+    expect(row?.group_id).toBeFalsy();
+  });
+
+  it("attaches a real, active group id", async () => {
+    const id = await insertStudent({ name: "Group Validation Test", status: "pending" });
+    const { meta } = await env.DB.prepare("INSERT INTO groups (teacher_name, subject, active) VALUES ('أ. تجربة', 'math', 1)").run();
+    await adminFetch(`https://example.com/admin/students/${id}/process`, {
+      method: "POST", body: processForm({ b_group: String(meta.last_row_id) })
+    });
+    const row = await env.DB.prepare("SELECT group_id FROM bookings WHERE student_id = ?").bind(id).first();
+    expect(row?.group_id).toBe(meta.last_row_id);
+  });
+});
+
