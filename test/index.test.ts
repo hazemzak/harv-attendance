@@ -679,6 +679,45 @@ describe("/admin/groups + /admin/rooms (added 2026-07-13, extracted from the ret
     const row = await env.DB.prepare("SELECT active FROM groups WHERE id = ?").bind(id).first();
     expect(row?.active).toBe(0);
   });
+
+  it("rejects a clerk creating/toggling a room or group — pricing/schedule setup is owner-only (claude-review, PR #9 finding #1)", async () => {
+    const roomForm = new FormData();
+    roomForm.set("name", "قاعة كليرك");
+    expect((await clerkFetch("https://example.com/admin/rooms", { method: "POST", body: roomForm })).status).toBe(403);
+    expect(await env.DB.prepare("SELECT id FROM rooms WHERE name = 'قاعة كليرك'").first()).toBeFalsy();
+
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-clerk-blocked', 'أ. كليرك', 'math')").run();
+    const groupForm = new FormData();
+    groupForm.set("teacher_id", "t-clerk-blocked");
+    groupForm.set("subject", "math");
+    expect((await clerkFetch("https://example.com/admin/groups", { method: "POST", body: groupForm })).status).toBe(403);
+    expect(await env.DB.prepare("SELECT id FROM groups WHERE teacher_name = 'أ. كليرك'").first()).toBeFalsy();
+
+    const { meta } = await env.DB.prepare("INSERT INTO groups (teacher_name, subject, active) VALUES ('أ. تبديل', 'math', 1)").run();
+    expect((await clerkFetch(`https://example.com/admin/groups/${meta.last_row_id}/toggle`, { method: "POST" })).status).toBe(403);
+  });
+
+  it("clamps capacity=0 to null (unlimited-looking) instead of storing it raw — 0 should never be treated as a real cap (claude-review, PR #9 finding #2)", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-cap-zero', 'أ. صفر', 'math')").run();
+    const form = new FormData();
+    form.set("teacher_id", "t-cap-zero");
+    form.set("subject", "math");
+    form.set("capacity", "0");
+    await adminFetch("https://example.com/admin/groups", { method: "POST", body: form });
+    const row = await env.DB.prepare("SELECT capacity FROM groups WHERE teacher_name = 'أ. صفر'").first();
+    expect(row?.capacity).toBeNull();
+  });
+
+  it("doesn't attach a room_id that doesn't exist in the rooms table (claude-review, PR #9 finding #3)", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-bogus-room', 'أ. قاعة وهمية', 'math')").run();
+    const form = new FormData();
+    form.set("teacher_id", "t-bogus-room");
+    form.set("subject", "math");
+    form.set("room_id", "999999");
+    await adminFetch("https://example.com/admin/groups", { method: "POST", body: form });
+    const row = await env.DB.prepare("SELECT room_id FROM groups WHERE teacher_name = 'أ. قاعة وهمية'").first();
+    expect(row?.room_id).toBeNull();
+  });
 });
 
 describe("bookings: group_id linkage + drop/transfer lifecycle (added 2026-07-13)", () => {
@@ -711,6 +750,19 @@ describe("bookings: group_id linkage + drop/transfer lifecycle (added 2026-07-13
     await processForm(id, { b_subject: "math", b_teacher: "أ. حر", b_schedule: "", b_amount: "100" });
     const row = await env.DB.prepare("SELECT group_id FROM bookings WHERE student_id = ?").bind(id).first();
     expect(row?.group_id).toBeFalsy();
+  });
+
+  it("a clerk can drop a booking — day-to-day per-student ops stay clerk-accessible, unlike room/group setup", async () => {
+    const id = await insertStudent({ name: "Clerk Drop Test", status: "approved", subjects: "math" });
+    const { meta } = await env.DB.prepare(
+      "INSERT INTO bookings (student_id, subject, teacher_name, schedule, amount) VALUES (?, 'math', 'أ. كليرك دروب', '', 300)"
+    ).bind(id).run();
+    const form = new FormData();
+    form.set("reason", "test");
+    const res = await clerkFetch(`https://example.com/admin/bookings/${meta.last_row_id}/drop`, { method: "POST", body: form });
+    expect(res.status).toBe(200);
+    const row = await env.DB.prepare("SELECT status FROM bookings WHERE id = ?").bind(meta.last_row_id).first();
+    expect(row?.status).toBe("dropped");
   });
 
   it("dropping a booking excludes it from getBookings/the active total but keeps the row with its reason", async () => {

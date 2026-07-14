@@ -1507,6 +1507,7 @@ export default {
     }
 
     if (url.pathname === "/admin/rooms" && request.method === "POST") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
       const lang = langOf(url);
       const form = await request.formData();
       const name = (form.get("name") || "").toString().trim();
@@ -1514,7 +1515,7 @@ export default {
       const capacity = parseInt((form.get("capacity") || "").toString(), 10);
       if (name) {
         await env.DB.prepare("INSERT INTO rooms (name, floor, capacity) VALUES (?, ?, ?)")
-          .bind(name, floor, Number.isFinite(capacity) ? capacity : null).run();
+          .bind(name, floor, Number.isFinite(capacity) && capacity > 0 ? capacity : null).run();
       }
       return Response.redirect(url.origin + "/admin/rooms" + (lang === "en" ? "?lang=en" : ""), 303);
     }
@@ -1558,8 +1559,8 @@ export default {
       const langQs = lang === "en" ? "?lang=en" : "";
       const [groups, rooms, teachersBySubject] = await Promise.all([getGroupsWithSeats(env), getRooms(env), getAllTeachersGrouped(env)]);
       const rows = groups.map(g => {
-        const seatsLabel = g.capacity ? `${g.enrolled}/${g.capacity}` : `${g.enrolled}`;
-        const isFull = g.capacity && g.enrolled >= g.capacity;
+        const seatsLabel = Number.isFinite(g.capacity) ? `${g.enrolled}/${g.capacity}` : `${g.enrolled}`;
+        const isFull = Number.isFinite(g.capacity) && g.enrolled >= g.capacity;
         return html`<div class="card ${raw(g.active ? "" : "stripe-b")}"><div>
           ${!g.active ? raw(html`<span class="badge-pending" style="background:#8A93A6">${t.inactive}</span><br>`) : ""}
           ${isFull ? raw(html`<span class="badge-pending">${t.full}</span><br>`) : ""}
@@ -1610,6 +1611,7 @@ export default {
     }
 
     if (url.pathname === "/admin/groups" && request.method === "POST") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
       const lang = langOf(url);
       const form = await request.formData();
       const teacherId = (form.get("teacher_id") || "").toString().trim();
@@ -1624,14 +1626,18 @@ export default {
       // not typed), so the group can be matched precisely instead of by the
       // teacher_name string — see computeTeacherOwed() below.
       const teacher = teacherId ? await env.DB.prepare("SELECT id, name FROM teachers WHERE id = ?").bind(teacherId).first() : null;
+      // room_id validated the same way as teacher_id (below) rather than
+      // trusted from a raw POST — the <select> only ever offers real rooms,
+      // but a tampered request could otherwise attach a dangling FK.
+      const room = Number.isFinite(roomId) ? await env.DB.prepare("SELECT id FROM rooms WHERE id = ?").bind(roomId).first() : null;
       if (teacher && KNOWN_SUBJECT_SLUGS.has(subject)) {
         await env.DB.prepare(
           `INSERT INTO groups (teacher_id, teacher_name, subject, stage, day, time, room_id, capacity, price)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).bind(
           teacher.id, teacher.name, subject, stage || null, day, time,
-          Number.isFinite(roomId) ? roomId : null,
-          Number.isFinite(capacity) ? capacity : null,
+          room ? room.id : null,
+          Number.isFinite(capacity) && capacity > 0 ? capacity : null,
           Number.isFinite(price) ? price : null
         ).run();
       }
@@ -1640,6 +1646,7 @@ export default {
 
     const groupToggleMatch = url.pathname.match(/^\/admin\/groups\/(\d+)\/toggle$/);
     if (groupToggleMatch && request.method === "POST") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
       const lang = langOf(url);
       await env.DB.prepare("UPDATE groups SET active = 1 - active WHERE id = ?").bind(groupToggleMatch[1]).run();
       return Response.redirect(url.origin + "/admin/groups" + (lang === "en" ? "?lang=en" : ""), 303);
