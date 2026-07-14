@@ -1256,6 +1256,189 @@ async function clerkFetch(path: string, init?: RequestInit) {
   });
 }
 
+describe("staff roles: owner-only routes (added 2026-07-13)", () => {
+  it("a clerk is blocked from the ledger, teacher list, teacher settlement, and staff management", async () => {
+    expect((await clerkFetch("https://example.com/admin/ledger")).status).toBe(403);
+    expect((await clerkFetch("https://example.com/admin/ledger/expense", { method: "POST", body: new FormData() })).status).toBe(403);
+    expect((await clerkFetch("https://example.com/admin/teachers")).status).toBe(403);
+    expect((await clerkFetch("https://example.com/admin/teachers/1/settlement")).status).toBe(403);
+    expect((await clerkFetch("https://example.com/admin/staff")).status).toBe(403);
+  });
+
+  it("a clerk can still reach ordinary staff routes (registration, attendance, groups)", async () => {
+    expect((await clerkFetch("https://example.com/admin")).status).toBe(200);
+    expect((await clerkFetch("https://example.com/admin/groups")).status).toBe(200);
+    expect((await clerkFetch("https://example.com/admin/today")).status).toBe(200);
+  });
+
+  it("with an empty staff table (bootstrap mode), any Access-authenticated email is treated as owner", async () => {
+    // Explicitly cleared, not relying on file/test load order — other tests in
+    // this shared-state file may already have seeded rows by the time this runs.
+    await env.DB.prepare("DELETE FROM staff").run();
+    const res = await SELF.fetch("https://example.com/admin/ledger", {
+      headers: { "Cf-Access-Authenticated-User-Email": "nobody-registered-yet@test.local", "Cf-Access-Jwt-Assertion": "test" }
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("with staff seeded, an unrecognized-but-Access-authenticated email defaults to clerk, not owner (regression: the naive version would fall through to owner)", async () => {
+    await env.DB.prepare("INSERT INTO staff (email, role) VALUES ('someone-else@test.local', 'clerk')").run();
+    const res = await SELF.fetch("https://example.com/admin/ledger", {
+      headers: { "Cf-Access-Authenticated-User-Email": "totally-unknown@test.local", "Cf-Access-Jwt-Assertion": "test" }
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("recording a payment and an expense both stamp created_by with the acting staff member's email", async () => {
+    const id = await insertStudent({ name: "Stamp Test", status: "approved" });
+    await env.DB.prepare("INSERT INTO bookings (student_id, subject, amount, status) VALUES (?, 'math', 300, 'active')").bind(id).run();
+    const payForm = new FormData();
+    payForm.set("amount", "50");
+    await adminFetch(`https://example.com/admin/students/${id}/pay`, { method: "POST", body: payForm });
+    const payment = await env.DB.prepare("SELECT created_by FROM payments WHERE student_id = ?").bind(id).first();
+    expect(payment?.created_by).toBe("staff@test.local");
+
+    const expenseForm = new FormData();
+    expenseForm.set("category", "rent");
+    expenseForm.set("amount", "200");
+    await adminFetch("https://example.com/admin/ledger/expense", { method: "POST", body: expenseForm });
+    const expense = await env.DB.prepare("SELECT created_by FROM ledger WHERE category = 'rent' AND amount = 200").first();
+    expect(expense?.created_by).toBe("staff@test.local");
+  });
+});
+
+describe("/admin/staff management (added 2026-07-13)", () => {
+  it("adds a staff member and their role shows on the list", async () => {
+    const form = new FormData();
+    form.set("email", "NewClerk@Test.local");
+    form.set("name", "New Clerk");
+    form.set("role", "clerk");
+    await adminFetch("https://example.com/admin/staff", { method: "POST", body: form });
+
+    const row = await env.DB.prepare("SELECT email, name, role FROM staff WHERE name = 'New Clerk'").first();
+    expect(row?.email).toBe("newclerk@test.local"); // lowercased on write
+    expect(row?.role).toBe("clerk");
+  });
+
+  it("rejects an unknown role instead of storing it raw", async () => {
+    const form = new FormData();
+    form.set("email", "bad-role@test.local");
+    form.set("role", "<script>alert(1)</script>");
+    await adminFetch("https://example.com/admin/staff", { method: "POST", body: form });
+    const row = await env.DB.prepare("SELECT * FROM staff WHERE email = 'bad-role@test.local'").first();
+    expect(row).toBeFalsy();
+  });
+
+  it("toggling a staff member flips their active flag", async () => {
+    await env.DB.prepare("INSERT INTO staff (email, role) VALUES ('toggle@test.local', 'clerk')").run();
+    await adminFetch("https://example.com/admin/staff/toggle%40test.local/toggle", { method: "POST" });
+    const row = await env.DB.prepare("SELECT active FROM staff WHERE email = 'toggle@test.local'").first();
+    expect(row?.active).toBe(0);
+  });
+});
+
+describe("/admin/teachers/:id/settlement: payout math (added 2026-07-13)", () => {
+  // computeTeacherOwed() matches groups by teacher_name string equality (see
+  // the Phase 4 code comment) — every teacher/group pair here needs a unique
+  // name, or two tests in this same shared-state file would pick up each
+  // other's groups/attendance.
+  let settleCounter = 0;
+  async function makeTeacherWithGroup(shareType: string, shareValue: number) {
+    settleCounter++;
+    const teacherId = `settle-${shareType}-${settleCounter}`;
+    const teacherName = `أ. تسوية ${settleCounter}`;
+    await env.DB.prepare(
+      "INSERT INTO teachers (id, name, subject, share_type, share_value) VALUES (?, ?, 'math', ?, ?)"
+    ).bind(teacherId, teacherName, shareType, shareValue).run();
+    const { meta: groupMeta } = await env.DB.prepare(
+      "INSERT INTO groups (teacher_name, subject, active) VALUES (?, 'math', 1)"
+    ).bind(teacherName).run();
+    return { teacherId, groupId: groupMeta.last_row_id as number };
+  }
+
+  it("per_session: owed = share_value * attendance rows logged against the teacher's groups", async () => {
+    const { teacherId, groupId } = await makeTeacherWithGroup("per_session", 20);
+    const s1 = await insertStudent({ name: "Settle Session 1", status: "approved" });
+    const s2 = await insertStudent({ name: "Settle Session 2", status: "approved" });
+    await SELF.fetch(`https://example.com/scan?student=${s1}&group=${groupId}`);
+    await SELF.fetch(`https://example.com/scan?student=${s2}&group=${groupId}`);
+
+    const html = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`)).text();
+    expect(html).toContain("40.00"); // 2 sessions * 20 EGP/session
+  });
+
+  it("percent: owed = share_value% of the teacher's groups' active booking value", async () => {
+    const { teacherId, groupId } = await makeTeacherWithGroup("percent", 10);
+    const s1 = await insertStudent({ name: "Settle Percent 1", status: "approved" });
+    await env.DB.prepare(
+      "INSERT INTO bookings (student_id, subject, amount, group_id, status) VALUES (?, 'math', 500, ?, 'active')"
+    ).bind(s1, groupId).run();
+
+    const html = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`)).text();
+    expect(html).toContain("50.00"); // 10% of 500
+  });
+
+  it("recording a payout inserts a ledger expense row tagged teacher_payout", async () => {
+    const { teacherId } = await makeTeacherWithGroup("per_session", 20);
+    const form = new FormData();
+    form.set("from", "2026-01-01");
+    form.set("to", "2026-01-01");
+    form.set("amount", "40");
+    form.set("note", "January");
+    await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`, { method: "POST", body: form });
+
+    const row = await env.DB.prepare("SELECT kind, category, amount, note FROM ledger WHERE category = 'teacher_payout'").first();
+    expect(row?.kind).toBe("expense");
+    expect(row?.amount).toBe(40);
+    expect(row?.note).toContain("January");
+  });
+
+  it("setting a teacher's share persists share_type and share_value", async () => {
+    const { meta } = await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('share-test', 'أ. شير', 'math')").run();
+    const form = new FormData();
+    form.set("share_type", "percent");
+    form.set("share_value", "15");
+    await adminFetch("https://example.com/admin/teachers/share-test/share", { method: "POST", body: form });
+
+    const row = await env.DB.prepare("SELECT share_type, share_value FROM teachers WHERE id = 'share-test'").first();
+    expect(row?.share_type).toBe("percent");
+    expect(row?.share_value).toBe(15);
+  });
+});
+
+describe("/admin/teachers: subject grouping + needs-attention ordering (added 2026-07-14)", () => {
+  it("a teacher with no share configured appears in the needs-attention section", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('no-share-teacher', 'أ. لسه', 'math')").run();
+    const html = await (await adminFetch("https://example.com/admin/teachers")).text();
+    const nameIdx = html.indexOf("أ. لسه");
+    expect(nameIdx).toBeGreaterThan(-1);
+    expect(html).toContain("لسه معملتش تسوية"); // "no share set yet" label still shown
+  });
+
+  it("a fully-settled teacher (share configured, zero owed since last payout) is not flagged as needing attention", async () => {
+    await env.DB.prepare(
+      "INSERT INTO teachers (id, name, subject, share_type, share_value) VALUES ('settled-teacher', 'أ. متسوي', 'physics', 'per_session', 20)"
+    ).run();
+    // No attendance logged against this teacher's groups at all, so owed = 0
+    // regardless of date range — should not appear in the attention section.
+    const html = await (await adminFetch("https://example.com/admin/teachers")).text();
+    const attentionHeadingIdx = html.indexOf("⚠️");
+    const nameIdx = html.indexOf("أ. متسوي");
+    expect(nameIdx).toBeGreaterThan(-1);
+    // Appears only in its subject section (after the attention heading + its
+    // own empty-state text), not inside the attention list itself.
+    expect(nameIdx).toBeGreaterThan(attentionHeadingIdx);
+  });
+
+  it("groups teachers under subject section headings in the site's canonical subject order", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('bio-teacher', 'أ. أحياء تجربة', 'biology')").run();
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('math-teacher-group', 'أ. رياضة تجربة', 'math')").run();
+    const html = await (await adminFetch("https://example.com/admin/teachers")).text();
+    // SUBJECTS lists math before biology — math's <h2> should appear first.
+    expect(html.indexOf(">رياضيات<")).toBeLessThan(html.indexOf(">أحياء<"));
+  });
+});
+
 describe("roster: one-tap WhatsApp send per row (added 2026-07-14)", () => {
   it("renders a WhatsApp link linking to the student's own /student page, for an approved student with a phone", async () => {
     const id = await insertStudent({ name: "WA Roster Test", status: "approved", phone: "01000000077" });

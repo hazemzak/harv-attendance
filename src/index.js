@@ -1769,6 +1769,240 @@ export default {
       }
     };
 
+    if (url.pathname === "/admin/teachers" && request.method === "GET") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
+      const lang = langOf(url);
+      const t = TEACHERS_I18N[lang];
+      const langQs = lang === "en" ? "?lang=en" : "";
+      const { results } = await env.DB.prepare("SELECT id, name, subject, share_type, share_value FROM teachers ORDER BY name").all();
+      const today = new Date().toISOString().slice(0, 10);
+      // "Money left" = owed computed since their last recorded payout (or since
+      // the beginning, if never paid out) — a naive unbounded-always computation
+      // would show every configured teacher as "owing" forever, since payouts
+      // aren't linked to specific bookings/sessions (same limitation documented
+      // on computeTeacherOwed itself). Matching a payout to a teacher is via the
+      // ledger note text (`${teacher.name}...`, see the settlement POST route) —
+      // a LIKE match, not a real FK; fragile only if one teacher's name is a
+      // literal prefix of another's, which isn't the case in the real roster.
+      const withStatus = await Promise.all(results.map(async tch => {
+        if (!tch.share_type) return { ...tch, needsAttention: true, owed: 0 };
+        const lastPayout = await env.DB.prepare(
+          "SELECT MAX(occurred_at) AS d FROM ledger WHERE category = 'teacher_payout' AND note LIKE ?"
+        ).bind(tch.name + "%").first();
+        const from = lastPayout.d ? lastPayout.d.slice(0, 10) : "2000-01-01";
+        const { owed } = await computeTeacherOwed(env, tch.id, tch.name, tch.share_type, tch.share_value, from, today);
+        return { ...tch, needsAttention: owed > 0, owed };
+      }));
+      const shareLabel = tch => tch.share_type
+        ? `${tch.share_type === "percent" ? t.percent : t.perSession}: ${tch.share_value ?? 0}`
+        : t.noShare;
+      const teacherCard = (tch, i, showSubject = false) => `<div class="card ${i % 2 === 0 ? "stripe-a" : "stripe-b"}"><div>
+        <strong>${escapeHtml(tch.name)}</strong>${showSubject ? ` — ${subjectsDisplay(lang, tch.subject)}` : ""}<br>
+        <small>${escapeHtml(shareLabel(tch))}${tch.owed > 0 ? ` · ${t.owed}: ${tch.owed.toFixed(2)}` : ""}</small>
+        <div class="pending-actions">
+          <a href="/admin/teachers/${tch.id}/settlement${langQs}"><button type="button">${t.settlement}</button></a>
+        </div>
+      </div></div>`;
+
+      const needingAttention = withStatus.filter(tch => tch.needsAttention);
+      const attentionSection = `<div class="dash-card">
+        <h2>${t.attentionTitle}</h2>
+        ${needingAttention.length
+          ? needingAttention.map((tch, i) => teacherCard(tch, i, true)).join("")
+          : `<p class="empty">${t.attentionEmpty}</p>`}
+      </div>`;
+
+      // Grouped by subject in the site's canonical SUBJECTS order (not raw
+      // alphabetical DB order) so the section order matches every other
+      // subject list in the app (registration form, promotions, etc.).
+      const bySubject = {};
+      for (const tch of withStatus) (bySubject[tch.subject] ||= []).push(tch);
+      const subjectSections = SUBJECTS
+        .filter(s => bySubject[s.v]?.length)
+        .map(s => `<div class="dash-card">
+          <h2>${lang === "en" ? s.en : s.ar}</h2>
+          ${bySubject[s.v].map(teacherCard).join("")}
+        </div>`).join("");
+
+      return new Response(page(t.title, attentionSection + subjectSections, { lang, toggleHref: toggleHref(url, lang), isOwner: roleAllowed(staffRole, ["owner"]) }), { headers: { "content-type": "text/html;charset=utf-8" } });
+    }
+
+    const SETTLEMENT_I18N = {
+      ar: {
+        shareTitle: "إعدادات النسبة", shareType: "نوع النسبة", perSession: "بالحصة (جنيه/حصة)", percent: "نسبة من قيمة الحجوزات %",
+        shareValue: "القيمة", shareValuePh: "مثلاً: 20", saveShare: "حفظ", from: "من", to: "إلى", filter: "فلترة",
+        owed: "المستحق", recordPayout: "تسجيل صرف", amount: "المبلغ", amountPh: "بالجنيه", note: "ملاحظة (اختياري)", notePh: "اختياري",
+        sessionsCount: "عدد الحصص", billedTotal: "إجمالي قيمة الحجوزات النشطة", noShareYet: "من فضلك حدد نوع ونسبة الصرف أولاً."
+      },
+      en: {
+        shareTitle: "Payout share settings", shareType: "Share type", perSession: "Per session (EGP/session)", percent: "Percent of booked value %",
+        shareValue: "Value", shareValuePh: "e.g. 20", saveShare: "Save", from: "From", to: "To", filter: "Filter",
+        owed: "Owed", recordPayout: "Record payout", amount: "Amount", amountPh: "in EGP", note: "Note (optional)", notePh: "optional",
+        sessionsCount: "Session count", billedTotal: "Total active booking value", noShareYet: "Please set a payout share type and value first."
+      }
+    };
+
+    // Owed math: 'per_session' = share_value EGP × attendance rows logged
+    // against this teacher's groups in [from, to]. 'percent' = share_value% of
+    // this teacher's groups' current active booking value (not date-ranged —
+    // ponytail: bookings are standing enrollments, not per-period charges, and
+    // payments aren't yet allocated to a specific booking/group, so "percent of
+    // actually collected cash in this date range" isn't derivable from today's
+    // data model; upgrade if/when payments gain a booking-level allocation UI).
+    // Groups are matched by teacher_id when set (the /admin/groups form has
+    // picked from a real teacher <select> since 2026-07-13) — teacher_name is
+    // kept as a fallback for any group created before that, matched by name.
+    async function computeTeacherOwed(env, teacherId, teacherName, shareType, shareValue, from, to) {
+      if (!shareType || !shareValue) return { owed: 0, detail: 0 };
+      const groupIds = (await env.DB.prepare("SELECT id FROM groups WHERE teacher_id = ? OR (teacher_id IS NULL AND teacher_name = ?)").bind(teacherId, teacherName).all()).results.map(g => g.id);
+      if (!groupIds.length) return { owed: 0, detail: 0 };
+      const placeholders = groupIds.map(() => "?").join(",");
+      if (shareType === "per_session") {
+        const row = await env.DB.prepare(
+          `SELECT COUNT(*) AS n FROM attendance WHERE group_id IN (${placeholders}) AND date(scanned_at) BETWEEN ? AND ?`
+        ).bind(...groupIds, from, to).first();
+        return { owed: row.n * shareValue, detail: row.n };
+      }
+      const row = await env.DB.prepare(
+        `SELECT COALESCE(SUM(amount - discount_amount), 0) AS n FROM bookings WHERE group_id IN (${placeholders}) AND status = 'active'`
+      ).bind(...groupIds).first();
+      return { owed: row.n * shareValue / 100, detail: row.n };
+    }
+
+    // teachers.id is a TEXT slug (e.g. imported from data/teachers.json), not
+    // numeric — unlike students/bookings/groups ids elsewhere in this file.
+    const settlementMatch = url.pathname.match(/^\/admin\/teachers\/([^/]+)\/settlement$/);
+    if (settlementMatch && request.method === "GET") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
+      const lang = langOf(url);
+      const t = SETTLEMENT_I18N[lang];
+      const langQs = lang === "en" ? "?lang=en" : "";
+      const teacher = await env.DB.prepare("SELECT id, name, subject, share_type, share_value FROM teachers WHERE id = ?").bind(settlementMatch[1]).first();
+      if (!teacher) return new Response("Not found", { status: 404 });
+      const from = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("from") || "") ? url.searchParams.get("from") : new Date().toISOString().slice(0, 10);
+      const to = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("to") || "") ? url.searchParams.get("to") : from;
+      const { owed, detail } = await computeTeacherOwed(env, teacher.id, teacher.name, teacher.share_type, teacher.share_value, from, to);
+      const shareForm = `<form method="POST" action="/admin/teachers/${teacher.id}/share${langQs}">
+        <label>${t.shareType}</label>
+        <select name="share_type">
+          <option value="per_session" ${teacher.share_type === "per_session" ? "selected" : ""}>${t.perSession}</option>
+          <option value="percent" ${teacher.share_type === "percent" ? "selected" : ""}>${t.percent}</option>
+        </select>
+        <label>${t.shareValue}</label>
+        <input name="share_value" type="number" step="0.01" min="0" value="${teacher.share_value ?? ""}" placeholder="${t.shareValuePh}">
+        <button type="submit">${t.saveShare}</button>
+      </form>`;
+      const filterForm = `<form method="GET" style="display:flex;gap:8px;align-items:center;margin:12px 0">
+        <input type="hidden" name="lang" value="${lang}">
+        <label>${t.from}</label><input type="date" name="from" value="${from}">
+        <label>${t.to}</label><input type="date" name="to" value="${to}">
+        <button type="submit">${t.filter}</button>
+      </form>`;
+      const owedBlock = teacher.share_type
+        ? `<p>${teacher.share_type === "per_session" ? t.sessionsCount : t.billedTotal}: <strong>${detail}</strong> · ${t.owed}: <strong style="color:var(--red)">${owed.toFixed(2)}</strong></p>
+           <form method="POST" action="/admin/teachers/${teacher.id}/settlement${langQs}">
+             <input type="hidden" name="from" value="${from}"><input type="hidden" name="to" value="${to}">
+             <label>${t.amount}</label><input name="amount" type="number" step="0.01" min="0.01" value="${owed.toFixed(2)}" placeholder="${t.amountPh}" required>
+             <label>${t.note}</label><input name="note" placeholder="${t.notePh}">
+             <button type="submit">${t.recordPayout}</button>
+           </form>`
+        : `<p class="empty">${t.noShareYet}</p>`;
+      const body = `<h2 style="font-size:15px;color:var(--muted)">${t.shareTitle}</h2>${shareForm}${filterForm}${owedBlock}`;
+      return new Response(page(escapeHtml(teacher.name), body, { lang, toggleHref: toggleHref(url, lang), isOwner: roleAllowed(staffRole, ["owner"]) }), { headers: { "content-type": "text/html;charset=utf-8" } });
+    }
+
+    const shareMatch = url.pathname.match(/^\/admin\/teachers\/([^/]+)\/share$/);
+    if (shareMatch && request.method === "POST") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
+      const lang = langOf(url);
+      const form = await request.formData();
+      const shareType = (form.get("share_type") || "").toString().trim();
+      const shareValue = parseFloat((form.get("share_value") || "").toString());
+      if (["per_session", "percent"].includes(shareType) && Number.isFinite(shareValue) && shareValue >= 0) {
+        await env.DB.prepare("UPDATE teachers SET share_type = ?, share_value = ? WHERE id = ?")
+          .bind(shareType, shareValue, shareMatch[1]).run();
+      }
+      return Response.redirect(url.origin + `/admin/teachers/${shareMatch[1]}/settlement` + (lang === "en" ? "?lang=en" : ""), 303);
+    }
+
+    if (settlementMatch && request.method === "POST") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
+      const lang = langOf(url);
+      const form = await request.formData();
+      const amount = parseFloat((form.get("amount") || "").toString());
+      const note = (form.get("note") || "").toString().trim() || null;
+      const teacher = await env.DB.prepare("SELECT name FROM teachers WHERE id = ?").bind(settlementMatch[1]).first();
+      if (teacher && Number.isFinite(amount) && amount > 0) {
+        await env.DB.prepare("INSERT INTO ledger (kind, category, amount, note, created_by) VALUES ('expense', 'teacher_payout', ?, ?, ?)")
+          .bind(amount, `${teacher.name}${note ? " — " + note : ""}`, staffEmail).run();
+      }
+      return Response.redirect(url.origin + `/admin/teachers/${settlementMatch[1]}/settlement` + (lang === "en" ? "?lang=en" : ""), 303);
+    }
+
+    const STAFF_I18N = {
+      ar: {
+        title: "الموظفين", email: "الإيميل", emailPh: "example@harvcentereg.com", name: "الاسم", namePh: "اسم الموظف", role: "الصلاحية", add: "إضافة موظف",
+        owner: "مدير", clerk: "موظف استقبال", viewer: "مشاهدة فقط", deactivate: "إيقاف", activate: "تفعيل",
+        empty: "لا يوجد موظفين مسجلين — أي شخص يعدي بوابة Access حاليًا بيتعامل كـ مدير.", inactive: "متوقف"
+      },
+      en: {
+        title: "Staff", email: "Email", emailPh: "example@harvcentereg.com", name: "Name", namePh: "Staff member's name", role: "Role", add: "Add staff",
+        owner: "Owner", clerk: "Front desk", viewer: "View only", deactivate: "Deactivate", activate: "Activate",
+        empty: "No staff registered yet — anyone who passes the Access gate is currently treated as owner.", inactive: "inactive"
+      }
+    };
+
+    // Managing this list is itself owner-only — but note the bootstrap rule in
+    // getStaffRole(): with zero rows here, EVERY Access-authenticated request is
+    // owner, including this page. The first real row added here is what turns
+    // that bootstrap mode off for everyone else.
+    if (url.pathname === "/admin/staff" && request.method === "GET") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
+      const lang = langOf(url);
+      const t = STAFF_I18N[lang];
+      const langQs = lang === "en" ? "?lang=en" : "";
+      const { results } = await env.DB.prepare("SELECT email, name, role, active FROM staff ORDER BY active DESC, email").all();
+      const roleLabel = r => ({ owner: t.owner, clerk: t.clerk, viewer: t.viewer })[r] || r;
+      const rows = results.map(s => `<div class="card ${s.active ? "" : "stripe-b"}"><div>
+        ${!s.active ? `<span class="badge-pending" style="background:#8A93A6">${t.inactive}</span><br>` : ""}
+        <strong>${escapeHtml(s.name || s.email)}</strong> — ${escapeHtml(roleLabel(s.role))}<br>
+        <small>${escapeHtml(s.email)}</small>
+        <div class="pending-actions">
+          <form method="POST" action="/admin/staff/${encodeURIComponent(s.email)}/toggle${langQs}"><button type="submit" class="${s.active ? "btn-reject" : ""}">${s.active ? t.deactivate : t.activate}</button></form>
+        </div>
+      </div></div>`).join("") || `<p class="empty">${t.empty}</p>`;
+      const form = `<form method="POST" action="/admin/staff${langQs}">
+        <label>${t.email}</label><input name="email" type="email" placeholder="${t.emailPh}" required>
+        <label>${t.name}</label><input name="name" placeholder="${t.namePh}">
+        <label>${t.role}</label>
+        <select name="role"><option value="clerk">${t.clerk}</option><option value="owner">${t.owner}</option><option value="viewer">${t.viewer}</option></select>
+        <button type="submit">${t.add}</button>
+      </form>`;
+      return new Response(page(t.title, form + rows, { lang, toggleHref: toggleHref(url, lang), isOwner: roleAllowed(staffRole, ["owner"]) }), { headers: { "content-type": "text/html;charset=utf-8" } });
+    }
+
+    if (url.pathname === "/admin/staff" && request.method === "POST") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
+      const lang = langOf(url);
+      const form = await request.formData();
+      const email = (form.get("email") || "").toString().trim().toLowerCase();
+      const name = (form.get("name") || "").toString().trim() || null;
+      const role = (form.get("role") || "").toString().trim();
+      if (email && ["owner", "clerk", "viewer"].includes(role)) {
+        await env.DB.prepare("INSERT INTO staff (email, name, role) VALUES (?, ?, ?) ON CONFLICT(email) DO UPDATE SET name = excluded.name, role = excluded.role, active = 1")
+          .bind(email, name, role).run();
+      }
+      return Response.redirect(url.origin + "/admin/staff" + (lang === "en" ? "?lang=en" : ""), 303);
+    }
+
+    const staffToggleMatch = url.pathname.match(/^\/admin\/staff\/([^/]+)\/toggle$/);
+    if (staffToggleMatch && request.method === "POST") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
+      const lang = langOf(url);
+      await env.DB.prepare("UPDATE staff SET active = 1 - active WHERE email = ?").bind(decodeURIComponent(staffToggleMatch[1])).run();
+      return Response.redirect(url.origin + "/admin/staff" + (lang === "en" ? "?lang=en" : ""), 303);
+    }
+
     const rejectMatch = url.pathname.match(/^\/admin\/students\/(\d+)\/reject$/);
     if (rejectMatch && request.method === "POST") {
       const lang = langOf(url);
