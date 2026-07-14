@@ -27,7 +27,7 @@ CREATE TABLE groups (
 -- never backfilled. status/status_reason give bookings a drop/transfer lifecycle
 -- (old app's deleted_from_group table tracked exactly this, e.g. "حذف لتكرار الغياب").
 ALTER TABLE bookings ADD COLUMN group_id INTEGER REFERENCES groups(id);
-ALTER TABLE bookings ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE bookings ADD COLUMN status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'dropped'));
 ALTER TABLE bookings ADD COLUMN status_reason TEXT;
 
 CREATE INDEX idx_groups_active ON groups(active);
