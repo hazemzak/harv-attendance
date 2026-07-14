@@ -893,6 +893,20 @@ function forbiddenRole() {
   return new Response("Forbidden", { status: 403 });
 }
 
+// Guards against locking everyone out of owner-only pages by demoting or
+// deactivating the last active owner (claude-review finding #3 on PR #12) —
+// `staff` can hold multiple owner rows, this only blocks dropping to zero.
+async function wouldRemoveLastOwner(env, email) {
+  const current = await env.DB.prepare("SELECT role, active FROM staff WHERE email = ?").bind(email).first();
+  if (!current || current.role !== "owner" || !current.active) return false;
+  const others = await env.DB.prepare("SELECT COUNT(*) AS n FROM staff WHERE role = 'owner' AND active = 1 AND email != ?").bind(email).first();
+  return others.n === 0;
+}
+function lastOwnerBlocked(lang) {
+  const msg = lang === "en" ? "Can't do that — at least one active owner must remain." : "معلش، لازم يفضل مدير واحد شغال على الأقل.";
+  return new Response(msg, { status: 400 });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -1784,11 +1798,20 @@ export default {
       // ledger note text (`${teacher.name}...`, see the settlement POST route) —
       // a LIKE match, not a real FK; fragile only if one teacher's name is a
       // literal prefix of another's, which isn't the case in the real roster.
+      // ponytail: N+1 (one lastPayout + one computeTeacherOwed query per teacher)
+      // — fine at ~52 rows in the current roster; batch both queries if the
+      // roster grows enough for this page to noticeably lag (claude-review
+      // finding #4 on PR #12).
       const withStatus = await Promise.all(results.map(async tch => {
         if (!tch.share_type) return { ...tch, needsAttention: true, owed: 0 };
+        // period_to (the period a payout settles) falls back to occurred_at
+        // (when it was recorded) for older rows with no period_to on file.
+        // note LIKE match is escaped since tch.name is free-text staff input,
+        // not a slug — an unescaped % or _ in a name could over-match another
+        // teacher's payout note (claude-review finding #5 on PR #12).
         const lastPayout = await env.DB.prepare(
-          "SELECT MAX(occurred_at) AS d FROM ledger WHERE category = 'teacher_payout' AND note LIKE ?"
-        ).bind(tch.name + "%").first();
+          "SELECT MAX(COALESCE(period_to, occurred_at)) AS d FROM ledger WHERE category = 'teacher_payout' AND note LIKE ? ESCAPE '\\'"
+        ).bind(tch.name.replace(/[%_]/g, "\\$&") + "%").first();
         const from = lastPayout.d ? lastPayout.d.slice(0, 10) : "2000-01-01";
         const { owed } = await computeTeacherOwed(env, tch.id, tch.name, tch.share_type, tch.share_value, from, today);
         return { ...tch, needsAttention: owed > 0, owed };
@@ -1832,23 +1855,22 @@ export default {
         shareTitle: "إعدادات النسبة", shareType: "نوع النسبة", perSession: "بالحصة (جنيه/حصة)", percent: "نسبة من قيمة الحجوزات %",
         shareValue: "القيمة", shareValuePh: "مثلاً: 20", saveShare: "حفظ", from: "من", to: "إلى", filter: "فلترة",
         owed: "المستحق", recordPayout: "تسجيل صرف", amount: "المبلغ", amountPh: "بالجنيه", note: "ملاحظة (اختياري)", notePh: "اختياري",
-        sessionsCount: "عدد الحصص", billedTotal: "إجمالي قيمة الحجوزات النشطة", noShareYet: "من فضلك حدد نوع ونسبة الصرف أولاً."
+        sessionsCount: "عدد الحصص", billedTotal: "إجمالي المحصّل من الحجوزات", noShareYet: "من فضلك حدد نوع ونسبة الصرف أولاً."
       },
       en: {
         shareTitle: "Payout share settings", shareType: "Share type", perSession: "Per session (EGP/session)", percent: "Percent of booked value %",
         shareValue: "Value", shareValuePh: "e.g. 20", saveShare: "Save", from: "From", to: "To", filter: "Filter",
         owed: "Owed", recordPayout: "Record payout", amount: "Amount", amountPh: "in EGP", note: "Note (optional)", notePh: "optional",
-        sessionsCount: "Session count", billedTotal: "Total active booking value", noShareYet: "Please set a payout share type and value first."
+        sessionsCount: "Session count", billedTotal: "Total collected", noShareYet: "Please set a payout share type and value first."
       }
     };
 
     // Owed math: 'per_session' = share_value EGP × attendance rows logged
     // against this teacher's groups in [from, to]. 'percent' = share_value% of
-    // this teacher's groups' current active booking value (not date-ranged —
-    // ponytail: bookings are standing enrollments, not per-period charges, and
-    // payments aren't yet allocated to a specific booking/group, so "percent of
-    // actually collected cash in this date range" isn't derivable from today's
-    // data model; upgrade if/when payments gain a booking-level allocation UI).
+    // cash actually COLLECTED (payments, not billed bookings.amount — claude-review
+    // finding #1 on PR #12: billed value overstates what's actually owed since
+    // students can be mid-payment-plan) against this teacher's groups in [from, to],
+    // via payments.booking_id -> bookings.group_id.
     // Groups are matched by teacher_id when set (the /admin/groups form has
     // picked from a real teacher <select> since 2026-07-13) — teacher_name is
     // kept as a fallback for any group created before that, matched by name.
@@ -1864,8 +1886,10 @@ export default {
         return { owed: row.n * shareValue, detail: row.n };
       }
       const row = await env.DB.prepare(
-        `SELECT COALESCE(SUM(amount - discount_amount), 0) AS n FROM bookings WHERE group_id IN (${placeholders}) AND status = 'active'`
-      ).bind(...groupIds).first();
+        `SELECT COALESCE(SUM(p.amount), 0) AS n FROM payments p
+         JOIN bookings b ON b.id = p.booking_id
+         WHERE b.group_id IN (${placeholders}) AND date(p.created_at) BETWEEN ? AND ?`
+      ).bind(...groupIds, from, to).first();
       return { owed: row.n * shareValue / 100, detail: row.n };
     }
 
@@ -1931,10 +1955,13 @@ export default {
       const form = await request.formData();
       const amount = parseFloat((form.get("amount") || "").toString());
       const note = (form.get("note") || "").toString().trim() || null;
+      // The period this payout settles, not when it was recorded — see the
+      // lastPayout query on /admin/teachers, which reads this back.
+      const periodTo = /^\d{4}-\d{2}-\d{2}$/.test(form.get("to") || "") ? form.get("to") : null;
       const teacher = await env.DB.prepare("SELECT name FROM teachers WHERE id = ?").bind(settlementMatch[1]).first();
       if (teacher && Number.isFinite(amount) && amount > 0) {
-        await env.DB.prepare("INSERT INTO ledger (kind, category, amount, note, created_by) VALUES ('expense', 'teacher_payout', ?, ?, ?)")
-          .bind(amount, `${teacher.name}${note ? " — " + note : ""}`, staffEmail).run();
+        await env.DB.prepare("INSERT INTO ledger (kind, category, amount, note, created_by, period_to) VALUES ('expense', 'teacher_payout', ?, ?, ?, ?)")
+          .bind(amount, `${teacher.name}${note ? " — " + note : ""}`, staffEmail, periodTo).run();
       }
       return Response.redirect(url.origin + `/admin/teachers/${settlementMatch[1]}/settlement` + (lang === "en" ? "?lang=en" : ""), 303);
     }
@@ -1989,6 +2016,7 @@ export default {
       const name = (form.get("name") || "").toString().trim() || null;
       const role = (form.get("role") || "").toString().trim();
       if (email && ["owner", "clerk", "viewer"].includes(role)) {
+        if (role !== "owner" && await wouldRemoveLastOwner(env, email)) return lastOwnerBlocked(lang);
         await env.DB.prepare("INSERT INTO staff (email, name, role) VALUES (?, ?, ?) ON CONFLICT(email) DO UPDATE SET name = excluded.name, role = excluded.role, active = 1")
           .bind(email, name, role).run();
       }
@@ -1999,7 +2027,9 @@ export default {
     if (staffToggleMatch && request.method === "POST") {
       if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
       const lang = langOf(url);
-      await env.DB.prepare("UPDATE staff SET active = 1 - active WHERE email = ?").bind(decodeURIComponent(staffToggleMatch[1])).run();
+      const email = decodeURIComponent(staffToggleMatch[1]);
+      if (await wouldRemoveLastOwner(env, email)) return lastOwnerBlocked(lang);
+      await env.DB.prepare("UPDATE staff SET active = 1 - active WHERE email = ?").bind(email).run();
       return Response.redirect(url.origin + "/admin/staff" + (lang === "en" ? "?lang=en" : ""), 303);
     }
 
@@ -2526,6 +2556,7 @@ ${sec("s-login", "🔐 لو ظهرلك شاشة تسجيل دخول", `
 
 ${isOwnerGuide ? sec("s-owner", "⚙️ إدارة (مدير بس)", `
 <p>القسم ده مش ظاهر لموظف الاستقبال العادي — بيظهر بس للمدير. تلاقيه من <a href="/admin/owner">إدارة</a> في شريط التنقل.</p>
+<p>صلاحية "مدير" مش حساب واحد بس متسجل مسبقاً — تقدر تضيف أي عدد من الموظفين كـ"مدير" من <a href="/admin/staff">الموظفين</a>. كل حاجة تحت "⚙️ إدارة" (إعداد أسعار القاعات والمجموعات، دفتر الحساب، مستحقات الأساتذة، وإدارة الموظفين نفسها) بتفضل مقفولة على المدير بس — أما شغل الاستقبال اليومي (تسجيل طالب، تسجيل دفعة، معرفة رصيد طالب، إلغاء اشتراك) فمفتوح لأي موظف، عشان موظف الاستقبال ميتعطلش وهو بيحصّل فلوس.</p>
 <ul style="line-height:2">
   <li><strong><a href="/admin/ledger">دفتر الحساب</a></strong> — كل الفلوس الداخلة والخارجة، وتقدر تسجل مصروف (إيجار، مرتبات، فاتورة تليفون...) من هنا.</li>
   <li><strong><a href="/admin/teachers">الأساتذة</a></strong> — تحدد لكل أستاذ نسبته (بالحصة أو نسبة %)، وتشوف مين محتاج تسوية فلوس دلوقتي في قسم "⚠️ يحتاج متابعة" فوق الصفحة.</li>

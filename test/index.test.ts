@@ -1335,6 +1335,46 @@ describe("/admin/staff management (added 2026-07-13)", () => {
     const row = await env.DB.prepare("SELECT active FROM staff WHERE email = 'toggle@test.local'").first();
     expect(row?.active).toBe(0);
   });
+
+  it("rejects deactivating the sole active owner with a 400, and leaves them active (claude-review finding #3 on PR #12)", async () => {
+    // adminFetch() itself re-seeds 'staff@test.local' as owner via INSERT OR
+    // IGNORE on every call — target that same email so the toggle request's
+    // own adminFetch call doesn't silently add a second owner behind our back.
+    await env.DB.prepare("DELETE FROM staff").run();
+    await env.DB.prepare("INSERT INTO staff (email, role) VALUES ('staff@test.local', 'owner')").run();
+    const res = await adminFetch("https://example.com/admin/staff/staff%40test.local/toggle", { method: "POST" });
+    expect(res.status).toBe(400);
+    const row = await env.DB.prepare("SELECT active FROM staff WHERE email = 'staff@test.local'").first();
+    expect(row?.active).toBe(1);
+  });
+
+  it("rejects demoting the sole active owner to clerk with a 400 (claude-review finding #3 on PR #12)", async () => {
+    await env.DB.prepare("DELETE FROM staff").run();
+    await env.DB.prepare("INSERT INTO staff (email, role) VALUES ('staff@test.local', 'owner')").run();
+    const form = new FormData();
+    form.set("email", "staff@test.local");
+    form.set("role", "clerk");
+    const res = await adminFetch("https://example.com/admin/staff", { method: "POST", body: form });
+    expect(res.status).toBe(400);
+    const row = await env.DB.prepare("SELECT role FROM staff WHERE email = 'staff@test.local'").first();
+    expect(row?.role).toBe("owner");
+  });
+
+  it("allows deactivating an owner when another active owner remains", async () => {
+    await env.DB.prepare("INSERT INTO staff (email, role) VALUES ('owner-a@test.local', 'owner')").run();
+    await env.DB.prepare("INSERT INTO staff (email, role) VALUES ('owner-b@test.local', 'owner')").run();
+    const res = await adminFetch("https://example.com/admin/staff/owner-a%40test.local/toggle", { method: "POST" });
+    expect(res.status).not.toBe(400);
+    const row = await env.DB.prepare("SELECT active FROM staff WHERE email = 'owner-a@test.local'").first();
+    expect(row?.active).toBe(0);
+  });
+});
+
+describe("/admin/guide", () => {
+  it("the owner section documents that multiple staff can hold the owner role", async () => {
+    const html = await (await adminFetch("https://example.com/admin/guide")).text();
+    expect(html).toContain("أي عدد من الموظفين كـ\"مدير\"");
+  });
 });
 
 describe("/admin/teachers/:id/settlement: payout math (added 2026-07-13)", () => {
@@ -1367,15 +1407,19 @@ describe("/admin/teachers/:id/settlement: payout math (added 2026-07-13)", () =>
     expect(html).toContain("40.00"); // 2 sessions * 20 EGP/session
   });
 
-  it("percent: owed = share_value% of the teacher's groups' active booking value", async () => {
+  it("percent: owed = share_value% of payments actually collected against the teacher's groups, not the billed amount (claude-review finding #1 on PR #12)", async () => {
     const { teacherId, groupId } = await makeTeacherWithGroup("percent", 10);
     const s1 = await insertStudent({ name: "Settle Percent 1", status: "approved" });
-    await env.DB.prepare(
+    const { meta } = await env.DB.prepare(
       "INSERT INTO bookings (student_id, subject, amount, group_id, status) VALUES (?, 'math', 500, ?, 'active')"
     ).bind(s1, groupId).run();
+    // Only half collected so far — owed must track the payment, not the 500 billed.
+    await env.DB.prepare(
+      "INSERT INTO payments (student_id, booking_id, amount) VALUES (?, ?, 250)"
+    ).bind(s1, meta.last_row_id).run();
 
     const html = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`)).text();
-    expect(html).toContain("50.00"); // 10% of 500
+    expect(html).toContain("25.00"); // 10% of 250 collected, not 10% of 500 billed
   });
 
   it("recording a payout inserts a ledger expense row tagged teacher_payout", async () => {
@@ -1391,6 +1435,31 @@ describe("/admin/teachers/:id/settlement: payout math (added 2026-07-13)", () =>
     expect(row?.kind).toBe("expense");
     expect(row?.amount).toBe(40);
     expect(row?.note).toContain("January");
+  });
+
+  it("a settlement's 'to' date persists as period_to, not the recording timestamp (claude-review finding #2 on PR #12)", async () => {
+    const { teacherId } = await makeTeacherWithGroup("per_session", 20);
+    const form = new FormData();
+    form.set("from", "2026-01-01");
+    form.set("to", "2026-01-31"); // period end, deliberately far from "now"
+    form.set("amount", "20");
+    await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`, { method: "POST", body: form });
+
+    const row = await env.DB.prepare("SELECT period_to FROM ledger WHERE category = 'teacher_payout' AND period_to = '2026-01-31'").first();
+    expect(row?.period_to).toBe("2026-01-31");
+  });
+
+  it("a teacher name containing a LIKE wildcard (%) doesn't over-match another teacher's payout note (claude-review finding #5 on PR #12)", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject, share_type, share_value) VALUES ('wild-a', 'أ. علي', 'math', 'per_session', 10)").run();
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject, share_type, share_value) VALUES ('wild-b', 'أ. علي%', 'math', 'per_session', 10)").run();
+    // A payout for 'أ. علي' (no wildcard) must not appear as a match for 'أ. علي%'
+    // once its name is escaped — an unescaped LIKE would treat the literal '%'
+    // in the second teacher's name as a wildcard and match the first's note too.
+    await env.DB.prepare("INSERT INTO ledger (kind, category, amount, note) VALUES ('expense', 'teacher_payout', 15, 'أ. علي — test')").run();
+    const lastPayout = await env.DB.prepare(
+      "SELECT MAX(COALESCE(period_to, occurred_at)) AS d FROM ledger WHERE category = 'teacher_payout' AND note LIKE ? ESCAPE '\\'"
+    ).bind("أ. علي\\%%").first();
+    expect(lastPayout?.d).toBeFalsy();
   });
 
   it("setting a teacher's share persists share_type and share_value", async () => {

@@ -148,7 +148,8 @@ CREATE TABLE ledger (
   amount REAL NOT NULL CHECK (amount >= 0),
   note TEXT,
   occurred_at TEXT NOT NULL DEFAULT (datetime('now')),
-  created_by TEXT
+  created_by TEXT,
+  period_to TEXT
 );
 
 CREATE INDEX idx_ledger_occurred ON ledger(occurred_at);
