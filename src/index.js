@@ -610,8 +610,8 @@ const TEACHER_PHOTO_BASE = "https://harvcentereg.com";
 // the fallback so a future non-picking listing doesn't need a new function).
 function teacherCard(lang, t, pickName, checked) {
   const phase = phaseLabel(lang, t.phase);
-  const scheduleText = t.schedule || (lang === "en" ? "Schedule TBD — ask the teacher directly" : "الجدول لسه هيتحدد — اسأل المدرس مباشرة");
-  const modeBadge = t.mode ? `<span class="mode-badge ${modeBadgeClass(t.mode)}">${t.mode}</span>` : "";
+  const scheduleText = escapeHtml(t.schedule || (lang === "en" ? "Schedule TBD — ask the teacher directly" : "الجدول لسه هيتحدد — اسأل المدرس مباشرة"));
+  const modeBadge = t.mode ? `<span class="mode-badge ${modeBadgeClass(t.mode)}">${escapeHtml(t.mode)}</span>` : "";
   const photo = t.photo
     ? `<img class="t-photo" src="${TEACHER_PHOTO_BASE}${escapeHtml(t.photo)}" alt="" loading="lazy" onerror="this.style.display='none'">`
     : `<div class="t-photo t-photo--empty" aria-hidden="true">${(t.name || "").trim().charAt(0)}</div>`;
@@ -623,7 +623,7 @@ function teacherCard(lang, t, pickName, checked) {
     ${input}
     ${photo}
     <div class="t-info">
-      <div class="t-name">${t.name}${phase ? ` <span class="t-phase">· ${phase}</span>` : ""}</div>
+      <div class="t-name">${escapeHtml(t.name)}${phase ? ` <span class="t-phase">· ${escapeHtml(phase)}</span>` : ""}</div>
       <div class="t-schedule">🕒 ${scheduleText}</div>
       ${modeBadge}
     </div>
@@ -1035,7 +1035,10 @@ export default {
         <label>${t.addName}</label>
         <input name="name" placeholder="${t.addNamePh}" required>
         <label>${t.addClass}</label>
-        <input name="class" placeholder="${t.addClassPh}">
+        <select name="stage">
+          <option value="">${t.addClassPh}</option>
+          ${STAGES.map(s => `<option value="${s.v}">${lang === "en" ? s.en : s.ar}</option>`).join("")}
+        </select>
         <button type="submit">${t.addSubmit}</button>
       </form>`;
       const regLink = `<div class="reg-link">${t.regLink}<br><a href="${url.origin}/register">${url.origin}/register</a></div>`;
