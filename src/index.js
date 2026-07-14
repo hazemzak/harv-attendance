@@ -879,8 +879,15 @@ async function getStaffRole(env, email) {
   if (!email) return null;
   const staffCount = await env.DB.prepare("SELECT COUNT(*) AS n FROM staff").first();
   if (staffCount.n === 0) return "owner";
-  const row = await env.DB.prepare("SELECT role FROM staff WHERE email = ? AND active = 1").bind(email).first();
-  return row ? row.role : "clerk";
+  // Looked up WITHOUT the active filter (claude-review, PR #12 follow-up
+  // round) — a deactivated row must resolve differently from "no row at all",
+  // or /admin/staff's "Deactivate" toggle only ever revokes owner-tier
+  // access (every route only special-cases roleAllowed(..., ["owner"])), and
+  // a fired/deactivated clerk keeps full access to registration, attendance
+  // scanning, and payments.
+  const row = await env.DB.prepare("SELECT role, active FROM staff WHERE email = ?").bind(email).first();
+  if (!row) return "clerk";
+  return row.active ? row.role : "blocked";
 }
 
 function roleAllowed(role, allowed) {
@@ -894,14 +901,9 @@ function forbiddenRole() {
 }
 
 // Guards against locking everyone out of owner-only pages by demoting or
-// deactivating the last active owner (claude-review finding #3 on PR #12) —
+// deactivating the last active owner (claude-review finding #3 on PR #12,
+// made atomic in a later follow-up round — see the two call sites) —
 // `staff` can hold multiple owner rows, this only blocks dropping to zero.
-async function wouldRemoveLastOwner(env, email) {
-  const current = await env.DB.prepare("SELECT role, active FROM staff WHERE email = ?").bind(email).first();
-  if (!current || current.role !== "owner" || !current.active) return false;
-  const others = await env.DB.prepare("SELECT COUNT(*) AS n FROM staff WHERE role = 'owner' AND active = 1 AND email != ?").bind(email).first();
-  return others.n === 0;
-}
 function lastOwnerBlocked(lang) {
   const msg = lang === "en" ? "Can't do that — at least one active owner must remain." : "معلش، لازم يفضل مدير واحد شغال على الأقل.";
   return new Response(msg, { status: 400 });
@@ -920,6 +922,17 @@ export default {
 
     const staffEmail = request.headers.get("Cf-Access-Authenticated-User-Email") || null;
     const staffRole = url.pathname.startsWith("/admin") ? await getStaffRole(env, staffEmail) : null;
+
+    // A deactivated staff row gets zero access, not a silent downgrade to
+    // 'clerk' (claude-review, PR #12 follow-up round). Checked once here
+    // instead of per-route so every current and future /admin* route inherits
+    // it automatically, same pattern as the Cf-Access-Jwt-Assertion check above.
+    if (staffRole === "blocked") return forbiddenRole();
+    // 'viewer' means read-only (labeled "مشاهدة فقط" on /admin/staff) — every
+    // mutation in this app is POST (the CSRF-fix convention established this
+    // session), so blocking POST for viewer here root-causes read-only
+    // enforcement in one place instead of gating each write route individually.
+    if (staffRole === "viewer" && request.method === "POST") return forbiddenRole();
 
     // Replaced the old flat /admin/dashboard (2026-07-13, see /council verdict
     // in HARV_ATTENDANCE_SUPPORT_PLAYBOOK.md) with three role/time-split hubs:
@@ -1956,7 +1969,10 @@ export default {
       const form = await request.formData();
       const shareType = (form.get("share_type") || "").toString().trim();
       const shareValue = parseFloat((form.get("share_value") || "").toString());
-      if (["per_session", "percent"].includes(shareType) && Number.isFinite(shareValue) && shareValue >= 0) {
+      // percent capped at 100 (claude-review, PR #12 follow-up round) — a
+      // fat-fingered entry above 100% would make computeTeacherOwed report
+      // owed higher than what was actually collected.
+      if (["per_session", "percent"].includes(shareType) && Number.isFinite(shareValue) && shareValue >= 0 && (shareType !== "percent" || shareValue <= 100)) {
         await env.DB.prepare("UPDATE teachers SET share_type = ?, share_value = ? WHERE id = ?")
           .bind(shareType, shareValue, shareMatch[1]).run();
       }
@@ -2030,9 +2046,31 @@ export default {
       const name = (form.get("name") || "").toString().trim() || null;
       const role = (form.get("role") || "").toString().trim();
       if (email && ["owner", "clerk", "viewer"].includes(role)) {
-        if (role !== "owner" && await wouldRemoveLastOwner(env, email)) return lastOwnerBlocked(lang);
-        await env.DB.prepare("INSERT INTO staff (email, name, role) VALUES (?, ?, ?) ON CONFLICT(email) DO UPDATE SET name = excluded.name, role = excluded.role, active = 1")
-          .bind(email, name, role).run();
+        if (role === "owner") {
+          // Promoting to/keeping owner can never reduce the active-owner
+          // count, so no guard needed here.
+          await env.DB.prepare("INSERT INTO staff (email, name, role) VALUES (?, ?, ?) ON CONFLICT(email) DO UPDATE SET name = excluded.name, role = excluded.role, active = 1")
+            .bind(email, name, role).run();
+        } else {
+          // Atomic guarded UPDATE (claude-review, PR #12 follow-up round —
+          // TOCTOU: a separate check-then-write left a window where two
+          // concurrent demotions could both pass the check). The WHERE guard
+          // is evaluated as part of this single statement, so there's no gap
+          // for a second request to land in between. A brand-new email can
+          // never be "the last owner," so it falls through to a plain INSERT.
+          const { meta } = await env.DB.prepare(
+            `UPDATE staff SET name = ?, role = ?, active = 1
+             WHERE email = ? AND NOT (
+               role = 'owner' AND active = 1
+               AND (SELECT COUNT(*) FROM staff WHERE role = 'owner' AND active = 1 AND email != ?) = 0
+             )`
+          ).bind(name, role, email, email).run();
+          if (meta.changes === 0) {
+            const exists = await env.DB.prepare("SELECT 1 FROM staff WHERE email = ?").bind(email).first();
+            if (exists) return lastOwnerBlocked(lang);
+            await env.DB.prepare("INSERT INTO staff (email, name, role) VALUES (?, ?, ?)").bind(email, name, role).run();
+          }
+        }
       }
       return Response.redirect(url.origin + "/admin/staff" + (lang === "en" ? "?lang=en" : ""), 303);
     }
@@ -2042,8 +2080,19 @@ export default {
       if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
       const lang = langOf(url);
       const email = decodeURIComponent(staffToggleMatch[1]);
-      if (await wouldRemoveLastOwner(env, email)) return lastOwnerBlocked(lang);
-      await env.DB.prepare("UPDATE staff SET active = 1 - active WHERE email = ?").bind(email).run();
+      // Same atomic-guard pattern as above — the flip and the guard happen
+      // in one statement, closing the TOCTOU window.
+      const { meta } = await env.DB.prepare(
+        `UPDATE staff SET active = 1 - active
+         WHERE email = ? AND NOT (
+           role = 'owner' AND active = 1
+           AND (SELECT COUNT(*) FROM staff WHERE role = 'owner' AND active = 1 AND email != ?) = 0
+         )`
+      ).bind(email, email).run();
+      if (meta.changes === 0) {
+        const exists = await env.DB.prepare("SELECT 1 FROM staff WHERE email = ?").bind(email).first();
+        if (exists) return lastOwnerBlocked(lang);
+      }
       return Response.redirect(url.origin + "/admin/staff" + (lang === "en" ? "?lang=en" : ""), 303);
     }
 

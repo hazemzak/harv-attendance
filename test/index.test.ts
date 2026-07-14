@@ -1289,6 +1289,38 @@ describe("staff roles: owner-only routes (added 2026-07-13)", () => {
     expect(res.status).toBe(403);
   });
 
+  it("a deactivated clerk is blocked from /admin entirely, not silently downgraded to a working clerk session (claude-review, PR #12 follow-up round)", async () => {
+    await env.DB.prepare("INSERT INTO staff (email, role, active) VALUES ('fired-clerk@test.local', 'clerk', 0)").run();
+    const res = await SELF.fetch("https://example.com/admin", {
+      headers: { "Cf-Access-Authenticated-User-Email": "fired-clerk@test.local", "Cf-Access-Jwt-Assertion": "test" }
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("a deactivated owner is blocked from /admin entirely, not silently downgraded to clerk", async () => {
+    await env.DB.prepare("INSERT INTO staff (email, role, active) VALUES ('fired-owner@test.local', 'owner', 0)").run();
+    const res = await SELF.fetch("https://example.com/admin/ledger", {
+      headers: { "Cf-Access-Authenticated-User-Email": "fired-owner@test.local", "Cf-Access-Jwt-Assertion": "test" }
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("a viewer can read ordinary staff pages but is blocked from any POST (mutation) route, unlike a clerk", async () => {
+    await env.DB.prepare("INSERT INTO staff (email, role) VALUES ('viewer@test.local', 'viewer')").run();
+    const viewerHeaders = { "Cf-Access-Authenticated-User-Email": "viewer@test.local", "Cf-Access-Jwt-Assertion": "test" };
+    const getRes = await SELF.fetch("https://example.com/admin", { headers: viewerHeaders });
+    expect(getRes.status).toBe(200);
+
+    const id = await insertStudent({ name: "Viewer Block Test", status: "approved" });
+    await env.DB.prepare("INSERT INTO bookings (student_id, subject, amount, status) VALUES (?, 'math', 300, 'active')").bind(id).run();
+    const payForm = new FormData();
+    payForm.set("amount", "50");
+    const postRes = await SELF.fetch(`https://example.com/admin/students/${id}/pay`, { method: "POST", body: payForm, headers: viewerHeaders });
+    expect(postRes.status).toBe(403);
+    const payment = await env.DB.prepare("SELECT id FROM payments WHERE student_id = ?").bind(id).first();
+    expect(payment).toBeFalsy();
+  });
+
   it("recording a payment and an expense both stamp created_by with the acting staff member's email", async () => {
     const id = await insertStudent({ name: "Stamp Test", status: "approved" });
     await env.DB.prepare("INSERT INTO bookings (student_id, subject, amount, status) VALUES (?, 'math', 300, 'active')").bind(id).run();
