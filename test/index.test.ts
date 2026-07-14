@@ -518,6 +518,17 @@ describe("/register: subject → teacher live panel (added 2026-07-13, most stud
     expect(html).toContain("أ. أحمد");
   });
 
+  it("teacherCard() escapes schedule and mode, not just name/phase (claude-review, this session -- t.name/phase were escaped in an earlier fix on this branch, but t.schedule/t.mode in the same function were missed)", async () => {
+    await env.DB.prepare(
+      "INSERT INTO teachers (id, name, subject, phase, mode, schedule, track) VALUES ('t-xss', 'أ. تست', 'math', NULL, '<script>alert(1)</script>', '<img src=x onerror=alert(2)>', NULL)"
+    ).run();
+
+    const res = await SELF.fetch("https://example.com/register");
+    const html = await res.text();
+    expect(html).not.toContain("<script>alert(1)</script>");
+    expect(html).not.toContain("<img src=x onerror=alert(2)>");
+  });
+
   it("keeps a dual-track subject's Arabic and English-cousin teacher lists separate", async () => {
     await env.DB.prepare(
       "INSERT INTO teachers (id, name, subject, phase, mode, schedule, track) VALUES ('t2', 'Mr. Sam', 'math', NULL, 'اونلاين', '', 'لغات')"
