@@ -623,7 +623,7 @@ function teacherCard(lang, t, pickName, checked) {
     ${input}
     ${photo}
     <div class="t-info">
-      <div class="t-name">${t.name}${phase ? ` <span class="t-phase">· ${phase}</span>` : ""}</div>
+      <div class="t-name">${escapeHtml(t.name)}${phase ? ` <span class="t-phase">· ${escapeHtml(phase)}</span>` : ""}</div>
       <div class="t-schedule">🕒 ${scheduleText}</div>
       ${modeBadge}
     </div>
@@ -1035,7 +1035,10 @@ export default {
         <label>${t.addName}</label>
         <input name="name" placeholder="${t.addNamePh}" required>
         <label>${t.addClass}</label>
-        <input name="class" placeholder="${t.addClassPh}">
+        <select name="stage">
+          <option value="">${t.addClassPh}</option>
+          ${STAGES.map(s => `<option value="${s.v}">${lang === "en" ? s.en : s.ar}</option>`).join("")}
+        </select>
         <button type="submit">${t.addSubmit}</button>
       </form>`;
       const regLink = `<div class="reg-link">${t.regLink}<br><a href="${url.origin}/register">${url.origin}/register</a></div>`;

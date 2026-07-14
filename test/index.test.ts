@@ -347,6 +347,21 @@ describe("/admin/students/:id/process: booking-row array length mismatch (found 
 });
 
 describe("stage: whitelist at write time (found by claude-review, round 4)", () => {
+  it("/admin's walk-in add-student form actually submits 'stage', not a stale 'class' field the handler no longer reads (claude-review, this session -- the handler was updated to read 'stage' but the rendered form was never updated to match, so every real submission silently saved an empty stage)", async () => {
+    const adminHtml = await (await adminFetch("https://example.com/admin")).text();
+    expect(adminHtml).toContain('name="stage"');
+    expect(adminHtml).not.toContain('name="class"');
+
+    const form = new FormData();
+    form.set("name", "Walkin Stage Test");
+    form.set("stage", "بكالوريا");
+    const res = await adminFetch("https://example.com/admin/students", { method: "POST", body: form, redirect: "manual" });
+    expect(res.status).toBe(303);
+
+    const row = await env.DB.prepare("SELECT stage FROM students WHERE name = 'Walkin Stage Test'").first();
+    expect(row?.stage).toBe("بكالوريا");
+  });
+
   it("/register rejects a stage value that isn't a known STAGES slug", async () => {
     const form = new FormData();
     form.set("name", "Stage Whitelist Test");
