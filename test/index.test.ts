@@ -1,12 +1,28 @@
 import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { html, raw } from "../src/index.js";
+import { html, raw, getStudentBalance } from "../src/index.js";
 
-// Cloudflare Access injects this header at the edge before /admin* requests reach
-// the Worker in production; SELF.fetch in tests bypasses Access entirely, so admin
-// calls need it added manually to simulate an authenticated session.
+// Cloudflare Access injects both these headers at the edge before /admin*
+// requests reach the Worker in production; SELF.fetch in tests bypasses Access
+// entirely, so admin calls need them added manually to simulate an
+// authenticated session. The email defaults to a fixed test address, explicitly
+// seeded as 'owner' on every call — relying on getStaffRole()'s empty-table
+// bootstrap rule instead would only work for tests that happen to run before
+// any other test seeds a non-owner `staff` row in this same shared-state file
+// (a real bug this surfaced: later owner-gated tests silently started getting
+// 403s once earlier tests seeded a 'clerk' row). Tests that care about a
+// *specific* non-owner role should use clerkFetch() below instead.
 function adminFetch(path: string, init?: RequestInit) {
-  return SELF.fetch(path, { ...init, headers: { ...(init?.headers || {}), "Cf-Access-Jwt-Assertion": "test" } });
+  return env.DB.prepare("INSERT OR IGNORE INTO staff (email, role) VALUES ('staff@test.local', 'owner')").run().then(() =>
+    SELF.fetch(path, {
+      ...init,
+      headers: {
+        "Cf-Access-Authenticated-User-Email": "staff@test.local",
+        ...(init?.headers || {}),
+        "Cf-Access-Jwt-Assertion": "test"
+      }
+    })
+  );
 }
 
 async function insertStudent(fields: Record<string, string | null>) {
@@ -374,7 +390,7 @@ describe("/admin/students/:id/process: booking amount can't go negative", () => 
 });
 
 describe("/ no longer serves the dashboard unauthenticated (found post-deploy 2026-07-11)", () => {
-  it("redirects / to the gated /admin/dashboard instead of rendering revenue at the open root", async () => {
+  it("redirects / to the gated /admin/intake instead of rendering revenue at the open root", async () => {
     const id = await insertStudent({ name: "Dashboard Redirect Test", status: "approved" });
     await env.DB.prepare(
       "INSERT INTO bookings (student_id, subject, teacher_name, schedule, amount) VALUES (?, 'math', 'x', '', 12345)"
@@ -382,25 +398,16 @@ describe("/ no longer serves the dashboard unauthenticated (found post-deploy 20
 
     const res = await SELF.fetch("https://example.com/", { redirect: "manual" });
     expect(res.status).toBe(302);
-    expect(res.headers.get("location")).toContain("/admin/dashboard");
+    expect(res.headers.get("location")).toContain("/admin/intake");
 
     const html = await res.text();
     expect(html).not.toContain("12345");
   });
-
-  it("still renders the stat tiles (including revenue) at /admin/dashboard", async () => {
-    const id = await insertStudent({ name: "Dashboard Content Test", status: "approved" });
-    await env.DB.prepare(
-      "INSERT INTO bookings (student_id, subject, teacher_name, schedule, amount) VALUES (?, 'math', 'x', '', 500)"
-    ).bind(id).run();
-
-    const res = await adminFetch("https://example.com/admin/dashboard");
-    expect(res.status).toBe(200);
-    const html = await res.text();
-    expect(html).toContain("stat-tile");
-  });
 });
 
+// 2026-07-13: /admin/dashboard retired in favor of the /council-verdict
+// role-first/time-first split (/admin/intake, /admin/session, /admin/owner) —
+// kept as a bare redirect for old bookmarks/muscle memory.
 describe("/admin/students/:id/process: track whitelist", () => {
   it("drops an invalid track value instead of storing it raw", async () => {
     const id = await insertStudent({ name: "Track Test", status: "pending" });
@@ -429,6 +436,124 @@ describe("/admin*: in-app Access defense-in-depth (added 2026-07-12, follow-up t
   });
 });
 
+describe("/register: subject → teacher live panel (added 2026-07-13, most students search by teacher not subject)", () => {
+  it("renders a hidden block naming the teacher for a subject that has one", async () => {
+    await env.DB.prepare(
+      "INSERT INTO teachers (id, name, subject, phase, mode, schedule, track) VALUES ('t1', 'أ. أحمد', 'math', NULL, 'سنتر', 'السبت 5PM', NULL)"
+    ).run();
+
+    const res = await SELF.fetch("https://example.com/register");
+    const html = await res.text();
+    expect(html).toContain('data-subject-block="math"');
+    expect(html).toContain("أ. أحمد");
+  });
+
+  it("keeps a dual-track subject's Arabic and English-cousin teacher lists separate", async () => {
+    await env.DB.prepare(
+      "INSERT INTO teachers (id, name, subject, phase, mode, schedule, track) VALUES ('t2', 'Mr. Sam', 'math', NULL, 'اونلاين', '', 'لغات')"
+    ).run();
+    await env.DB.prepare(
+      "INSERT INTO teachers (id, name, subject, phase, mode, schedule, track) VALUES ('t3', 'أ. محمود', 'math', NULL, 'سنتر', '', 'عربي')"
+    ).run();
+
+    const res = await SELF.fetch("https://example.com/register");
+    const html = await res.text();
+    // Slice from this block's own marker up to whichever comes first — the next
+    // block's marker or the end of the subjects panel — rather than counting
+    // "</div>" tags, since teacherCard() nests its own <div>s inside each block.
+    function blockFor(slug: string) {
+      const marker = `data-subject-block="${slug}"`;
+      const start = html.indexOf(marker);
+      const next = html.indexOf('data-subject-block="', start + marker.length);
+      return html.slice(start, next === -1 ? html.indexOf("</form>", start) : next);
+    }
+    expect(blockFor("math")).not.toContain("Mr. Sam");
+    expect(blockFor("math-en")).not.toContain("أ. محمود");
+  });
+});
+
+describe("/register: teacher picker (added 2026-07-13, students can now select a teacher, not just view them)", () => {
+  it("renders a selectable radio per teacher with the pick_<slug> name and a data-teacher-schedule attribute", async () => {
+    await env.DB.prepare(
+      "INSERT INTO teachers (id, name, subject, phase, mode, schedule, track, photo) VALUES ('t-pick-1', 'أ. جمال', 'math', NULL, 'سنتر', 'الجمعة 4PM', NULL, '/designs/teachers/gamal.jpg')"
+    ).run();
+
+    const res = await SELF.fetch("https://example.com/register");
+    const html = await res.text();
+    expect(html).toContain('name="pick_math"');
+    expect(html).toContain('value="t-pick-1"');
+    expect(html).toContain('data-teacher-schedule="الجمعة 4PM"');
+    expect(html).toContain('src="https://harvcentereg.com/designs/teachers/gamal.jpg"');
+  });
+
+  it("renders a fallback initial avatar when a teacher has no photo", async () => {
+    await env.DB.prepare(
+      "INSERT INTO teachers (id, name, subject, phase, mode, schedule, track) VALUES ('t-pick-nophoto', 'يوسف', 'math', NULL, 'سنتر', '', NULL)"
+    ).run();
+    const res = await SELF.fetch("https://example.com/register");
+    const html = await res.text();
+    expect(html).toContain('t-photo--empty');
+  });
+
+  it("seeds a booking row (amount 0) from a pick_<slug> selection on submit", async () => {
+    await env.DB.prepare(
+      "INSERT INTO teachers (id, name, subject, phase, mode, schedule, track) VALUES ('t-pick-2', 'أ. سامي', 'physics', NULL, 'سنتر', 'الأحد 6PM', NULL)"
+    ).run();
+    const form = new FormData();
+    form.set("name", "Picker Test Student");
+    form.set("stage", "تالتة ثانوي");
+    form.set("phone", "01111111111");
+    form.set("parent_phone", "01222222222");
+    form.set("subjects", "physics");
+    form.set("pick_physics", "t-pick-2");
+    const res = await SELF.fetch("https://example.com/register", { method: "POST", body: form });
+    expect(res.status).toBe(200);
+
+    const { results: students } = await env.DB.prepare("SELECT id FROM students WHERE name = ?").bind("Picker Test Student").all();
+    const studentId = (students[0] as any).id;
+    const { results: bookings } = await env.DB.prepare("SELECT subject, teacher_name, schedule, amount FROM bookings WHERE student_id = ?").bind(studentId).all();
+    expect(bookings).toEqual([{ subject: "physics", teacher_name: "أ. سامي", schedule: "الأحد 6PM", amount: 0 }]);
+  });
+
+  it("does not insert a booking when no teacher was picked for a subject", async () => {
+    const form = new FormData();
+    form.set("name", "No Pick Test Student");
+    form.set("stage", "تالتة ثانوي");
+    form.set("phone", "01133331111");
+    form.set("parent_phone", "01244442222");
+    form.set("subjects", "physics");
+    const res = await SELF.fetch("https://example.com/register", { method: "POST", body: form });
+    expect(res.status).toBe(200);
+
+    const { results: students } = await env.DB.prepare("SELECT id FROM students WHERE name = ?").bind("No Pick Test Student").all();
+    const studentId = (students[0] as any).id;
+    const { results: bookings } = await env.DB.prepare("SELECT * FROM bookings WHERE student_id = ?").bind(studentId).all();
+    expect(bookings).toEqual([]);
+  });
+});
+
+describe("/admin/students/:id/process: teacher ref panel pre-selects and fills bookings (added 2026-07-13)", () => {
+  it("pre-checks the radio matching an existing booking's teacher for that subject", async () => {
+    await env.DB.prepare(
+      "INSERT INTO teachers (id, name, subject, phase, mode, schedule, track) VALUES ('t-ref-1', 'أ. هيثم', 'math', NULL, 'سنتر', 'السبت 3PM', NULL)"
+    ).run();
+    await env.DB.prepare(
+      "INSERT INTO teachers (id, name, subject, phase, mode, schedule, track) VALUES ('t-ref-2', 'أ. وليد', 'math', NULL, 'سنتر', 'الأحد 3PM', NULL)"
+    ).run();
+    const id = await insertStudent({ name: "Ref Panel Pick Test", status: "pending", subjects: "math" });
+    await env.DB.prepare(
+      "INSERT INTO bookings (student_id, subject, teacher_name, schedule, amount) VALUES (?, 'math', 'أ. وليد', 'الأحد 3PM', 0)"
+    ).bind(id).run();
+
+    const res = await adminFetch(`https://example.com/admin/students/${id}/process`);
+    const html = await res.text();
+    const waliedMarker = `value="t-ref-2" checked`;
+    const haithamMarker = `value="t-ref-1" checked`;
+    expect(html).toContain(waliedMarker);
+    expect(html).not.toContain(haithamMarker);
+  });
+});
+
 describe("html`` tagged template (added 2026-07-12, for future render functions)", () => {
   it("escapes an interpolated value by default", () => {
     const out = html`<strong>${"<script>alert(1)</script>"}</strong>`;
@@ -446,3 +571,24 @@ describe("html`` tagged template (added 2026-07-12, for future render functions)
     expect(out).toBe("<ul>&lt;b&gt;a&lt;/b&gt;b</ul>");
   });
 });
+
+describe("roster: one-tap WhatsApp send per row (added 2026-07-14)", () => {
+  it("renders a WhatsApp link linking to the student's own /student page, for an approved student with a phone", async () => {
+    const id = await insertStudent({ name: "WA Roster Test", status: "approved", phone: "01000000077" });
+    const html = await (await adminFetch("https://example.com/admin")).text();
+    expect(html).toContain("wa.me/201000000077");
+    expect(html).toContain(encodeURIComponent(`student?id=${id}`));
+  });
+
+  it("omits the WhatsApp button for an approved student with no phone on file", async () => {
+    await insertStudent({ name: "No Phone Roster Test", status: "approved", phone: null });
+    const html = await (await adminFetch("https://example.com/admin")).text();
+    // Can't assert global absence of "wa.me" since other students in this
+    // shared-state file may have phones — check this specific card has no link.
+    const cardStart = html.indexOf("No Phone Roster Test");
+    const cardEnd = html.indexOf("</div></div>", cardStart);
+    const card = html.slice(cardStart, cardEnd);
+    expect(card).not.toContain("wa.me");
+  });
+});
+
