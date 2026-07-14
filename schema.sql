@@ -37,6 +37,11 @@ CREATE TABLE attendance (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_group_day
   ON attendance(student_id, group_id, date(scanned_at));
 
+-- Restores the one-scan-per-day guarantee for ungrouped rows (the index above
+-- can't, since SQLite treats every NULL group_id as distinct).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_nogroup_day
+  ON attendance(student_id, date(scanned_at)) WHERE group_id IS NULL;
+
 -- share_type/share_value: 'percent' of collected payments on their groups'
 -- bookings, or 'per_session' EGP per attendance row logged against their groups.
 CREATE TABLE teachers (
@@ -49,7 +54,7 @@ CREATE TABLE teachers (
   schedule TEXT,
   track TEXT,
   photo TEXT,
-  share_type TEXT,
+  share_type TEXT CHECK (share_type IN ('percent', 'per_session')),
   share_value REAL
 );
 
@@ -112,7 +117,7 @@ CREATE TABLE bookings (
   group_id INTEGER REFERENCES groups(id),
   status TEXT NOT NULL DEFAULT 'active',
   status_reason TEXT,
-  discount_amount REAL NOT NULL DEFAULT 0,
+  discount_amount REAL NOT NULL DEFAULT 0 CHECK (discount_amount >= 0),
   discount_note TEXT
 );
 
@@ -125,7 +130,7 @@ CREATE TABLE payments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
   booking_id INTEGER REFERENCES bookings(id),
-  amount REAL NOT NULL,
+  amount REAL NOT NULL CHECK (amount >= 0),
   method TEXT,
   note TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -140,7 +145,7 @@ CREATE TABLE ledger (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   kind TEXT NOT NULL CHECK (kind IN ('income', 'expense')),
   category TEXT,
-  amount REAL NOT NULL,
+  amount REAL NOT NULL CHECK (amount >= 0),
   note TEXT,
   occurred_at TEXT NOT NULL DEFAULT (datetime('now')),
   created_by TEXT

@@ -12,3 +12,10 @@ ALTER TABLE attendance ADD COLUMN teacher_name TEXT;
 DROP INDEX IF EXISTS idx_attendance_student_day;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_group_day
   ON attendance(student_id, group_id, date(scanned_at));
+
+-- The index above only helps grouped scans (SQLite treats every NULL group_id
+-- as distinct, so it can't dedupe ungrouped rows) — this partial index
+-- restores the exact one-scan-per-day guarantee idx_attendance_student_day
+-- used to give, scoped to the ungrouped case only.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_nogroup_day
+  ON attendance(student_id, date(scanned_at)) WHERE group_id IS NULL;

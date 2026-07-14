@@ -10,7 +10,7 @@ CREATE TABLE payments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
   booking_id INTEGER REFERENCES bookings(id),
-  amount REAL NOT NULL,
+  amount REAL NOT NULL CHECK (amount >= 0),
   method TEXT,
   note TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -27,7 +27,7 @@ CREATE TABLE ledger (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   kind TEXT NOT NULL CHECK (kind IN ('income', 'expense')),
   category TEXT,
-  amount REAL NOT NULL,
+  amount REAL NOT NULL CHECK (amount >= 0),
   note TEXT,
   occurred_at TEXT NOT NULL DEFAULT (datetime('now')),
   created_by TEXT
@@ -37,5 +37,5 @@ CREATE INDEX idx_ledger_occurred ON ledger(occurred_at);
 
 -- Per-booking discount/voucher (covers the old app's kobon table at MVP scope —
 -- a shared reusable coupon-code table is deferred until there's a real ask for it).
-ALTER TABLE bookings ADD COLUMN discount_amount REAL NOT NULL DEFAULT 0;
+ALTER TABLE bookings ADD COLUMN discount_amount REAL NOT NULL DEFAULT 0 CHECK (discount_amount >= 0);
 ALTER TABLE bookings ADD COLUMN discount_note TEXT;

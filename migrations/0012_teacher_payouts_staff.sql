@@ -5,7 +5,7 @@
 -- share_type/share_value: how a teacher is paid out of what students pay.
 -- 'percent' = share_value% of collected payments on their groups' bookings;
 -- 'per_session' = share_value EGP per attendance row logged against their groups.
-ALTER TABLE teachers ADD COLUMN share_type TEXT;
+ALTER TABLE teachers ADD COLUMN share_type TEXT CHECK (share_type IN ('percent', 'per_session'));
 ALTER TABLE teachers ADD COLUMN share_value REAL;
 
 -- Reuses Cloudflare Access for authentication (Cf-Access-Authenticated-User-Email
