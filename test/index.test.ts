@@ -495,6 +495,16 @@ describe("/register: teacher picker (added 2026-07-13, students can now select a
     expect(html).toContain('t-photo--empty');
   });
 
+  it("escapes a teacher photo path instead of letting it break out of the src attribute (found by claude-review, PR #8)", async () => {
+    await env.DB.prepare(
+      "INSERT INTO teachers (id, name, subject, phase, mode, schedule, track, photo) VALUES ('t-pick-xss', 'أ. خطر', 'math', NULL, 'سنتر', '', NULL, '\" onerror=\"alert(1)')"
+    ).run();
+    const res = await SELF.fetch("https://example.com/register");
+    const html = await res.text();
+    expect(html).not.toContain('onerror="alert(1)"');
+    expect(html).toContain("&quot; onerror=&quot;alert(1)");
+  });
+
   it("seeds a booking row (amount 0) from a pick_<slug> selection on submit", async () => {
     await env.DB.prepare(
       "INSERT INTO teachers (id, name, subject, phase, mode, schedule, track) VALUES ('t-pick-2', 'أ. سامي', 'physics', NULL, 'سنتر', 'الأحد 6PM', NULL)"

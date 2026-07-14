@@ -392,12 +392,13 @@ async function markAttendance(env, studentId, groupId = null) {
   };
 
   if (groupId === null) {
-    const existing = await env.DB.prepare(
-      "SELECT id FROM attendance WHERE student_id = ? AND group_id IS NULL AND date(scanned_at) = date('now')"
-    ).bind(studentId).first();
-    if (existing) return { result: "already", ...base };
-    await env.DB.prepare("INSERT INTO attendance (student_id) VALUES (?)").bind(studentId).run();
-    return { result: "marked", ...base };
+    // Relies on idx_attendance_student_nogroup_day (partial unique index,
+    // migration 0010) to reject a same-day duplicate atomically instead of a
+    // separate SELECT-then-INSERT, which was a TOCTOU race (claude-review,
+    // PR #8) — two near-simultaneous scans could both pass the existence
+    // check before either insert landed.
+    const { meta } = await env.DB.prepare("INSERT OR IGNORE INTO attendance (student_id) VALUES (?)").bind(studentId).run();
+    return { result: meta.changes > 0 ? "marked" : "already", ...base };
   }
 
   // room_name flows through to the recent-scans table and /admin/today so scans
@@ -601,7 +602,7 @@ function teacherCard(lang, t, pickName, checked) {
   const scheduleText = t.schedule || (lang === "en" ? "Schedule TBD — ask the teacher directly" : "الجدول لسه هيتحدد — اسأل المدرس مباشرة");
   const modeBadge = t.mode ? `<span class="mode-badge ${modeBadgeClass(t.mode)}">${t.mode}</span>` : "";
   const photo = t.photo
-    ? `<img class="t-photo" src="${TEACHER_PHOTO_BASE}${t.photo}" alt="" loading="lazy" onerror="this.style.display='none'">`
+    ? `<img class="t-photo" src="${TEACHER_PHOTO_BASE}${escapeHtml(t.photo)}" alt="" loading="lazy" onerror="this.style.display='none'">`
     : `<div class="t-photo t-photo--empty" aria-hidden="true">${(t.name || "").trim().charAt(0)}</div>`;
   const input = pickName
     ? `<input type="radio" name="${pickName}" value="${t.id}" ${checked ? "checked" : ""} data-teacher-name="${escapeHtml(t.name)}" data-teacher-schedule="${escapeHtml(t.schedule || "")}">`
@@ -1326,6 +1327,12 @@ export default {
     // confirmation (and anything else that just needs a small identity thumbnail)
     // can reference an <img src> instead of every scan JSON response embedding a
     // full base64 blob — a scan already fires often; keep that payload small.
+    // Deliberately not owner-gated (claude-review, PR #8, asked to confirm this
+    // wasn't an oversight): balance/payment recording here is a single
+    // student's day-to-day front-desk transaction, not a business-wide
+    // financial view — clerk needs this to actually collect payment at
+    // registration. Owner-only stays scoped to room/group pricing setup, the
+    // ledger, teacher payouts, and staff management (see /admin/owner).
     const estamaraMatch = url.pathname.match(/^\/admin\/students\/(\d+)\/estamara$/);
     if (estamaraMatch && request.method === "GET") {
       const lang = langOf(url);
