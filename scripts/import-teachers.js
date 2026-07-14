@@ -21,7 +21,7 @@ const data = JSON.parse(fs.readFileSync(SOURCE, "utf-8"));
 const lines = ["DELETE FROM teachers;"];
 for (const t of data.teachers) {
   lines.push(
-    `INSERT INTO teachers (id, name, subject, subject_label, phase, mode, schedule, track) VALUES (${esc(t.id)}, ${esc(t.name)}, ${esc(t.subject)}, ${esc(t.subjectLabel)}, ${esc(t.phase)}, ${esc(t.mode)}, ${esc(t.schedule)}, ${esc(t.track)});`
+    `INSERT INTO teachers (id, name, subject, subject_label, phase, mode, schedule, track, photo) VALUES (${esc(t.id)}, ${esc(t.name)}, ${esc(t.subject)}, ${esc(t.subjectLabel)}, ${esc(t.phase)}, ${esc(t.mode)}, ${esc(t.schedule)}, ${esc(t.track)}, ${esc(t.photo)});`
   );
 }
 fs.writeFileSync(OUT, lines.join("\n") + "\n");
