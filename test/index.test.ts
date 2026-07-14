@@ -25,20 +25,8 @@ function adminFetch(path: string, init?: RequestInit) {
   );
 }
 
-// Distinct email from adminFetch's — INSERT OR IGNORE means a shared email
-// would silently keep whichever role got seeded first across the whole file.
-function clerkFetch(path: string, init?: RequestInit) {
-  return env.DB.prepare("INSERT OR IGNORE INTO staff (email, role) VALUES ('clerk@test.local', 'clerk')").run().then(() =>
-    SELF.fetch(path, {
-      ...init,
-      headers: {
-        "Cf-Access-Authenticated-User-Email": "clerk@test.local",
-        ...(init?.headers || {}),
-        "Cf-Access-Jwt-Assertion": "test"
-      }
-    })
-  );
-}
+// clerkFetch() is defined further down this file (used by the rooms/groups/
+// bookings work) — reused here instead of a second near-identical definition.
 
 async function insertStudent(fields: Record<string, string | null>) {
   const cols = Object.keys(fields);
