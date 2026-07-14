@@ -1891,8 +1891,13 @@ export default {
       // BETWEEN is inclusive on both ends, so returning the last period's
       // exact end date would let the boundary day get counted — and paid —
       // twice across two consecutive settlements.
+      // period_to IS NOT NULL (claude-review, PR #12 follow-up round): a partial
+      // settlement (amount < owed, see settlementMatch POST below) stores a null
+      // period_to on purpose so it doesn't close the period — falling back to
+      // occurred_at here would silently write off the unpaid shortfall by
+      // advancing the baseline to today anyway.
       const lastPayout = await env.DB.prepare(
-        "SELECT date(MAX(COALESCE(period_to, occurred_at)), '+1 day') AS d FROM ledger WHERE category = 'teacher_payout' AND note LIKE ? ESCAPE '\\'"
+        "SELECT date(MAX(period_to), '+1 day') AS d FROM ledger WHERE category = 'teacher_payout' AND note LIKE ? ESCAPE '\\' AND period_to IS NOT NULL"
       ).bind(teacherName.replace(/[%_]/g, "\\$&") + "%").first();
       return lastPayout.d || "2000-01-01";
     }
@@ -1992,9 +1997,23 @@ export default {
       const note = (form.get("note") || "").toString().trim() || null;
       // The period this payout settles, not when it was recorded — see the
       // lastPayout query on /admin/teachers, which reads this back.
-      const periodTo = /^\d{4}-\d{2}-\d{2}$/.test(form.get("to") || "") ? form.get("to") : null;
-      const teacher = await env.DB.prepare("SELECT name FROM teachers WHERE id = ?").bind(settlementMatch[1]).first();
+      const submittedTo = /^\d{4}-\d{2}-\d{2}$/.test(form.get("to") || "") ? form.get("to") : null;
+      const submittedFrom = /^\d{4}-\d{2}-\d{2}$/.test(form.get("from") || "") ? form.get("from") : null;
+      const teacher = await env.DB.prepare("SELECT id, name, share_type, share_value FROM teachers WHERE id = ?").bind(settlementMatch[1]).first();
       if (teacher && Number.isFinite(amount) && amount > 0) {
+        // Recompute owed server-side rather than trusting the client-echoed
+        // amount/to (claude-review, PR #12 finding #1) — paying less than what's
+        // actually owed for [from, to] must not still close out the period, or
+        // the shortfall is silently written off (lastPayoutFrom's next call
+        // would otherwise treat this period as fully settled).
+        const { owed } = submittedFrom && submittedTo
+          ? await computeTeacherOwed(env, teacher.id, teacher.name, teacher.share_type, teacher.share_value, submittedFrom, submittedTo)
+          : { owed: Infinity };
+        // Compare in integer cents (opus review, same session): owed is a sum
+        // of per-session floats and can drift upward (e.g. 60.30000000000004),
+        // so a teacher paid exactly the displayed "60.30" would otherwise fail
+        // amount >= owed and leave the period open forever.
+        const periodTo = Math.round(amount * 100) >= Math.round(owed * 100) ? submittedTo : null;
         await env.DB.prepare("INSERT INTO ledger (kind, category, amount, note, created_by, period_to) VALUES ('expense', 'teacher_payout', ?, ?, ?, ?)")
           .bind(amount, `${teacher.name}${note ? " — " + note : ""}`, staffEmail, periodTo).run();
       }

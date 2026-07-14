@@ -1484,6 +1484,63 @@ describe("/admin/teachers/:id/settlement: payout math (added 2026-07-13)", () =>
     expect(row?.note).toContain("January");
   });
 
+  it("paying less than owed doesn't close the period -- the shortfall stays owed on the next settlement instead of being silently written off (claude-review finding #1, new session)", async () => {
+    const { teacherId, groupId } = await makeTeacherWithGroup("per_session", 20);
+    const student = await insertStudent({ name: "Underpay Test", status: "approved" });
+    await env.DB.prepare("INSERT INTO attendance (student_id, group_id, scanned_at) VALUES (?, ?, datetime('now', '-2 days'))").bind(student, groupId).run();
+    await env.DB.prepare("INSERT INTO attendance (student_id, group_id) VALUES (?, ?)").bind(student, groupId).run();
+    // owed = 40 (2 sessions * 20), but only 20 is actually paid.
+    const form = new FormData();
+    form.set("from", "2000-01-01");
+    form.set("to", new Date().toISOString().slice(0, 10));
+    form.set("amount", "20");
+    await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`, { method: "POST", body: form });
+
+    const row = await env.DB.prepare("SELECT period_to FROM ledger WHERE category = 'teacher_payout' AND amount = 20").first();
+    expect(row?.period_to).toBeNull(); // underpaid -- must not record a closing period_to
+
+    // The next settlement (no explicit from/to, so it uses lastPayoutFrom())
+    // must still show the full 40 owed, not 0 or just the new sessions --
+    // both attendance rows are still unsettled since the period never closed.
+    const settlementHtml = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`)).text();
+    expect(settlementHtml).toContain("40.00");
+  });
+
+  it("paying at least what's owed does close the period, recording the submitted 'to' as period_to", async () => {
+    const { teacherId, groupId } = await makeTeacherWithGroup("per_session", 20);
+    const student = await insertStudent({ name: "Full Pay Test", status: "approved" });
+    await env.DB.prepare("INSERT INTO attendance (student_id, group_id) VALUES (?, ?)").bind(student, groupId).run();
+    const to = new Date().toISOString().slice(0, 10);
+    const form = new FormData();
+    form.set("from", "2000-01-01");
+    form.set("to", to);
+    form.set("amount", "20"); // exactly owed
+    await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`, { method: "POST", body: form });
+
+    const row = await env.DB.prepare("SELECT period_to FROM ledger WHERE category = 'teacher_payout' AND amount = 20 ORDER BY id DESC LIMIT 1").first();
+    expect(row?.period_to).toBe(to);
+  });
+
+  it("paying the exact owed amount closes the period even when share math drifts in floating point (opus review, same session)", async () => {
+    // 20.1 * 3 = 60.30000000000004 in JS float math -- the settlement form
+    // prefills the displayed/paid amount as owed.toFixed(2) = "60.30", which
+    // parses back to 60.3. A raw `amount >= owed` comparison fails here.
+    const { teacherId, groupId } = await makeTeacherWithGroup("per_session", 20.1);
+    for (let i = 0; i < 3; i++) {
+      const student = await insertStudent({ name: `FP Drift Test ${i}`, status: "approved" });
+      await env.DB.prepare("INSERT INTO attendance (student_id, group_id) VALUES (?, ?)").bind(student, groupId).run();
+    }
+    const to = new Date().toISOString().slice(0, 10);
+    const form = new FormData();
+    form.set("from", "2000-01-01");
+    form.set("to", to);
+    form.set("amount", "60.30");
+    await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`, { method: "POST", body: form });
+
+    const row = await env.DB.prepare("SELECT period_to FROM ledger WHERE category = 'teacher_payout' AND amount = 60.3 ORDER BY id DESC LIMIT 1").first();
+    expect(row?.period_to).toBe(to);
+  });
+
   it("the settlement page's default date range matches what /admin/teachers just flagged as owed, not a 'today only' window (claude-review finding #1 on a later PR #12 review round)", async () => {
     const { teacherId, groupId } = await makeTeacherWithGroup("per_session", 15);
     const student = await insertStudent({ name: "Settle Range Test", status: "approved" });
