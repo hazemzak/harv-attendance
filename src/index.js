@@ -2010,16 +2010,24 @@ export default {
       // The period this payout settles, not when it was recorded — see the
       // lastPayout query on /admin/teachers, which reads this back.
       const submittedTo = /^\d{4}-\d{2}-\d{2}$/.test(form.get("to") || "") ? form.get("to") : null;
-      const submittedFrom = /^\d{4}-\d{2}-\d{2}$/.test(form.get("from") || "") ? form.get("from") : null;
       const teacher = await env.DB.prepare("SELECT id, name, share_type, share_value FROM teachers WHERE id = ?").bind(settlementMatch[1]).first();
       if (teacher && Number.isFinite(amount) && amount > 0) {
+        // `from` is always recomputed server-side, never trusted from the form
+        // (claude-review finding #1, this session): the GET page's `from` can
+        // be overridden via ?from= and echoed back in a hidden field -- if the
+        // POST trusted that value, a stale/tampered/fat-fingered `from` could
+        // close out (set period_to) only part of a real unpaid gap, and since
+        // lastPayoutFrom() derives the next baseline purely from MAX(period_to),
+        // everything before the submitted `from` would be permanently written
+        // off, not just deferred.
+        const from = await lastPayoutFrom(env, teacher.name);
         // Recompute owed server-side rather than trusting the client-echoed
         // amount/to (claude-review, PR #12 finding #1) — paying less than what's
         // actually owed for [from, to] must not still close out the period, or
         // the shortfall is silently written off (lastPayoutFrom's next call
         // would otherwise treat this period as fully settled).
-        const { owed } = submittedFrom && submittedTo
-          ? await computeTeacherOwed(env, teacher.id, teacher.name, teacher.share_type, teacher.share_value, submittedFrom, submittedTo)
+        const { owed } = submittedTo
+          ? await computeTeacherOwed(env, teacher.id, teacher.name, teacher.share_type, teacher.share_value, from, submittedTo)
           : { owed: Infinity };
         // Compare in integer cents (opus review, same session): owed is a sum
         // of per-session floats and can drift upward (e.g. 60.30000000000004),
@@ -2104,7 +2112,13 @@ export default {
           if (meta.changes === 0) {
             const exists = await env.DB.prepare("SELECT 1 FROM staff WHERE email = ?").bind(email).first();
             if (exists) return lastOwnerBlocked(lang);
-            await env.DB.prepare("INSERT INTO staff (email, name, role) VALUES (?, ?, ?)").bind(email, name, role).run();
+            // Upsert, not a plain INSERT (claude-review finding #2, this
+            // session): two concurrent submissions for the same brand-new
+            // email would both see `exists === false` and both attempt an
+            // INSERT, the second hitting the email PRIMARY KEY and throwing a
+            // raw 500. Same ON CONFLICT pattern as the owner branch above.
+            await env.DB.prepare("INSERT INTO staff (email, name, role) VALUES (?, ?, ?) ON CONFLICT(email) DO UPDATE SET name = excluded.name, role = excluded.role, active = 1")
+              .bind(email, name, role).run();
           }
         }
       }

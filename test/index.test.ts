@@ -1544,6 +1544,36 @@ describe("/admin/teachers/:id/settlement: payout math (added 2026-07-13)", () =>
     expect(row?.period_to).toBe(to);
   });
 
+  it("submitted 'from' on the settlement POST is ignored -- a stale/tampered date can't permanently write off older unpaid sessions (claude-review finding #1, this session's continuation)", async () => {
+    const { teacherId, groupId } = await makeTeacherWithGroup("per_session", 20);
+    const oldStudent1 = await insertStudent({ name: "Old Session Student 1", status: "approved" });
+    const oldStudent2 = await insertStudent({ name: "Old Session Student 2", status: "approved" });
+    await env.DB.prepare("INSERT INTO attendance (student_id, group_id, scanned_at) VALUES (?, ?, datetime('now', '-10 days'))").bind(oldStudent1, groupId).run();
+    await env.DB.prepare("INSERT INTO attendance (student_id, group_id, scanned_at) VALUES (?, ?, datetime('now', '-10 days'))").bind(oldStudent2, groupId).run();
+    const newStudent = await insertStudent({ name: "New Session Student", status: "approved" });
+    await env.DB.prepare("INSERT INTO attendance (student_id, group_id) VALUES (?, ?)").bind(newStudent, groupId).run();
+    // Real owed since the teacher's real baseline (lastPayoutFrom's default
+    // "2000-01-01", no prior payout) is 60 (3 sessions * 20). A fat-fingered
+    // or tampered `from` narrows the window to "today only" (1 session = 20)
+    // and pays exactly that -- must be ignored server-side.
+    const today = new Date().toISOString().slice(0, 10);
+    const form = new FormData();
+    form.set("from", today);
+    form.set("to", today);
+    form.set("amount", "20");
+    await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`, { method: "POST", body: form });
+
+    // Must NOT close the period -- the real owed (60) wasn't fully paid, only
+    // the fake narrow window's 20 was.
+    const row = await env.DB.prepare("SELECT period_to FROM ledger WHERE category = 'teacher_payout' AND amount = 20").first();
+    expect(row?.period_to).toBeNull();
+
+    // The two older sessions must still be counted next time -- not silently
+    // written off by a period_to that jumped past them.
+    const settlementHtml = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`)).text();
+    expect(settlementHtml).toContain("40.00"); // 60 real owed minus the 20 already paid
+  });
+
   it("the settlement page's default date range matches what /admin/teachers just flagged as owed, not a 'today only' window (claude-review finding #1 on a later PR #12 review round)", async () => {
     const { teacherId, groupId } = await makeTeacherWithGroup("per_session", 15);
     const student = await insertStudent({ name: "Settle Range Test", status: "approved" });
