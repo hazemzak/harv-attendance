@@ -1930,8 +1930,13 @@ export default {
       // BETWEEN is inclusive on both ends, so returning the last period's
       // exact end date would let the boundary day get counted — and paid —
       // twice across two consecutive settlements.
+      // period_to IS NOT NULL (claude-review, PR #12 follow-up round): a partial
+      // settlement (amount < owed, see settlementMatch POST below) stores a null
+      // period_to on purpose so it doesn't close the period — falling back to
+      // occurred_at here would silently write off the unpaid shortfall by
+      // advancing the baseline to today anyway.
       const lastPayout = await env.DB.prepare(
-        "SELECT date(MAX(COALESCE(period_to, occurred_at)), '+1 day') AS d FROM ledger WHERE category = 'teacher_payout' AND note LIKE ? ESCAPE '\\'"
+        "SELECT date(MAX(period_to), '+1 day') AS d FROM ledger WHERE category = 'teacher_payout' AND note LIKE ? ESCAPE '\\' AND period_to IS NOT NULL"
       ).bind(teacherName.replace(/[%_]/g, "\\$&") + "%").first();
       return lastPayout.d || "2000-01-01";
     }
@@ -1950,18 +1955,38 @@ export default {
       const groupIds = (await env.DB.prepare("SELECT id FROM groups WHERE teacher_id = ? OR (teacher_id IS NULL AND teacher_name = ?)").bind(teacherId, teacherName).all()).results.map(g => g.id);
       if (!groupIds.length) return { owed: 0, detail: 0 };
       const placeholders = groupIds.map(() => "?").join(",");
+      let owed, detail;
       if (shareType === "per_session") {
+        // Count distinct (group, day) class meetings, not raw attendance rows
+        // (claude-review finding #1, this session): attendance has one row per
+        // student per group per day, so COUNT(*) paid a per_session teacher
+        // once PER STUDENT who showed up instead of once per class held -- a
+        // 20-student group meeting once would have paid 20x the real rate.
         const row = await env.DB.prepare(
-          `SELECT COUNT(*) AS n FROM attendance WHERE group_id IN (${placeholders}) AND date(scanned_at) BETWEEN ? AND ?`
+          `SELECT COUNT(*) AS n FROM (
+             SELECT DISTINCT group_id, date(scanned_at) AS d
+             FROM attendance WHERE group_id IN (${placeholders}) AND date(scanned_at) BETWEEN ? AND ?
+           )`
         ).bind(...groupIds, from, to).first();
-        return { owed: row.n * shareValue, detail: row.n };
+        owed = row.n * shareValue; detail = row.n;
+      } else {
+        const row = await env.DB.prepare(
+          `SELECT COALESCE(SUM(p.amount), 0) AS n FROM payments p
+           JOIN bookings b ON b.id = p.booking_id
+           WHERE b.group_id IN (${placeholders}) AND date(p.created_at) BETWEEN ? AND ?`
+        ).bind(...groupIds, from, to).first();
+        owed = row.n * shareValue / 100; detail = row.n;
       }
-      const row = await env.DB.prepare(
-        `SELECT COALESCE(SUM(p.amount), 0) AS n FROM payments p
-         JOIN bookings b ON b.id = p.booking_id
-         WHERE b.group_id IN (${placeholders}) AND date(p.created_at) BETWEEN ? AND ?`
-      ).bind(...groupIds, from, to).first();
-      return { owed: row.n * shareValue / 100, detail: row.n };
+      // Net out partial payouts already recorded toward this still-open period
+      // (claude-review finding #1, same session): a partial payment leaves
+      // period_to NULL so the period stays open (see lastPayoutFrom/settlement
+      // POST below) -- without subtracting it here, the settlement page keeps
+      // showing the FULL original owed amount forever, risking a real
+      // double-payout if the owner pays the displayed total again.
+      const partial = await env.DB.prepare(
+        "SELECT COALESCE(SUM(amount), 0) AS n FROM ledger WHERE category = 'teacher_payout' AND period_to IS NULL AND date(occurred_at) >= ? AND note LIKE ? ESCAPE '\\'"
+      ).bind(from, teacherName.replace(/[%_]/g, "\\$&") + "%").first();
+      return { owed: Math.max(0, owed - partial.n), detail };
     }
 
     // teachers.id is a TEXT slug (e.g. imported from data/teachers.json), not
@@ -1975,7 +2000,13 @@ export default {
       const teacher = await env.DB.prepare("SELECT id, name, subject, share_type, share_value FROM teachers WHERE id = ?").bind(settlementMatch[1]).first();
       if (!teacher) return new Response("Not found", { status: 404 });
       const from = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("from") || "") ? url.searchParams.get("from") : await lastPayoutFrom(env, teacher.name);
-      const to = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("to") || "") ? url.searchParams.get("to") : new Date().toISOString().slice(0, 10);
+      // Clamped at today (claude-review finding #2, this session): a future
+      // `to` (fat-fingered in the date picker) would close a period past
+      // today, and since lastPayoutFrom() reads that back as the next
+      // baseline, every real session between now and that future date would
+      // silently stop being flagged as owed until the clock caught up.
+      const today = new Date().toISOString().slice(0, 10);
+      const to = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("to") || "") ? [url.searchParams.get("to"), today].sort()[0] : today;
       const { owed, detail } = await computeTeacherOwed(env, teacher.id, teacher.name, teacher.share_type, teacher.share_value, from, to);
       const shareForm = `<form method="POST" action="/admin/teachers/${teacher.id}/share${langQs}">
         <label>${t.shareType}</label>
@@ -2031,9 +2062,34 @@ export default {
       const note = (form.get("note") || "").toString().trim() || null;
       // The period this payout settles, not when it was recorded — see the
       // lastPayout query on /admin/teachers, which reads this back.
-      const periodTo = /^\d{4}-\d{2}-\d{2}$/.test(form.get("to") || "") ? form.get("to") : null;
-      const teacher = await env.DB.prepare("SELECT name FROM teachers WHERE id = ?").bind(settlementMatch[1]).first();
+      // Clamped at today, same as the GET route above (claude-review finding
+      // #2, this session) -- a future `to` must not be able to close a
+      // period past today.
+      const submittedTo = /^\d{4}-\d{2}-\d{2}$/.test(form.get("to") || "") ? [form.get("to"), new Date().toISOString().slice(0, 10)].sort()[0] : null;
+      const teacher = await env.DB.prepare("SELECT id, name, share_type, share_value FROM teachers WHERE id = ?").bind(settlementMatch[1]).first();
       if (teacher && Number.isFinite(amount) && amount > 0) {
+        // `from` is always recomputed server-side, never trusted from the form
+        // (claude-review finding #1, this session): the GET page's `from` can
+        // be overridden via ?from= and echoed back in a hidden field -- if the
+        // POST trusted that value, a stale/tampered/fat-fingered `from` could
+        // close out (set period_to) only part of a real unpaid gap, and since
+        // lastPayoutFrom() derives the next baseline purely from MAX(period_to),
+        // everything before the submitted `from` would be permanently written
+        // off, not just deferred.
+        const from = await lastPayoutFrom(env, teacher.name);
+        // Recompute owed server-side rather than trusting the client-echoed
+        // amount/to (claude-review, PR #12 finding #1) — paying less than what's
+        // actually owed for [from, to] must not still close out the period, or
+        // the shortfall is silently written off (lastPayoutFrom's next call
+        // would otherwise treat this period as fully settled).
+        const { owed } = submittedTo
+          ? await computeTeacherOwed(env, teacher.id, teacher.name, teacher.share_type, teacher.share_value, from, submittedTo)
+          : { owed: Infinity };
+        // Compare in integer cents (opus review, same session): owed is a sum
+        // of per-session floats and can drift upward (e.g. 60.30000000000004),
+        // so a teacher paid exactly the displayed "60.30" would otherwise fail
+        // amount >= owed and leave the period open forever.
+        const periodTo = Math.round(amount * 100) >= Math.round(owed * 100) ? submittedTo : null;
         await env.DB.prepare("INSERT INTO ledger (kind, category, amount, note, created_by, period_to) VALUES ('expense', 'teacher_payout', ?, ?, ?, ?)")
           .bind(amount, `${teacher.name}${note ? " — " + note : ""}`, staffEmail, periodTo).run();
       }
@@ -2112,7 +2168,13 @@ export default {
           if (meta.changes === 0) {
             const exists = await env.DB.prepare("SELECT 1 FROM staff WHERE email = ?").bind(email).first();
             if (exists) return lastOwnerBlocked(lang);
-            await env.DB.prepare("INSERT INTO staff (email, name, role) VALUES (?, ?, ?)").bind(email, name, role).run();
+            // Upsert, not a plain INSERT (claude-review finding #2, this
+            // session): two concurrent submissions for the same brand-new
+            // email would both see `exists === false` and both attempt an
+            // INSERT, the second hitting the email PRIMARY KEY and throwing a
+            // raw 500. Same ON CONFLICT pattern as the owner branch above.
+            await env.DB.prepare("INSERT INTO staff (email, name, role) VALUES (?, ?, ?) ON CONFLICT(email) DO UPDATE SET name = excluded.name, role = excluded.role, active = 1")
+              .bind(email, name, role).run();
           }
         }
       }

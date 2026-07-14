@@ -61,7 +61,7 @@ CREATE TABLE teachers (
 -- Staff roles, keyed by the Cloudflare Access-authenticated email (no separate
 -- password system — Access already authenticates every /admin* request).
 CREATE TABLE staff (
-  email TEXT PRIMARY KEY,
+  email TEXT PRIMARY KEY COLLATE NOCASE,
   name TEXT,
   role TEXT NOT NULL CHECK (role IN ('owner', 'clerk', 'viewer')),
   active INTEGER NOT NULL DEFAULT 1
@@ -115,7 +115,7 @@ CREATE TABLE bookings (
   amount REAL,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   group_id INTEGER REFERENCES groups(id),
-  status TEXT NOT NULL DEFAULT 'active',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'dropped')),
   status_reason TEXT,
   discount_amount REAL NOT NULL DEFAULT 0 CHECK (discount_amount >= 0),
   discount_note TEXT
@@ -129,7 +129,7 @@ CREATE INDEX idx_bookings_group ON bookings(group_id);
 CREATE TABLE payments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
-  booking_id INTEGER REFERENCES bookings(id),
+  booking_id INTEGER REFERENCES bookings(id) ON DELETE SET NULL,
   amount REAL NOT NULL CHECK (amount >= 0),
   method TEXT,
   note TEXT,
