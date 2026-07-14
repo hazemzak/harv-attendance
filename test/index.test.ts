@@ -25,6 +25,19 @@ function adminFetch(path: string, init?: RequestInit) {
   );
 }
 
+// /admin/scan-mark is POST-only (claude-review, PR #10 finding #2 — a
+// mutating GET was CSRF-able), so tests post a form-encoded body instead of
+// a query string.
+function scanMarkFetch(student: number | string, group?: number | string) {
+  const body = new URLSearchParams({ student: String(student) });
+  if (group !== undefined) body.set("group", String(group));
+  return adminFetch("https://example.com/admin/scan-mark", {
+    method: "POST",
+    body: body.toString(),
+    headers: { "Content-Type": "application/x-www-form-urlencoded" }
+  });
+}
+
 async function insertStudent(fields: Record<string, string | null>) {
   const cols = Object.keys(fields);
   const placeholders = cols.map(() => "?").join(",");
@@ -78,6 +91,38 @@ describe("/register: subjects whitelist", () => {
 
     const row = await env.DB.prepare("SELECT subjects FROM students WHERE name = 'Whitelist Test'").first();
     expect(row?.subjects).toBe("math");
+  });
+});
+
+describe("/register: photo content-type whitelist (claude-review, PR #10 finding #1)", () => {
+  it("normalizes a spoofed photo content-type to image/jpeg instead of trusting it verbatim", async () => {
+    const form = new FormData();
+    form.set("name", "Photo Type Spoof Test");
+    form.set("school", "Test School");
+    form.set("stage", "أولى ثانوي");
+    form.set("phone", "01000000009");
+    form.set("parent_phone", "01111111119");
+    // A real attack would set type to text/html to get stored bytes served
+    // back with an attacker-chosen content-type at /admin/students/:id/photo.
+    form.set("photo", new File([new Uint8Array([1, 2, 3])], "x.html", { type: "text/html" }));
+
+    await SELF.fetch("https://example.com/register", { method: "POST", body: form });
+    const row = await env.DB.prepare("SELECT photo_type FROM students WHERE name = 'Photo Type Spoof Test'").first();
+    expect(row?.photo_type).toBe("image/jpeg");
+  });
+
+  it("keeps a real allowed content-type as-is", async () => {
+    const form = new FormData();
+    form.set("name", "Photo Type Real Test");
+    form.set("school", "Test School");
+    form.set("stage", "أولى ثانوي");
+    form.set("phone", "01000000010");
+    form.set("parent_phone", "01111111120");
+    form.set("photo", new File([new Uint8Array([1, 2, 3])], "x.png", { type: "image/png" }));
+
+    await SELF.fetch("https://example.com/register", { method: "POST", body: form });
+    const row = await env.DB.prepare("SELECT photo_type FROM students WHERE name = 'Photo Type Real Test'").first();
+    expect(row?.photo_type).toBe("image/png");
   });
 });
 
@@ -466,18 +511,25 @@ describe("/admin*: in-app Access defense-in-depth (added 2026-07-12, follow-up t
 
 describe("/admin/scan-mark: JSON endpoint backing the /admin/counter hardware-scanner page (added 2026-07-13)", () => {
   it("rejects with no Cf-Access-Jwt-Assertion header, same as any other /admin* route", async () => {
-    const res = await SELF.fetch("https://example.com/admin/scan-mark?student=1");
+    const res = await SELF.fetch("https://example.com/admin/scan-mark", {
+      method: "POST", body: "student=1", headers: { "Content-Type": "application/x-www-form-urlencoded" }
+    });
     expect(res.status).toBe(403);
   });
 
+  it("no longer accepts GET — a mutating GET was CSRF-able (claude-review, PR #10 finding #2)", async () => {
+    const res = await adminFetch("https://example.com/admin/scan-mark?student=1");
+    expect(res.status).toBe(404);
+  });
+
   it("returns not_found for an unknown id", async () => {
-    const res = await adminFetch("https://example.com/admin/scan-mark?student=999999");
+    const res = await scanMarkFetch(999999);
     expect(await res.json()).toEqual({ result: "not_found" });
   });
 
   it("returns pending for an unapproved student and records no attendance", async () => {
     const id = await insertStudent({ name: "Counter Pending Test", status: "pending" });
-    const res = await adminFetch(`https://example.com/admin/scan-mark?student=${id}`);
+    const res = await scanMarkFetch(id);
     expect(await res.json()).toEqual({ result: "pending", name: "Counter Pending Test" });
     const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE student_id = ?").bind(id).first();
     expect(count?.n).toBe(0);
@@ -485,12 +537,12 @@ describe("/admin/scan-mark: JSON endpoint backing the /admin/counter hardware-sc
 
   it("marks attendance on first scan, then reports already on a second scan same day (and includes a live running count, added 2026-07-14)", async () => {
     const id = await insertStudent({ name: "Counter Marked Test", status: "approved" });
-    const first = await adminFetch(`https://example.com/admin/scan-mark?student=${id}`);
+    const first = await scanMarkFetch(id);
     // count is the global (ungrouped) today-total, which earlier tests in this
     // shared-state file also contribute to — check it's a real number, not an
     // exact value tied to file-execution order.
     expect(await first.json()).toEqual({ result: "marked", name: "Counter Marked Test", stage: "", photoUrl: null, count: expect.any(Number) });
-    const second = await adminFetch(`https://example.com/admin/scan-mark?student=${id}`);
+    const second = await scanMarkFetch(id);
     expect(await second.json()).toEqual({ result: "already", name: "Counter Marked Test", stage: "", photoUrl: null, count: expect.any(Number) });
   });
 
@@ -499,17 +551,26 @@ describe("/admin/scan-mark: JSON endpoint backing the /admin/counter hardware-sc
     const groupId = meta.last_row_id;
     const s1 = await insertStudent({ name: "Count Scope 1", status: "approved" });
     const s2 = await insertStudent({ name: "Count Scope 2", status: "approved" });
-    const r1 = await (await adminFetch(`https://example.com/admin/scan-mark?student=${s1}&group=${groupId}`)).json() as any;
+    const r1 = await (await scanMarkFetch(s1, groupId)).json() as any;
     expect(r1.count).toBe(1);
-    const r2 = await (await adminFetch(`https://example.com/admin/scan-mark?student=${s2}&group=${groupId}`)).json() as any;
+    const r2 = await (await scanMarkFetch(s2, groupId)).json() as any;
     expect(r2.count).toBe(2);
+  });
+
+  it("rejects scanning against a deactivated group instead of recording attendance (claude-review, PR #10 finding #3)", async () => {
+    const { meta } = await env.DB.prepare("INSERT INTO groups (teacher_name, subject, active) VALUES ('أ. متوقف', 'math', 0)").run();
+    const id = await insertStudent({ name: "Inactive Group Scan Test", status: "approved" });
+    const res = await (await scanMarkFetch(id, meta.last_row_id)).json() as any;
+    expect(res.result).toBe("invalid_group");
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE student_id = ?").bind(id).first();
+    expect(count?.n).toBe(0);
   });
 });
 
 describe("scan confirmation carries richer identity + room data (added 2026-07-14)", () => {
   it("includes stage in the scan-mark response for identity confirmation", async () => {
     const id = await insertStudent({ name: "Stage Scan Test", status: "approved", stage: "تالتة ثانوي" });
-    const json = await (await adminFetch(`https://example.com/admin/scan-mark?student=${id}`)).json() as any;
+    const json = await (await scanMarkFetch(id)).json() as any;
     expect(json.stage).toBe("تالتة ثانوي");
   });
 
@@ -517,11 +578,11 @@ describe("scan confirmation carries richer identity + room data (added 2026-07-1
     const idWithPhoto = await insertStudent({ name: "Photo Scan Test", status: "approved" });
     await env.DB.prepare("UPDATE students SET photo = ?, photo_type = 'image/jpeg' WHERE id = ?")
       .bind(new Uint8Array([1, 2, 3]).buffer, idWithPhoto).run();
-    const withPhoto = await (await adminFetch(`https://example.com/admin/scan-mark?student=${idWithPhoto}`)).json() as any;
+    const withPhoto = await (await scanMarkFetch(idWithPhoto)).json() as any;
     expect(withPhoto.photoUrl).toBe(`/admin/students/${idWithPhoto}/photo`);
 
     const idNoPhoto = await insertStudent({ name: "No Photo Scan Test", status: "approved" });
-    const noPhoto = await (await adminFetch(`https://example.com/admin/scan-mark?student=${idNoPhoto}`)).json() as any;
+    const noPhoto = await (await scanMarkFetch(idNoPhoto)).json() as any;
     expect(noPhoto.photoUrl).toBeNull();
   });
 
@@ -544,7 +605,7 @@ describe("scan confirmation carries richer identity + room data (added 2026-07-1
       "INSERT INTO groups (teacher_name, subject, active, room_id) VALUES ('أ. روم تيست', 'math', 1, ?)"
     ).bind(roomMeta.last_row_id).run();
     const id = await insertStudent({ name: "Room Scan Test", status: "approved" });
-    const res = await (await adminFetch(`https://example.com/admin/scan-mark?student=${id}&group=${groupMeta.last_row_id}`)).json() as any;
+    const res = await (await scanMarkFetch(id, groupMeta.last_row_id)).json() as any;
     expect(res.roomName).toBe("قاعة 1");
   });
 
@@ -563,7 +624,7 @@ describe("scan confirmation carries richer identity + room data (added 2026-07-1
       "INSERT INTO groups (teacher_name, subject, active, room_id) VALUES ('أ. تودي تيست', 'math', 1, ?)"
     ).bind(roomMeta.last_row_id).run();
     const id = await insertStudent({ name: "Today Room Test", status: "approved" });
-    await adminFetch(`https://example.com/admin/scan-mark?student=${id}&group=${groupMeta.last_row_id}`);
+    await scanMarkFetch(id, groupMeta.last_row_id);
     const html = await (await adminFetch("https://example.com/admin/today")).text();
     const cardStart = html.indexOf("Today Room Test");
     const cardEnd = html.indexOf("</div></div>", cardStart);
@@ -584,7 +645,7 @@ describe("scan confirmation carries richer identity + room data (added 2026-07-1
       "INSERT INTO groups (teacher_name, subject, active) VALUES ('أ. ريسنت تيست', 'math', 1)"
     ).run();
     const id = await insertStudent({ name: "Recent Scan Test", status: "approved", stage: "أولى ثانوي" });
-    await adminFetch(`https://example.com/admin/scan-mark?student=${id}&group=${groupMeta.last_row_id}`);
+    await scanMarkFetch(id, groupMeta.last_row_id);
     const html = await (await adminFetch(`https://example.com/admin/counter?group=${groupMeta.last_row_id}`)).text();
     expect(html).toContain('id="counter-recent-body"');
     expect(html).toContain("Recent Scan Test");
@@ -599,7 +660,7 @@ describe("scan confirmation carries richer identity + room data (added 2026-07-1
       "INSERT INTO groups (teacher_name, subject, active) VALUES ('أ. ايزوليشن ب', 'math', 1)"
     ).run();
     const id = await insertStudent({ name: "Isolation Scan Test", status: "approved" });
-    await adminFetch(`https://example.com/admin/scan-mark?student=${id}&group=${groupAMeta.last_row_id}`);
+    await scanMarkFetch(id, groupAMeta.last_row_id);
     const htmlB = await (await adminFetch(`https://example.com/admin/counter?group=${groupBMeta.last_row_id}`)).text();
     expect(htmlB).not.toContain("Isolation Scan Test");
   });
@@ -823,7 +884,10 @@ describe("/scan + /admin/scan-mark: per-session (group-scoped) attendance (added
 
     await SELF.fetch(`https://example.com/scan?student=${id}&group=${g1}`);
     const second = await SELF.fetch(`https://example.com/scan?student=${id}&group=${g1}`);
-    const secondJson = await SELF.fetch(`https://example.com/admin/scan-mark?student=${id}&group=${g1}`, { headers: { "Cf-Access-Jwt-Assertion": "test" } }).then(r => r.json()) as any;
+    const secondJson = await SELF.fetch("https://example.com/admin/scan-mark", {
+      method: "POST", body: `student=${id}&group=${g1}`,
+      headers: { "Cf-Access-Jwt-Assertion": "test", "Content-Type": "application/x-www-form-urlencoded" }
+    }).then(r => r.json()) as any;
 
     expect(second.status).toBe(200);
     expect(secondJson.result).toBe("already");

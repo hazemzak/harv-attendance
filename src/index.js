@@ -1799,7 +1799,14 @@ export default {
       let photoBuf = null, photoType = null;
       if (photoFile && typeof photoFile === "object" && photoFile.size > 0) {
         photoBuf = await photoFile.arrayBuffer();
-        photoType = photoFile.type || "image/jpeg";
+        // Whitelisted, not trusted verbatim from the client (claude-review,
+        // PR #10 finding #1) — an anonymous /register submitter could otherwise
+        // set an arbitrary content-type (e.g. text/html) on the stored bytes,
+        // which /admin/students/:id/photo would later serve back with that
+        // same attacker-chosen type — stored XSS if a staff member opens the
+        // photo URL directly instead of via an <img> tag.
+        const ALLOWED_PHOTO_TYPES = ["image/jpeg", "image/png", "image/webp"];
+        photoType = ALLOWED_PHOTO_TYPES.includes(photoFile.type) ? photoFile.type : "image/jpeg";
       }
       const inserted = await env.DB.prepare(
         `INSERT INTO students (name, class, school, stage, phone, email, subjects, parent_phone, track, father_phone, mother_phone, home_phone, address, photo, photo_type, status)
@@ -1854,10 +1861,16 @@ export default {
     // USB scanner at the front-desk laptop, via /admin/scan-mark below) — one
     // place for the lookup + approval-gate + dedup insert so both flows can
     // never drift on the actual attendance-marking rule.
-    if (url.pathname === "/admin/scan-mark" && request.method === "GET") {
-      const groupParam = parseInt(url.searchParams.get("group") || "", 10);
+    // POST, not GET (claude-review, PR #10 finding #2) — this mutates the
+    // database (inserts an attendance row), and the CF Access session is
+    // cookie-based, so a GET with side effects was CSRF-able (e.g. an <img
+    // src="...scan-mark?student=123"> on any page a logged-in staff member
+    // visits would silently mark a student present).
+    if (url.pathname === "/admin/scan-mark" && request.method === "POST") {
+      const form = await request.formData();
+      const groupParam = parseInt((form.get("group") || "").toString(), 10);
       const hasGroup = Number.isFinite(groupParam);
-      const r = await markAttendance(env, url.searchParams.get("student"), hasGroup ? groupParam : null);
+      const r = await markAttendance(env, (form.get("student") || "").toString(), hasGroup ? groupParam : null);
       // Live running count for the counter kiosk, so whoever's scanning always
       // knows how many have come through today for this class (or overall, if
       // scanning unpinned) — server-truth on every scan, not a client tally
@@ -1887,13 +1900,16 @@ export default {
       // and the recent-scans table can all name the actual room — with several
       // lecture halls (1-4) potentially scanning at once, "just a name and a
       // time" isn't enough to tell two concurrent scans apart at a glance.
+      // active = 1 filter (claude-review, PR #10 finding #3) — a stale or
+      // bookmarked ?group=ID for a deactivated group could otherwise still be
+      // pinned and used to record attendance, silently bypassing the
+      // deactivation toggle on /admin/groups.
       const pinnedGroup = Number.isFinite(groupParam)
         ? await env.DB.prepare(
             `SELECT g.id, g.teacher_name, g.subject, g.day, g.time, r.name AS room_name
-             FROM groups g LEFT JOIN rooms r ON r.id = g.room_id WHERE g.id = ?`
+             FROM groups g LEFT JOIN rooms r ON r.id = g.room_id WHERE g.id = ? AND g.active = 1`
           ).bind(groupParam).first()
         : null;
-      const scanMarkUrl = pinnedGroup ? `/admin/scan-mark?group=${pinnedGroup.id}&student=` : `/admin/scan-mark?student=`;
       // No group in the URL and none picked yet — offer a lightweight picker
       // right here (mirrors /admin/attendance's picker) instead of sending
       // whoever's about to scan to the full groups-management page. Answers
@@ -1955,7 +1971,7 @@ export default {
   <p>وجّه سكانر الاستقبال على كود QR بتاع الطالب — الشاشة دي مش محتاجة أي دوسة بينهم.</p>
   <div id="counter-status" class="counter-status"><span>جاهز للمسح</span></div>
   <p class="counter-count">عدد اللي حضروا النهاردة: <strong id="counter-count">${initialCount.n}</strong></p>
-  <input id="counter-input" class="counter-input" autocomplete="off">
+  <input id="counter-input" class="counter-input" autocomplete="off" data-group="${pinnedGroup ? pinnedGroup.id : ""}">
   <table class="counter-recent">
     <thead><tr><th>الاسم</th><th>الصف</th><th>الوقت</th></tr></thead>
     <tbody id="counter-recent-body">${recentRowsHtml}</tbody>
@@ -2009,12 +2025,15 @@ export default {
       if (!id) { var m = raw.match(/student=(\\d+)/); if (m) id = m[1]; }
       if (!id && /^\\d+$/.test(raw)) id = raw;
       if (!id) { setStatus("warn", null, "كود مش معروف"); return; }
-      fetch("${scanMarkUrl}" + encodeURIComponent(id))
+      var body = "student=" + encodeURIComponent(id);
+      if (input.dataset.group) body += "&group=" + encodeURIComponent(input.dataset.group);
+      fetch("/admin/scan-mark", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: body })
         .then(function(r){ return r.json(); })
         .then(function(r){
           if (typeof r.count === "number") countEl.textContent = r.count;
           if (r.result === "not_found") { setStatus("warn", null, "الطالب غير موجود"); return; }
           if (r.result === "pending") { setStatus("warn", null, r.name + " — التسجيل أو الدفع لسه معلّق"); return; }
+          if (r.result === "invalid_group") { setStatus("warn", null, "المجموعة دي مش متاحة للمسح دلوقتي"); return; }
           var label = r.name + (r.stage ? " · " + r.stage : "") + (r.result === "marked" ? " — تم تسجيل الحضور ✅" : " — مسجل حضور بالفعل اليوم");
           setStatus("ok", r.photoUrl, label);
           prependRecent(r);
