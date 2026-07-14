@@ -404,16 +404,23 @@ async function markAttendance(env, studentId, groupId = null) {
   // room_name flows through to the recent-scans table and /admin/today so scans
   // from different concurrent lecture halls (4 rooms can run at once) are never
   // shown as an unlabeled flat list — see HARV_ATTENDANCE_SUPPORT_PLAYBOOK.md.
+  // Group must exist and be active (claude-review, PR #8): /scan is
+  // unauthenticated and group ids are small sequential integers, so an
+  // unvalidated group_id would let anyone credit an arbitrary/nonexistent
+  // group's attendance for any student — and per_session teacher payouts are
+  // computed directly from these attendance rows, making this a real
+  // fraud/money-integrity gap, not just a data-quality one.
   const group = await env.DB.prepare(
     `SELECT g.teacher_name, g.subject, r.name AS room_name
-     FROM groups g LEFT JOIN rooms r ON r.id = g.room_id WHERE g.id = ?`
+     FROM groups g LEFT JOIN rooms r ON r.id = g.room_id WHERE g.id = ? AND g.active = 1`
   ).bind(groupId).first();
+  if (!group) return { result: "invalid_group", ...base };
   const { meta } = await env.DB.prepare("INSERT OR IGNORE INTO attendance (student_id, group_id, teacher_name) VALUES (?, ?, ?)")
-    .bind(studentId, groupId, group ? group.teacher_name : null).run();
+    .bind(studentId, groupId, group.teacher_name).run();
   return {
     result: meta.changes > 0 ? "marked" : "already",
     ...base,
-    roomName: group ? group.room_name || null : null
+    roomName: group.room_name || null
   };
 }
 
@@ -1628,6 +1635,9 @@ export default {
       }
       if (r.result === "pending") {
         return new Response(page("التسجيل لسه معلّق", `<div class="confirm"><strong>${escapeHtml(r.name)}</strong>التسجيل أو الدفع لسه متأكدش — روح للاستقبال.</div>`, { nav: false }), { status: 403, headers: { "content-type": "text/html;charset=utf-8" } });
+      }
+      if (r.result === "invalid_group") {
+        return new Response(page("المجموعة دي مش متاحة", `<div class="confirm"><strong>${escapeHtml(r.name)}</strong>المجموعة دي مش متاحة للمسح دلوقتي — روح للاستقبال.</div>`, { nav: false }), { status: 403, headers: { "content-type": "text/html;charset=utf-8" } });
       }
       const body = r.result === "marked"
         ? `<div class="confirm"><strong>${escapeHtml(r.name)}</strong>تم تسجيل الحضور الساعة ${new Date().toLocaleTimeString("ar-EG")}</div>`

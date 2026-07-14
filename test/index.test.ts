@@ -120,6 +120,34 @@ describe("/scan: approval gating (payment-gate business logic)", () => {
   });
 });
 
+describe("/scan: group validation (claude-review, PR #8 — unauthenticated /scan could attribute attendance, and therefore per_session teacher payouts, to an arbitrary/fake group id)", () => {
+  it("rejects a scan against a nonexistent group id and records no attendance", async () => {
+    const id = await insertStudent({ name: "Bad Group Test", status: "approved" });
+    const res = await SELF.fetch(`https://example.com/scan?student=${id}&group=999999`);
+    expect(res.status).toBe(403);
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE student_id = ?").bind(id).first();
+    expect(count?.n).toBe(0);
+  });
+
+  it("rejects a scan against a deactivated group id and records no attendance", async () => {
+    const id = await insertStudent({ name: "Inactive Group Test", status: "approved" });
+    const { meta } = await env.DB.prepare("INSERT INTO groups (teacher_name, subject, active) VALUES ('أ. غير نشط', 'math', 0)").run();
+    const res = await SELF.fetch(`https://example.com/scan?student=${id}&group=${meta.last_row_id}`);
+    expect(res.status).toBe(403);
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE student_id = ?").bind(id).first();
+    expect(count?.n).toBe(0);
+  });
+
+  it("accepts a scan against a real, active group id", async () => {
+    const id = await insertStudent({ name: "Good Group Test", status: "approved" });
+    const { meta } = await env.DB.prepare("INSERT INTO groups (teacher_name, subject, active) VALUES ('أ. نشط', 'math', 1)").run();
+    const res = await SELF.fetch(`https://example.com/scan?student=${id}&group=${meta.last_row_id}`);
+    expect(res.status).toBe(200);
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE student_id = ? AND group_id = ?").bind(id, meta.last_row_id).first();
+    expect(count?.n).toBe(1);
+  });
+});
+
 describe("/student: unknown id", () => {
   it("returns a branded 404 instead of a crash for a nonexistent student id", async () => {
     const res = await SELF.fetch("https://example.com/student?id=999999");
