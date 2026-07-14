@@ -528,12 +528,12 @@ async function getPayments(env, studentId) {
 
 const PAY_I18N = {
   ar: {
-    owed: "المطلوب", paid: "المدفوع", balance: "المتبقي", fullyPaid: "مدفوع بالكامل",
+    owed: "المطلوب", paid: "المدفوع", balance: "المتبقي", fullyPaid: "مدفوع بالكامل", credit: "رصيد للطالب",
     amount: "المبلغ", amountPh: "بالجنيه", method: "طريقة الدفع", note: "ملاحظة (اختياري)", notePh: "اختياري", record: "تسجيل دفعة",
     history: "سجل الدفعات", receipt: "إيصال"
   },
   en: {
-    owed: "Owed", paid: "Paid", balance: "Balance", fullyPaid: "Fully paid",
+    owed: "Owed", paid: "Paid", balance: "Balance", fullyPaid: "Fully paid", credit: "Credit on file",
     amount: "Amount", amountPh: "in EGP", method: "Payment method", note: "Note (optional)", notePh: "optional", record: "Record payment",
     history: "Payment history", receipt: "Receipt"
   }
@@ -541,7 +541,11 @@ const PAY_I18N = {
 
 function balanceSummaryHtml(lang, bal) {
   const t = PAY_I18N[lang];
-  const balanceLabel = bal.balance > 0 ? `<strong style="color:var(--red)">${bal.balance.toFixed(2)}</strong>` : `<strong style="color:#1F9D55">${t.fullyPaid}</strong>`;
+  const balanceLabel = bal.balance > 0
+    ? `<strong style="color:var(--red)">${bal.balance.toFixed(2)}</strong>`
+    : bal.balance < 0
+      ? `<strong style="color:#1F9D55">${t.credit}: ${Math.abs(bal.balance).toFixed(2)}</strong>`
+      : `<strong style="color:#1F9D55">${t.fullyPaid}</strong>`;
   return `<div class="estamara-total">${t.owed}: ${bal.owed.toFixed(2)} · ${t.paid}: ${bal.paid.toFixed(2)} · ${t.balance}: ${balanceLabel}</div>`;
 }
 
@@ -777,7 +781,7 @@ function bookingRowsWidget(lang, subjectsCsv, bookings, teachersBySubject, group
   const groupOptionsHtml = groups.map(g => {
     const seats = g.capacity ? `${g.enrolled}/${g.capacity}` : `${g.enrolled}`;
     const label = `${g.teacher_name} — ${g.subject} — ${[g.day, g.time].filter(Boolean).join(" ")} (${seats})`;
-    return `<option value="${g.id}" data-teacher="${escapeHtml(g.teacher_name)}" data-schedule="${escapeHtml([g.day, g.time].filter(Boolean).join(" · "))}" data-price="${g.price ?? 0}" data-subject="${g.subject}">${escapeHtml(label)}</option>`;
+    return `<option value="${g.id}" data-teacher="${escapeHtml(g.teacher_name)}" data-schedule="${escapeHtml([g.day, g.time].filter(Boolean).join(" · "))}" data-price="${g.price ?? 0}" data-subject="${escapeHtml(g.subject)}">${escapeHtml(label)}</option>`;
   }).join("");
   const rowsHtml = seedRows.map((b, i) => bookingRow(lang, i, b, groupOptionsHtml)).join("");
   const teacherNames = [...new Set(Object.values(teachersBySubject || {}).flat().map(t => t.name))];
@@ -1059,6 +1063,7 @@ export default {
       }
     };
     if (url.pathname === "/admin/dashboard" && request.method === "GET") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
       const lang = langOf(url);
       const t = DASH_I18N[lang];
       const langQs = lang === "en" ? "?lang=en" : "";
@@ -1066,7 +1071,7 @@ export default {
         env.DB.prepare("SELECT COUNT(*) AS n FROM students").first(),
         env.DB.prepare("SELECT COUNT(*) AS n FROM students WHERE status = 'pending'").first(),
         env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE date(scanned_at) = date('now')").first(),
-        env.DB.prepare("SELECT COALESCE(SUM(amount), 0) AS n FROM bookings").first()
+        env.DB.prepare("SELECT COALESCE(SUM(amount), 0) AS n FROM bookings WHERE status = 'active'").first()
       ]);
       const tile = (num, label) => `<div class="stat-tile"><div class="stat-num">${num}</div><div class="stat-label">${label}</div></div>`;
       const body = `
@@ -1810,12 +1815,15 @@ export default {
       if (pickedIds.length) {
         const placeholders = pickedIds.map(() => "?").join(",");
         const { results: pickedTeachers } = await env.DB.prepare(
-          `SELECT id, name, schedule FROM teachers WHERE id IN (${placeholders})`
+          `SELECT id, name, schedule, subject FROM teachers WHERE id IN (${placeholders})`
         ).bind(...pickedIds.map(p => p.id)).all();
         const teacherById = new Map(pickedTeachers.map(row => [row.id, row]));
         const bookingStmts = pickedIds
+          // A picked teacher id is only trusted if it actually teaches the
+          // subject it was picked for — same validation pattern already
+          // applied to group_id above, closing the analogous gap here.
           .map(p => ({ slug: p.slug, row: teacherById.get(p.id) }))
-          .filter(p => p.row)
+          .filter(p => p.row && p.row.subject === baseSubject(p.slug))
           .map(p => env.DB.prepare(
             "INSERT INTO bookings (student_id, subject, teacher_name, schedule, amount) VALUES (?, ?, ?, ?, 0)"
           ).bind(inserted.meta.last_row_id, p.slug, p.row.name, p.row.schedule || ""));
