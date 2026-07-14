@@ -1918,8 +1918,16 @@ export default {
       const placeholders = groupIds.map(() => "?").join(",");
       let owed, detail;
       if (shareType === "per_session") {
+        // Count distinct (group, day) class meetings, not raw attendance rows
+        // (claude-review finding #1, this session): attendance has one row per
+        // student per group per day, so COUNT(*) paid a per_session teacher
+        // once PER STUDENT who showed up instead of once per class held -- a
+        // 20-student group meeting once would have paid 20x the real rate.
         const row = await env.DB.prepare(
-          `SELECT COUNT(*) AS n FROM attendance WHERE group_id IN (${placeholders}) AND date(scanned_at) BETWEEN ? AND ?`
+          `SELECT COUNT(*) AS n FROM (
+             SELECT DISTINCT group_id, date(scanned_at) AS d
+             FROM attendance WHERE group_id IN (${placeholders}) AND date(scanned_at) BETWEEN ? AND ?
+           )`
         ).bind(...groupIds, from, to).first();
         owed = row.n * shareValue; detail = row.n;
       } else {
@@ -1953,7 +1961,13 @@ export default {
       const teacher = await env.DB.prepare("SELECT id, name, subject, share_type, share_value FROM teachers WHERE id = ?").bind(settlementMatch[1]).first();
       if (!teacher) return new Response("Not found", { status: 404 });
       const from = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("from") || "") ? url.searchParams.get("from") : await lastPayoutFrom(env, teacher.name);
-      const to = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("to") || "") ? url.searchParams.get("to") : new Date().toISOString().slice(0, 10);
+      // Clamped at today (claude-review finding #2, this session): a future
+      // `to` (fat-fingered in the date picker) would close a period past
+      // today, and since lastPayoutFrom() reads that back as the next
+      // baseline, every real session between now and that future date would
+      // silently stop being flagged as owed until the clock caught up.
+      const today = new Date().toISOString().slice(0, 10);
+      const to = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("to") || "") ? [url.searchParams.get("to"), today].sort()[0] : today;
       const { owed, detail } = await computeTeacherOwed(env, teacher.id, teacher.name, teacher.share_type, teacher.share_value, from, to);
       const shareForm = `<form method="POST" action="/admin/teachers/${teacher.id}/share${langQs}">
         <label>${t.shareType}</label>
@@ -2009,7 +2023,10 @@ export default {
       const note = (form.get("note") || "").toString().trim() || null;
       // The period this payout settles, not when it was recorded — see the
       // lastPayout query on /admin/teachers, which reads this back.
-      const submittedTo = /^\d{4}-\d{2}-\d{2}$/.test(form.get("to") || "") ? form.get("to") : null;
+      // Clamped at today, same as the GET route above (claude-review finding
+      // #2, this session) -- a future `to` must not be able to close a
+      // period past today.
+      const submittedTo = /^\d{4}-\d{2}-\d{2}$/.test(form.get("to") || "") ? [form.get("to"), new Date().toISOString().slice(0, 10)].sort()[0] : null;
       const teacher = await env.DB.prepare("SELECT id, name, share_type, share_value FROM teachers WHERE id = ?").bind(settlementMatch[1]).first();
       if (teacher && Number.isFinite(amount) && amount > 0) {
         // `from` is always recomputed server-side, never trusted from the form

@@ -1443,15 +1443,24 @@ describe("/admin/teachers/:id/settlement: payout math (added 2026-07-13)", () =>
     return { teacherId, groupId: groupMeta.last_row_id as number };
   }
 
-  it("per_session: owed = share_value * attendance rows logged against the teacher's groups", async () => {
+  it("per_session: owed = share_value * distinct class meetings (group+day), NOT one payout per student who attended (claude-review finding #1, this session's continuation)", async () => {
+    // attendance has one row per (student, group, day) -- a teacher paid
+    // "per session" is owed once per class meeting regardless of headcount.
     const { teacherId, groupId } = await makeTeacherWithGroup("per_session", 20);
     const s1 = await insertStudent({ name: "Settle Session 1", status: "approved" });
     const s2 = await insertStudent({ name: "Settle Session 2", status: "approved" });
+    // Both students attend the SAME class meeting (same group, same day) --
+    // this must count as ONE session, not two.
     await SELF.fetch(`https://example.com/scan?student=${s1}&group=${groupId}`);
     await SELF.fetch(`https://example.com/scan?student=${s2}&group=${groupId}`);
+    const sameDayHtml = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`)).text();
+    expect(sameDayHtml).toContain("20.00"); // 1 session, not 40.00 for "2 attendees"
 
-    const html = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`)).text();
-    expect(html).toContain("40.00"); // 2 sessions * 20 EGP/session
+    // A second class meeting on a different day for the same group DOES add
+    // a second session.
+    await env.DB.prepare("INSERT INTO attendance (student_id, group_id, scanned_at) VALUES (?, ?, datetime('now', '-1 day'))").bind(s1, groupId).run();
+    const twoSessionsHtml = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`)).text();
+    expect(twoSessionsHtml).toContain("40.00"); // 2 distinct session days * 20
   });
 
   it("percent: owed = share_value% of payments actually collected against the teacher's groups, not the billed amount (claude-review finding #1 on PR #12)", async () => {
@@ -1546,10 +1555,12 @@ describe("/admin/teachers/:id/settlement: payout math (added 2026-07-13)", () =>
 
   it("submitted 'from' on the settlement POST is ignored -- a stale/tampered date can't permanently write off older unpaid sessions (claude-review finding #1, this session's continuation)", async () => {
     const { teacherId, groupId } = await makeTeacherWithGroup("per_session", 20);
+    // Two distinct class-meeting days count as two sessions (per_session pays
+    // per distinct group+day, not per attendance row -- see the test above).
     const oldStudent1 = await insertStudent({ name: "Old Session Student 1", status: "approved" });
     const oldStudent2 = await insertStudent({ name: "Old Session Student 2", status: "approved" });
     await env.DB.prepare("INSERT INTO attendance (student_id, group_id, scanned_at) VALUES (?, ?, datetime('now', '-10 days'))").bind(oldStudent1, groupId).run();
-    await env.DB.prepare("INSERT INTO attendance (student_id, group_id, scanned_at) VALUES (?, ?, datetime('now', '-10 days'))").bind(oldStudent2, groupId).run();
+    await env.DB.prepare("INSERT INTO attendance (student_id, group_id, scanned_at) VALUES (?, ?, datetime('now', '-9 days'))").bind(oldStudent2, groupId).run();
     const newStudent = await insertStudent({ name: "New Session Student", status: "approved" });
     await env.DB.prepare("INSERT INTO attendance (student_id, group_id) VALUES (?, ?)").bind(newStudent, groupId).run();
     // Real owed since the teacher's real baseline (lastPayoutFrom's default
@@ -1572,6 +1583,29 @@ describe("/admin/teachers/:id/settlement: payout math (added 2026-07-13)", () =>
     // written off by a period_to that jumped past them.
     const settlementHtml = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`)).text();
     expect(settlementHtml).toContain("40.00"); // 60 real owed minus the 20 already paid
+  });
+
+  it("a future 'to' date is clamped to today, both on the settlement GET filter and the POST -- can't close a period past today (claude-review finding #2, this session's continuation)", async () => {
+    const { teacherId, groupId } = await makeTeacherWithGroup("per_session", 20);
+    const student = await insertStudent({ name: "Future To Test", status: "approved" });
+    await SELF.fetch(`https://example.com/scan?student=${student}&group=${groupId}`);
+    const futureTo = "2099-01-01";
+
+    const getHtml = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement?from=2000-01-01&to=${futureTo}`)).text();
+    // The "to" date input's value is clamped (the lang-toggle link below it
+    // still echoes the raw query string, which is harmless -- it's re-clamped
+    // on the next GET, not a source of truth).
+    expect(getHtml).not.toContain(`name="to" value="${futureTo}"`);
+
+    const form = new FormData();
+    form.set("from", "2000-01-01");
+    form.set("to", futureTo);
+    form.set("amount", "20"); // exactly owed for the one real session
+    await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`, { method: "POST", body: form });
+
+    const row = await env.DB.prepare("SELECT period_to FROM ledger WHERE category = 'teacher_payout' AND amount = 20 ORDER BY id DESC LIMIT 1").first();
+    expect(row?.period_to).not.toBe(futureTo);
+    expect(row?.period_to <= new Date().toISOString().slice(0, 10)).toBe(true);
   });
 
   it("the settlement page's default date range matches what /admin/teachers just flagged as owed, not a 'today only' window (claude-review finding #1 on a later PR #12 review round)", async () => {
