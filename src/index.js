@@ -1414,6 +1414,24 @@ export default {
     // e.g. "حذف لتكرار الغياب" = dropped for repeated absence). Kept as a row with
     // status='dropped', not deleted, so it still shows in getDroppedBookings().
     // A transfer is just a drop + a fresh booking picked on the process page.
+    const bookingDropMatch = url.pathname.match(/^\/admin\/bookings\/(\d+)\/drop$/);
+    if (bookingDropMatch && request.method === "POST") {
+      const lang = langOf(url);
+      const form = await request.formData();
+      const reason = (form.get("reason") || "").toString().trim() || null;
+      const booking = await env.DB.prepare("SELECT student_id FROM bookings WHERE id = ?").bind(bookingDropMatch[1]).first();
+      if (booking) {
+        await env.DB.prepare("UPDATE bookings SET status = 'dropped', status_reason = ? WHERE id = ?")
+          .bind(reason, bookingDropMatch[1]).run();
+        return Response.redirect(url.origin + `/admin/students/${booking.student_id}/estamara` + (lang === "en" ? "?lang=en" : ""), 303);
+      }
+      return Response.redirect(url.origin + "/admin" + (lang === "en" ? "?lang=en" : ""), 303);
+    }
+
+    // Records money actually received. Batched with a matching ledger income
+    // row (env.DB.batch(), same atomicity pattern as the booking-rows save in
+    // /admin/students/:id/process) so a payment is never recorded without also
+    // landing in the center's own journal.
     if (url.pathname === "/admin/promotions" && request.method === "GET") {
       const lang = langOf(url);
       const t = PROMO_I18N[lang];
@@ -1480,6 +1498,55 @@ export default {
       return results;
     }
 
+    if (url.pathname === "/admin/rooms" && request.method === "GET") {
+      const lang = langOf(url);
+      const t = ROOMS_I18N[lang];
+      const rooms = await getRooms(env);
+      const rows = rooms.map(r => html`<div class="card"><div>
+        <strong>${r.name}</strong>${r.floor ? raw(html` — ${r.floor}`) : ""}${r.capacity ? raw(html` (${String(r.capacity)})`) : ""}
+      </div></div>`).join("") || `<p class="empty">${t.empty}</p>`;
+      const form = html`<form method="POST" action="/admin/rooms${raw(lang === "en" ? "?lang=en" : "")}">
+        <label>${t.name}</label><input name="name" placeholder="${t.namePh}" required>
+        <label>${t.floor}</label><input name="floor" placeholder="${t.floorPh}">
+        <label>${t.capacity}</label><input name="capacity" type="number" min="1" placeholder="${t.capacityPh}">
+        <button type="submit">${t.add}</button>
+      </form>`;
+      return new Response(page(t.title, form + rows, { lang, toggleHref: toggleHref(url, lang), isOwner: roleAllowed(staffRole, ["owner"]) }), { headers: { "content-type": "text/html;charset=utf-8" } });
+    }
+
+    if (url.pathname === "/admin/rooms" && request.method === "POST") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
+      const lang = langOf(url);
+      const form = await request.formData();
+      const name = (form.get("name") || "").toString().trim();
+      const floor = (form.get("floor") || "").toString().trim() || null;
+      const capacity = parseInt((form.get("capacity") || "").toString(), 10);
+      if (name) {
+        await env.DB.prepare("INSERT INTO rooms (name, floor, capacity) VALUES (?, ?, ?)")
+          .bind(name, floor, Number.isFinite(capacity) && capacity > 0 ? capacity : null).run();
+      }
+      return Response.redirect(url.origin + "/admin/rooms" + (lang === "en" ? "?lang=en" : ""), 303);
+    }
+
+    const GROUPS_I18N = {
+      ar: {
+        title: "المجموعات", subject: "المادة", teacher: "الأستاذ", teacherPh: "اسم الأستاذ", stage: "الصف",
+        day: "اليوم", dayPh: "مثلاً: السبت", time: "الميعاد", timePh: "مثلاً: 5 مساءً",
+        room: "القاعة", roomNone: "بدون قاعة", capacity: "السعة", capacityPh: "عدد الطلاب",
+        price: "السعر", pricePh: "بالجنيه", add: "إضافة مجموعة",
+        empty: "لا يوجد مجموعات بعد.", deactivate: "إيقاف", activate: "تفعيل", inactive: "متوقفة", full: "مكتملة",
+        pinCounter: "📷 السكانر", attendanceReport: "📋 كشف الحضور"
+      },
+      en: {
+        title: "Groups", subject: "Subject", teacher: "Teacher", teacherPh: "Teacher's name", stage: "Grade",
+        day: "Day", dayPh: "e.g. Saturday", time: "Time", timePh: "e.g. 5PM",
+        room: "Room", roomNone: "No room", capacity: "Capacity", capacityPh: "number of students",
+        price: "Price", pricePh: "in EGP", add: "Add group",
+        empty: "No groups yet.", deactivate: "Deactivate", activate: "Activate", inactive: "inactive", full: "Full",
+        pinCounter: "📷 Counter", attendanceReport: "📋 Attendance"
+      }
+    };
+
     // Enrolled = active bookings currently attached to the group, computed live
     // (not stored) so it's always accurate against the bookings table.
     async function getGroupsWithSeats(env, { activeOnly = false } = {}) {
@@ -1493,6 +1560,125 @@ export default {
       ).all();
       return results;
     }
+
+    if (url.pathname === "/admin/groups" && request.method === "GET") {
+      const lang = langOf(url);
+      const t = GROUPS_I18N[lang];
+      const langQs = lang === "en" ? "?lang=en" : "";
+      const [groups, rooms, teachersBySubject] = await Promise.all([getGroupsWithSeats(env), getRooms(env), getAllTeachersGrouped(env)]);
+      const rows = groups.map(g => {
+        const seatsLabel = Number.isFinite(g.capacity) ? `${g.enrolled}/${g.capacity}` : `${g.enrolled}`;
+        const isFull = Number.isFinite(g.capacity) && g.enrolled >= g.capacity;
+        return html`<div class="card ${raw(g.active ? "" : "stripe-b")}"><div>
+          ${!g.active ? raw(html`<span class="badge-pending" style="background:#8A93A6">${t.inactive}</span><br>`) : ""}
+          ${isFull ? raw(html`<span class="badge-pending">${t.full}</span><br>`) : ""}
+          <strong>${g.teacher_name} — ${raw(subjectsDisplay(lang, g.subject))}</strong><br>
+          <small>${[g.stage, g.day, g.time, g.room_name].filter(Boolean).join(" · ")} · ${raw(seatsLabel)} · ${g.price ?? 0}</small>
+          <div class="pending-actions">
+            <a href="/admin/counter?group=${String(g.id)}"><button type="button">${t.pinCounter}</button></a>
+            <a href="/admin/attendance?group=${String(g.id)}${raw(langQs.replace("?", "&"))}"><button type="button">${t.attendanceReport}</button></a>
+            <form method="POST" action="/admin/groups/${String(g.id)}/toggle${raw(langQs)}"><button type="submit" class="${raw(g.active ? "btn-reject" : "")}">${g.active ? t.deactivate : t.activate}</button></form>
+          </div>
+        </div></div>`;
+      }).join("") || `<p class="empty">${t.empty}</p>`;
+      const roomOptions = rooms.map(r => html`<option value="${String(r.id)}">${r.name}</option>`).join("");
+      // Subject picked first, then the teacher <select> is filtered client-side
+      // to only teachers who teach that subject — same data source and
+      // baseSubject() convention (strip the "-en" cousin suffix) as /register's
+      // teacher panel, just applied to a <select> instead of radio cards.
+      const teachersJson = JSON.stringify(
+        Object.fromEntries(Object.entries(teachersBySubject).map(([subj, list]) => [subj, list.map(tch => ({ id: tch.id, name: tch.name }))]))
+      );
+      const form = html`<form method="POST" action="/admin/groups${raw(langQs)}">
+        <label>${t.subject}</label><select name="subject" id="group-subject" required onchange="fillTeacherOptions(this.value)">${raw(subjectOptions(lang, ""))}</select>
+        <label>${t.teacher}</label><select name="teacher_id" id="group-teacher" required><option value="">${t.teacherPh}</option></select>
+        <label>${t.stage}</label><select name="stage"><option value="">—</option>${raw(STAGES.map(s => `<option value="${s.v}">${lang === "en" ? s.en : s.ar}</option>`).join(""))}</select>
+        <label>${t.day}</label><input name="day" placeholder="${t.dayPh}">
+        <label>${t.time}</label><input name="time" placeholder="${t.timePh}">
+        <label>${t.room}</label><select name="room_id"><option value="">${t.roomNone}</option>${raw(roomOptions)}</select>
+        <label>${t.capacity}</label><input name="capacity" type="number" min="1" placeholder="${t.capacityPh}">
+        <label>${t.price}</label><input name="price" type="number" step="0.01" min="0" placeholder="${t.pricePh}">
+        <button type="submit">${t.add}</button>
+      </form>
+      <script>
+        var TEACHERS_BY_SUBJECT = ${raw(teachersJson)};
+        function baseSubject(slug) { return slug.endsWith("-en") ? slug.slice(0, -3) : slug; }
+        function fillTeacherOptions(subjectSlug) {
+          var sel = document.getElementById("group-teacher");
+          var list = TEACHERS_BY_SUBJECT[baseSubject(subjectSlug)] || [];
+          sel.innerHTML = "";
+          list.forEach(function(tch) {
+            var opt = document.createElement("option");
+            opt.value = tch.id;
+            opt.textContent = tch.name;
+            sel.appendChild(opt);
+          });
+        }
+      </script>`;
+      return new Response(page(t.title, form + rows, { lang, toggleHref: toggleHref(url, lang), isOwner: roleAllowed(staffRole, ["owner"]) }), { headers: { "content-type": "text/html;charset=utf-8" } });
+    }
+
+    if (url.pathname === "/admin/groups" && request.method === "POST") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
+      const lang = langOf(url);
+      const form = await request.formData();
+      const teacherId = (form.get("teacher_id") || "").toString().trim();
+      const subject = (form.get("subject") || "").toString().trim();
+      const stage = sanitizeStage((form.get("stage") || "").toString().trim());
+      const day = (form.get("day") || "").toString().trim() || null;
+      const time = (form.get("time") || "").toString().trim() || null;
+      const roomId = parseInt((form.get("room_id") || "").toString(), 10);
+      const capacity = parseInt((form.get("capacity") || "").toString(), 10);
+      const price = parseFloat((form.get("price") || "").toString());
+      // teacher_id is a real FK now (picked from the subject-filtered <select>,
+      // not typed), so the group can be matched precisely instead of by the
+      // teacher_name string — see computeTeacherOwed() below.
+      const teacher = teacherId ? await env.DB.prepare("SELECT id, name FROM teachers WHERE id = ?").bind(teacherId).first() : null;
+      // room_id validated the same way as teacher_id (below) rather than
+      // trusted from a raw POST — the <select> only ever offers real rooms,
+      // but a tampered request could otherwise attach a dangling FK.
+      const room = Number.isFinite(roomId) ? await env.DB.prepare("SELECT id FROM rooms WHERE id = ?").bind(roomId).first() : null;
+      if (teacher && KNOWN_SUBJECT_SLUGS.has(subject)) {
+        await env.DB.prepare(
+          `INSERT INTO groups (teacher_id, teacher_name, subject, stage, day, time, room_id, capacity, price)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(
+          teacher.id, teacher.name, subject, stage || null, day, time,
+          room ? room.id : null,
+          Number.isFinite(capacity) && capacity > 0 ? capacity : null,
+          Number.isFinite(price) ? price : null
+        ).run();
+      }
+      return Response.redirect(url.origin + "/admin/groups" + (lang === "en" ? "?lang=en" : ""), 303);
+    }
+
+    const groupToggleMatch = url.pathname.match(/^\/admin\/groups\/(\d+)\/toggle$/);
+    if (groupToggleMatch && request.method === "POST") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
+      const lang = langOf(url);
+      await env.DB.prepare("UPDATE groups SET active = 1 - active WHERE id = ?").bind(groupToggleMatch[1]).run();
+      return Response.redirect(url.origin + "/admin/groups" + (lang === "en" ? "?lang=en" : ""), 303);
+    }
+
+    const LEDGER_I18N = {
+      ar: {
+        title: "دفتر الحساب", income: "دخل", expense: "مصروف", category: "الفئة", amount: "المبلغ", amountPh: "بالجنيه",
+        note: "ملاحظة", notePh: "اختياري", addExpense: "إضافة مصروف", totalIncome: "إجمالي الدخل", totalExpense: "إجمالي المصروفات",
+        net: "الصافي", from: "من", to: "إلى", filter: "فلترة"
+      },
+      en: {
+        title: "Ledger", income: "Income", expense: "Expense", category: "Category", amount: "Amount", amountPh: "in EGP",
+        note: "Note", notePh: "optional", addExpense: "Add expense", totalIncome: "Total income", totalExpense: "Total expense",
+        net: "Net", from: "From", to: "To", filter: "Filter"
+      }
+    };
+
+    const EXPENSE_CATEGORIES = ["salaries", "rent", "phone", "cleaning", "insurance", "other"];
+    const EXPENSE_CATEGORY_LABELS = {
+      ar: { salaries: "مرتبات", rent: "إيجار", phone: "فاتورة تليفون", cleaning: "أدوات نظافة", insurance: "تأمينات", other: "أخرى" },
+      en: { salaries: "Salaries", rent: "Rent", phone: "Phone bill", cleaning: "Cleaning", insurance: "Insurance", other: "Other" }
+    };
+
     const rejectMatch = url.pathname.match(/^\/admin\/students\/(\d+)\/reject$/);
     if (rejectMatch && request.method === "POST") {
       const lang = langOf(url);

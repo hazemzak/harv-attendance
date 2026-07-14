@@ -25,20 +25,8 @@ function adminFetch(path: string, init?: RequestInit) {
   );
 }
 
-// Distinct email from adminFetch's — INSERT OR IGNORE means a shared email
-// would silently keep whichever role got seeded first across the whole file.
-function clerkFetch(path: string, init?: RequestInit) {
-  return env.DB.prepare("INSERT OR IGNORE INTO staff (email, role) VALUES ('clerk@test.local', 'clerk')").run().then(() =>
-    SELF.fetch(path, {
-      ...init,
-      headers: {
-        "Cf-Access-Authenticated-User-Email": "clerk@test.local",
-        ...(init?.headers || {}),
-        "Cf-Access-Jwt-Assertion": "test"
-      }
-    })
-  );
-}
+// clerkFetch() is defined further down this file (used by the rooms/groups/
+// bookings work) — reused here instead of a second near-identical definition.
 
 async function insertStudent(fields: Record<string, string | null>) {
   const cols = Object.keys(fields);
@@ -662,6 +650,219 @@ describe("html`` tagged template (added 2026-07-12, for future render functions)
     expect(out).toBe("<ul>&lt;b&gt;a&lt;/b&gt;b</ul>");
   });
 });
+
+describe("/admin/groups + /admin/rooms (added 2026-07-13, extracted from the retired CenterStudent app's Groupdata/roomdata tables)", () => {
+  it("blocks unauthenticated access to /admin/groups and /admin/rooms", async () => {
+    expect((await SELF.fetch("https://example.com/admin/groups")).status).toBe(403);
+    expect((await SELF.fetch("https://example.com/admin/rooms")).status).toBe(403);
+  });
+
+  it("creates a room, then a group referencing it, and shows live enrolled/capacity", async () => {
+    let form = new FormData();
+    form.set("name", "قاعة 1");
+    form.set("floor", "الدور الأول");
+    form.set("capacity", "20");
+    await adminFetch("https://example.com/admin/rooms", { method: "POST", body: form });
+    const room = await env.DB.prepare("SELECT id FROM rooms WHERE name = 'قاعة 1'").first();
+    expect(room).toBeTruthy();
+
+    // Group creation picks a teacher from a real subject-filtered <select> now
+    // (2026-07-13) — teacher_id, not free-text teacher_name.
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-groups-ahmed', 'أ. أحمد', 'math')").run();
+    form = new FormData();
+    form.set("teacher_id", "t-groups-ahmed");
+    form.set("subject", "math");
+    form.set("stage", "أولى ثانوي");
+    form.set("day", "السبت");
+    form.set("time", "5PM");
+    form.set("room_id", String((room as any).id));
+    form.set("capacity", "2");
+    form.set("price", "300");
+    await adminFetch("https://example.com/admin/groups", { method: "POST", body: form });
+
+    const res = await adminFetch("https://example.com/admin/groups");
+    const body = await res.text();
+    expect(body).toContain("أ. أحمد");
+    expect(body).toContain("0/2"); // no bookings attached yet
+
+    const row = await env.DB.prepare("SELECT teacher_id, teacher_name FROM groups WHERE teacher_name = 'أ. أحمد'").first();
+    expect(row?.teacher_id).toBe("t-groups-ahmed"); // real FK populated, not just the name snapshot
+  });
+
+  it("embeds the subject-to-teacher mapping in the create-group form for client-side filtering", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-math-only', 'أ. رياضة', 'math')").run();
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-physics-only', 'أ. فيزياء', 'physics')").run();
+
+    const html = await (await adminFetch("https://example.com/admin/groups")).text();
+    expect(html).toContain('id="group-teacher"');
+    expect(html).toContain("fillTeacherOptions");
+    expect(html).toContain("t-math-only");
+    expect(html).toContain("t-physics-only");
+    // the raw teacher_name <input> from before 2026-07-13 should be gone
+    expect(html).not.toContain('name="teacher_name"');
+  });
+
+  it("drops a group referencing an unknown subject slug instead of storing it raw", async () => {
+    const form = new FormData();
+    form.set("teacher_name", "أ. حقن");
+    form.set("subject", "<script>alert(1)</script>");
+    await adminFetch("https://example.com/admin/groups", { method: "POST", body: form });
+    const row = await env.DB.prepare("SELECT * FROM groups WHERE teacher_name = 'أ. حقن'").first();
+    expect(row).toBeFalsy();
+  });
+
+  it("toggling a group flips its active flag", async () => {
+    const { meta } = await env.DB.prepare(
+      "INSERT INTO groups (teacher_name, subject, active) VALUES ('أ. تجربة', 'math', 1)"
+    ).run();
+    const id = meta.last_row_id;
+    await adminFetch(`https://example.com/admin/groups/${id}/toggle`, { method: "POST" });
+    const row = await env.DB.prepare("SELECT active FROM groups WHERE id = ?").bind(id).first();
+    expect(row?.active).toBe(0);
+  });
+
+  it("rejects a clerk creating/toggling a room or group — pricing/schedule setup is owner-only (claude-review, PR #9 finding #1)", async () => {
+    const roomForm = new FormData();
+    roomForm.set("name", "قاعة كليرك");
+    expect((await clerkFetch("https://example.com/admin/rooms", { method: "POST", body: roomForm })).status).toBe(403);
+    expect(await env.DB.prepare("SELECT id FROM rooms WHERE name = 'قاعة كليرك'").first()).toBeFalsy();
+
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-clerk-blocked', 'أ. كليرك', 'math')").run();
+    const groupForm = new FormData();
+    groupForm.set("teacher_id", "t-clerk-blocked");
+    groupForm.set("subject", "math");
+    expect((await clerkFetch("https://example.com/admin/groups", { method: "POST", body: groupForm })).status).toBe(403);
+    expect(await env.DB.prepare("SELECT id FROM groups WHERE teacher_name = 'أ. كليرك'").first()).toBeFalsy();
+
+    const { meta } = await env.DB.prepare("INSERT INTO groups (teacher_name, subject, active) VALUES ('أ. تبديل', 'math', 1)").run();
+    expect((await clerkFetch(`https://example.com/admin/groups/${meta.last_row_id}/toggle`, { method: "POST" })).status).toBe(403);
+  });
+
+  it("clamps capacity=0 to null (unlimited-looking) instead of storing it raw — 0 should never be treated as a real cap (claude-review, PR #9 finding #2)", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-cap-zero', 'أ. صفر', 'math')").run();
+    const form = new FormData();
+    form.set("teacher_id", "t-cap-zero");
+    form.set("subject", "math");
+    form.set("capacity", "0");
+    await adminFetch("https://example.com/admin/groups", { method: "POST", body: form });
+    const row = await env.DB.prepare("SELECT capacity FROM groups WHERE teacher_name = 'أ. صفر'").first();
+    expect(row?.capacity).toBeNull();
+  });
+
+  it("doesn't attach a room_id that doesn't exist in the rooms table (claude-review, PR #9 finding #3)", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-bogus-room', 'أ. قاعة وهمية', 'math')").run();
+    const form = new FormData();
+    form.set("teacher_id", "t-bogus-room");
+    form.set("subject", "math");
+    form.set("room_id", "999999");
+    await adminFetch("https://example.com/admin/groups", { method: "POST", body: form });
+    const row = await env.DB.prepare("SELECT room_id FROM groups WHERE teacher_name = 'أ. قاعة وهمية'").first();
+    expect(row?.room_id).toBeNull();
+  });
+});
+
+describe("bookings: group_id linkage + drop/transfer lifecycle (added 2026-07-13)", () => {
+  async function processForm(id: number, extra: Record<string, string>) {
+    const form = new FormData();
+    form.set("name", "Group Link Test");
+    form.set("school", "Test School");
+    form.set("stage", "أولى ثانوي");
+    form.set("phone", "01000000005");
+    form.set("parent_phone", "01111111115");
+    form.set("payment_method", "cash");
+    for (const [k, v] of Object.entries(extra)) form.append(k, v);
+    return adminFetch(`https://example.com/admin/students/${id}/process`, { method: "POST", body: form });
+  }
+
+  it("attaches a booking to a group via b_group and preserves it", async () => {
+    const { meta } = await env.DB.prepare(
+      "INSERT INTO groups (teacher_name, subject, day, time, price, capacity, active) VALUES ('أ. جروب', 'math', 'السبت', '5PM', 300, 10, 1)"
+    ).run();
+    const groupId = meta.last_row_id;
+    const id = await insertStudent({ name: "Group Link Test", status: "pending", subjects: "math" });
+    await processForm(id, { b_subject: "math", b_group: String(groupId), b_teacher: "أ. جروب", b_schedule: "السبت 5PM", b_amount: "300" });
+
+    const row = await env.DB.prepare("SELECT group_id FROM bookings WHERE student_id = ?").bind(id).first();
+    expect(row?.group_id).toBe(groupId);
+  });
+
+  it("a booking left without a group (free text) stores a null group_id", async () => {
+    const id = await insertStudent({ name: "No Group Test", status: "pending", subjects: "math" });
+    await processForm(id, { b_subject: "math", b_teacher: "أ. حر", b_schedule: "", b_amount: "100" });
+    const row = await env.DB.prepare("SELECT group_id FROM bookings WHERE student_id = ?").bind(id).first();
+    expect(row?.group_id).toBeFalsy();
+  });
+
+  it("a clerk can drop a booking — day-to-day per-student ops stay clerk-accessible, unlike room/group setup", async () => {
+    const id = await insertStudent({ name: "Clerk Drop Test", status: "approved", subjects: "math" });
+    const { meta } = await env.DB.prepare(
+      "INSERT INTO bookings (student_id, subject, teacher_name, schedule, amount) VALUES (?, 'math', 'أ. كليرك دروب', '', 300)"
+    ).bind(id).run();
+    const form = new FormData();
+    form.set("reason", "test");
+    const res = await clerkFetch(`https://example.com/admin/bookings/${meta.last_row_id}/drop`, { method: "POST", body: form });
+    expect(res.status).toBe(200);
+    const row = await env.DB.prepare("SELECT status FROM bookings WHERE id = ?").bind(meta.last_row_id).first();
+    expect(row?.status).toBe("dropped");
+  });
+
+  it("dropping a booking excludes it from getBookings/the active total but keeps the row with its reason", async () => {
+    const id = await insertStudent({ name: "Drop Test", status: "approved", subjects: "math" });
+    const { meta } = await env.DB.prepare(
+      "INSERT INTO bookings (student_id, subject, teacher_name, schedule, amount) VALUES (?, 'math', 'أ. أحمد', '', 300)"
+    ).bind(id).run();
+    const bookingId = meta.last_row_id;
+
+    const form = new FormData();
+    form.set("reason", "حذف لتكرار الغياب");
+    const res = await adminFetch(`https://example.com/admin/bookings/${bookingId}/drop`, { method: "POST", body: form });
+    expect(res.status).toBe(200); // follows the 303 redirect to the estamara page
+
+    const active = await env.DB.prepare("SELECT * FROM bookings WHERE student_id = ? AND status = 'active'").bind(id).all();
+    expect(active.results.length).toBe(0);
+
+    const dropped = await env.DB.prepare("SELECT status, status_reason FROM bookings WHERE id = ?").bind(bookingId).first();
+    expect(dropped?.status).toBe("dropped");
+    expect(dropped?.status_reason).toBe("حذف لتكرار الغياب");
+
+    const estamaraHtml = await (await adminFetch(`https://example.com/admin/students/${id}/estamara`)).text();
+    expect(estamaraHtml).toContain("حذف لتكرار الغياب");
+    // Regression (found visually in a real browser, not caught by the assertion
+    // above): droppedBookingsHtml() nests html`` calls inside an outer html``
+    // template without wrapping them in raw() first, so the outer tag re-escapes
+    // already-escaped markup — the reason text itself still renders fine (no
+    // special characters to mangle), but the surrounding <br><small> tags showed
+    // up as literal "&lt;br&gt;&lt;small&gt;" text instead of being real HTML.
+    expect(estamaraHtml).toContain("<br><small>");
+    expect(estamaraHtml).not.toContain("&lt;br&gt;");
+  });
+
+  it("re-processing a student keeps their dropped-booking history instead of wiping it (regression: DELETE was previously unscoped to status)", async () => {
+    const id = await insertStudent({ name: "Reprocess Keeps History", status: "approved", subjects: "math" });
+    const { meta } = await env.DB.prepare(
+      "INSERT INTO bookings (student_id, subject, teacher_name, schedule, amount, status, status_reason) VALUES (?, 'math', 'أ. قديم', '', 300, 'dropped', 'حذف للأنتقال لمجموعة أخرى')"
+    ).bind(id).run();
+    const droppedId = meta.last_row_id;
+
+    await processForm(id, { b_subject: "math", b_teacher: "أ. جديد", b_schedule: "", b_amount: "300" });
+
+    const stillThere = await env.DB.prepare("SELECT status FROM bookings WHERE id = ?").bind(droppedId).first();
+    expect(stillThere?.status).toBe("dropped");
+    const active = await env.DB.prepare("SELECT * FROM bookings WHERE student_id = ? AND status = 'active'").bind(id).all();
+    expect(active.results.length).toBe(1);
+    expect(active.results[0].teacher_name).toBe("أ. جديد");
+  });
+});
+
+// Seeds a real 'clerk' row first — with an empty staff table, getStaffRole()'s
+// bootstrap rule would resolve this email to 'owner' too, defeating the point.
+async function clerkFetch(path: string, init?: RequestInit) {
+  await env.DB.prepare("INSERT OR IGNORE INTO staff (email, role) VALUES ('clerk@test.local', 'clerk')").run();
+  return SELF.fetch(path, {
+    ...init,
+    headers: { ...(init?.headers || {}), "Cf-Access-Authenticated-User-Email": "clerk@test.local", "Cf-Access-Jwt-Assertion": "test" }
+  });
+}
 
 describe("roster: one-tap WhatsApp send per row (added 2026-07-14)", () => {
   it("renders a WhatsApp link linking to the student's own /student page, for an approved student with a phone", async () => {
