@@ -530,12 +530,12 @@ const PAY_I18N = {
   ar: {
     owed: "المطلوب", paid: "المدفوع", balance: "المتبقي", fullyPaid: "مدفوع بالكامل", credit: "رصيد للطالب",
     amount: "المبلغ", amountPh: "بالجنيه", method: "طريقة الدفع", note: "ملاحظة (اختياري)", notePh: "اختياري", record: "تسجيل دفعة",
-    history: "سجل الدفعات", receipt: "إيصال"
+    history: "سجل الدفعات", receipt: "إيصال", amountErr: "المبلغ لازم يكون رقم أكبر من صفر — لم يتم تسجيل أي دفعة."
   },
   en: {
     owed: "Owed", paid: "Paid", balance: "Balance", fullyPaid: "Fully paid", credit: "Credit on file",
     amount: "Amount", amountPh: "in EGP", method: "Payment method", note: "Note (optional)", notePh: "optional", record: "Record payment",
-    history: "Payment history", receipt: "Receipt"
+    history: "Payment history", receipt: "Receipt", amountErr: "Amount must be a number greater than zero — no payment was recorded."
   }
 };
 
@@ -1383,6 +1383,7 @@ export default {
       const balance = await getStudentBalance(env, student.id);
       const payments = await getPayments(env, student.id);
       const langQs = lang === "en" ? "?lang=en" : "";
+      const payErrHtml = url.searchParams.get("payErr") === "1" ? `<p class="empty" style="color:var(--red)">${PAY_I18N[lang].amountErr}</p>` : "";
       const trackLabel = (TRACKS.find(tr => tr.v === student.track) || {})[lang] || "";
       const infoRow = (label, value) => value ? `<p><strong>${label}:</strong> ${escapeHtml(value)}</p>` : "";
       const studentPageUrl = `${url.origin}/student?id=${student.id}`;
@@ -1411,6 +1412,7 @@ export default {
       ${infoRow(t.address, student.address)}
       ${bookingTableHtml(lang, bookings, { langQs })}
       ${balanceSummaryHtml(lang, balance)}
+      ${payErrHtml}
       ${paymentFormHtml(lang, student.id, langQs)}
       ${paymentsHistoryHtml(lang, payments)}
       ${droppedBookingsHtml(lang, dropped)}`;
@@ -1441,12 +1443,28 @@ export default {
     // landing in the center's own journal.
     const payMatch = url.pathname.match(/^\/admin\/students\/(\d+)\/pay$/);
     if (payMatch && request.method === "POST") {
+      if (!roleAllowed(staffRole, ["owner", "clerk"])) return forbiddenRole();
       const lang = langOf(url);
+      const langQs = lang === "en" ? "?lang=en" : "";
+      const estamaraUrl = url.origin + `/admin/students/${payMatch[1]}/estamara`;
+      const student = await env.DB.prepare("SELECT id FROM students WHERE id = ?").bind(payMatch[1]).first();
+      if (!student) {
+        return Response.redirect(url.origin + "/admin" + langQs, 303);
+      }
       const form = await request.formData();
       const amount = parseFloat((form.get("amount") || "").toString());
       const method = (form.get("method") || "").toString().trim() || null;
       const note = (form.get("note") || "").toString().trim() || null;
-      if (Number.isFinite(amount) && amount > 0) {
+      if (!Number.isFinite(amount) || amount <= 0) {
+        return Response.redirect(estamaraUrl + langQs + (langQs ? "&" : "?") + "payErr=1", 303);
+      }
+      // ponytail: double-submit guard by recency, not a request token — a slow
+      // network/double-tap resubmits the same student+amount+staff within
+      // seconds; a legit second identical payment minutes later still lands.
+      const dup = await env.DB.prepare(
+        "SELECT id FROM payments WHERE student_id = ? AND amount = ? AND created_by = ? AND created_at >= datetime('now', '-10 seconds')"
+      ).bind(payMatch[1], amount, staffEmail).first();
+      if (!dup) {
         await env.DB.batch([
           env.DB.prepare("INSERT INTO payments (student_id, amount, method, note, created_by) VALUES (?, ?, ?, ?, ?)")
             .bind(payMatch[1], amount, method, note, staffEmail),
@@ -1454,7 +1472,7 @@ export default {
             .bind(amount, note, staffEmail)
         ]);
       }
-      return Response.redirect(url.origin + `/admin/students/${payMatch[1]}/estamara` + (lang === "en" ? "?lang=en" : ""), 303);
+      return Response.redirect(estamaraUrl + langQs, 303);
     }
 
     const PROMO_I18N = {

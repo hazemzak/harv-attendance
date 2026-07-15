@@ -1034,6 +1034,43 @@ describe("/admin/students/:id/pay + balance (added 2026-07-13, migration 0011_pa
     expect(count?.n).toBe(0);
   });
 
+  it("blocks a viewer role from recording a payment (added 2026-07-15, PR #11 claude-review finding: pay had no role check at all)", async () => {
+    const id = await insertStudent({ name: "Viewer Pay Test", status: "approved" });
+    const form = new FormData();
+    form.set("amount", "50");
+    const res = await viewerFetch(`https://example.com/admin/students/${id}/pay`, { method: "POST", body: form });
+    expect(res.status).toBe(403);
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM payments WHERE student_id = ?").bind(id).first();
+    expect(count?.n).toBe(0);
+  });
+
+  it("allows a clerk role to record a payment — clerks handle day-to-day student-level financial ops per the access-control policy", async () => {
+    const id = await insertStudent({ name: "Clerk Pay Test", status: "approved" });
+    const form = new FormData();
+    form.set("amount", "50");
+    const res = await clerkFetch(`https://example.com/admin/students/${id}/pay`, { method: "POST", body: form });
+    expect(res.status).toBe(200); // follows the 303 redirect
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM payments WHERE student_id = ?").bind(id).first();
+    expect(count?.n).toBe(1);
+  });
+
+  it("redirects cleanly instead of throwing on a nonexistent student id", async () => {
+    const res = await adminFetch("https://example.com/admin/students/999999/pay", { method: "POST", body: new FormData() });
+    expect(res.status).toBe(200); // follows the redirect to /admin, doesn't 500
+  });
+
+  it("does not double-record a payment resubmitted within seconds (double-tap / slow network guard)", async () => {
+    const id = await insertStudent({ name: "Double Submit Test", status: "approved" });
+    const form1 = new FormData();
+    form1.set("amount", "75");
+    const form2 = new FormData();
+    form2.set("amount", "75");
+    await adminFetch(`https://example.com/admin/students/${id}/pay`, { method: "POST", body: form1 });
+    await adminFetch(`https://example.com/admin/students/${id}/pay`, { method: "POST", body: form2 });
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM payments WHERE student_id = ?").bind(id).first();
+    expect(count?.n).toBe(1);
+  });
+
   it("an overpayment from one student doesn't mask another student's outstanding balance — the dashboard tile clamps each student's balance at 0 before summing (regression: a naive global SUM(owed)-SUM(paid) would let one student's overpayment cancel out another's real debt)", async () => {
     const overpaid = await insertStudent({ name: "Overpaid Test", status: "approved" });
     await env.DB.prepare("INSERT INTO bookings (student_id, subject, teacher_name, amount, status) VALUES (?, 'math', 'أ. أ', 100, 'active')").bind(overpaid).run();
@@ -1294,6 +1331,14 @@ async function clerkFetch(path: string, init?: RequestInit) {
   return SELF.fetch(path, {
     ...init,
     headers: { ...(init?.headers || {}), "Cf-Access-Authenticated-User-Email": "clerk@test.local", "Cf-Access-Jwt-Assertion": "test" }
+  });
+}
+
+async function viewerFetch(path: string, init?: RequestInit) {
+  await env.DB.prepare("INSERT OR IGNORE INTO staff (email, role) VALUES ('viewer@test.local', 'viewer')").run();
+  return SELF.fetch(path, {
+    ...init,
+    headers: { ...(init?.headers || {}), "Cf-Access-Authenticated-User-Email": "viewer@test.local", "Cf-Access-Jwt-Assertion": "test" }
   });
 }
 
