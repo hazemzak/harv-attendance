@@ -380,6 +380,21 @@ describe("/admin/students/:id/process: booking-row array length mismatch (found 
 });
 
 describe("stage: whitelist at write time (found by claude-review, round 4)", () => {
+  it("/admin's walk-in add-student form actually submits 'stage', not a stale 'class' field the handler no longer reads (claude-review, this session -- the handler was updated to read 'stage' but the rendered form was never updated to match, so every real submission silently saved an empty stage)", async () => {
+    const adminHtml = await (await adminFetch("https://example.com/admin")).text();
+    expect(adminHtml).toContain('name="stage"');
+    expect(adminHtml).not.toContain('name="class"');
+
+    const form = new FormData();
+    form.set("name", "Walkin Stage Test");
+    form.set("stage", "بكالوريا");
+    const res = await adminFetch("https://example.com/admin/students", { method: "POST", body: form, redirect: "manual" });
+    expect(res.status).toBe(303);
+
+    const row = await env.DB.prepare("SELECT stage FROM students WHERE name = 'Walkin Stage Test'").first();
+    expect(row?.stage).toBe("بكالوريا");
+  });
+
   it("/register rejects a stage value that isn't a known STAGES slug", async () => {
     const form = new FormData();
     form.set("name", "Stage Whitelist Test");
@@ -739,6 +754,17 @@ describe("/register: subject → teacher live panel (added 2026-07-13, most stud
     expect(html).toContain("أ. أحمد");
   });
 
+  it("teacherCard() escapes schedule and mode, not just name/phase (claude-review, this session -- t.name/phase were escaped in an earlier fix on this branch, but t.schedule/t.mode in the same function were missed)", async () => {
+    await env.DB.prepare(
+      "INSERT INTO teachers (id, name, subject, phase, mode, schedule, track) VALUES ('t-xss', 'أ. تست', 'math', NULL, '<script>alert(1)</script>', '<img src=x onerror=alert(2)>', NULL)"
+    ).run();
+
+    const res = await SELF.fetch("https://example.com/register");
+    const html = await res.text();
+    expect(html).not.toContain("<script>alert(1)</script>");
+    expect(html).not.toContain("<img src=x onerror=alert(2)>");
+  });
+
   it("keeps a dual-track subject's Arabic and English-cousin teacher lists separate", async () => {
     await env.DB.prepare(
       "INSERT INTO teachers (id, name, subject, phase, mode, schedule, track) VALUES ('t2', 'Mr. Sam', 'math', NULL, 'اونلاين', '', 'لغات')"
@@ -1006,6 +1032,43 @@ describe("/admin/students/:id/pay + balance (added 2026-07-13, migration 0011_pa
     await adminFetch(`https://example.com/admin/students/${id}/pay`, { method: "POST", body: form });
     const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM payments WHERE student_id = ?").bind(id).first();
     expect(count?.n).toBe(0);
+  });
+
+  it("blocks a viewer role from recording a payment (added 2026-07-15, PR #11 claude-review finding: pay had no role check at all)", async () => {
+    const id = await insertStudent({ name: "Viewer Pay Test", status: "approved" });
+    const form = new FormData();
+    form.set("amount", "50");
+    const res = await viewerFetch(`https://example.com/admin/students/${id}/pay`, { method: "POST", body: form });
+    expect(res.status).toBe(403);
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM payments WHERE student_id = ?").bind(id).first();
+    expect(count?.n).toBe(0);
+  });
+
+  it("allows a clerk role to record a payment — clerks handle day-to-day student-level financial ops per the access-control policy", async () => {
+    const id = await insertStudent({ name: "Clerk Pay Test", status: "approved" });
+    const form = new FormData();
+    form.set("amount", "50");
+    const res = await clerkFetch(`https://example.com/admin/students/${id}/pay`, { method: "POST", body: form });
+    expect(res.status).toBe(200); // follows the 303 redirect
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM payments WHERE student_id = ?").bind(id).first();
+    expect(count?.n).toBe(1);
+  });
+
+  it("redirects cleanly instead of throwing on a nonexistent student id", async () => {
+    const res = await adminFetch("https://example.com/admin/students/999999/pay", { method: "POST", body: new FormData() });
+    expect(res.status).toBe(200); // follows the redirect to /admin, doesn't 500
+  });
+
+  it("does not double-record a payment resubmitted within seconds (double-tap / slow network guard)", async () => {
+    const id = await insertStudent({ name: "Double Submit Test", status: "approved" });
+    const form1 = new FormData();
+    form1.set("amount", "75");
+    const form2 = new FormData();
+    form2.set("amount", "75");
+    await adminFetch(`https://example.com/admin/students/${id}/pay`, { method: "POST", body: form1 });
+    await adminFetch(`https://example.com/admin/students/${id}/pay`, { method: "POST", body: form2 });
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM payments WHERE student_id = ?").bind(id).first();
+    expect(count?.n).toBe(1);
   });
 
   it("an overpayment from one student doesn't mask another student's outstanding balance — the dashboard tile clamps each student's balance at 0 before summing (regression: a naive global SUM(owed)-SUM(paid) would let one student's overpayment cancel out another's real debt)", async () => {
@@ -1716,6 +1779,14 @@ describe("/admin/teachers: subject grouping + needs-attention ordering (added 20
     expect(html.indexOf(">رياضيات<")).toBeLessThan(html.indexOf(">أحياء<"));
   });
 });
+
+async function viewerFetch(path: string, init?: RequestInit) {
+  await env.DB.prepare("INSERT OR IGNORE INTO staff (email, role) VALUES ('viewer@test.local', 'viewer')").run();
+  return SELF.fetch(path, {
+    ...init,
+    headers: { ...(init?.headers || {}), "Cf-Access-Authenticated-User-Email": "viewer@test.local", "Cf-Access-Jwt-Assertion": "test" }
+  });
+}
 
 describe("roster: one-tap WhatsApp send per row (added 2026-07-14)", () => {
   it("renders a WhatsApp link linking to the student's own /student page, for an approved student with a phone", async () => {
