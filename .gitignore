@@ -3,3 +3,4 @@ node_modules/
 scratch_*.log
 scratch_*.sql
 backup-test.sql
+.backups/
