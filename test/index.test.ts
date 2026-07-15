@@ -380,6 +380,21 @@ describe("/admin/students/:id/process: booking-row array length mismatch (found 
 });
 
 describe("stage: whitelist at write time (found by claude-review, round 4)", () => {
+  it("/admin's walk-in add-student form actually submits 'stage', not a stale 'class' field the handler no longer reads (claude-review, this session -- the handler was updated to read 'stage' but the rendered form was never updated to match, so every real submission silently saved an empty stage)", async () => {
+    const adminHtml = await (await adminFetch("https://example.com/admin")).text();
+    expect(adminHtml).toContain('name="stage"');
+    expect(adminHtml).not.toContain('name="class"');
+
+    const form = new FormData();
+    form.set("name", "Walkin Stage Test");
+    form.set("stage", "بكالوريا");
+    const res = await adminFetch("https://example.com/admin/students", { method: "POST", body: form, redirect: "manual" });
+    expect(res.status).toBe(303);
+
+    const row = await env.DB.prepare("SELECT stage FROM students WHERE name = 'Walkin Stage Test'").first();
+    expect(row?.stage).toBe("بكالوريا");
+  });
+
   it("/register rejects a stage value that isn't a known STAGES slug", async () => {
     const form = new FormData();
     form.set("name", "Stage Whitelist Test");
@@ -791,6 +806,17 @@ describe("/register: subject → teacher live panel (added 2026-07-13, most stud
     expect(html).toContain("أ. أحمد");
   });
 
+  it("teacherCard() escapes schedule and mode, not just name/phase (claude-review, this session -- t.name/phase were escaped in an earlier fix on this branch, but t.schedule/t.mode in the same function were missed)", async () => {
+    await env.DB.prepare(
+      "INSERT INTO teachers (id, name, subject, phase, mode, schedule, track) VALUES ('t-xss', 'أ. تست', 'math', NULL, '<script>alert(1)</script>', '<img src=x onerror=alert(2)>', NULL)"
+    ).run();
+
+    const res = await SELF.fetch("https://example.com/register");
+    const html = await res.text();
+    expect(html).not.toContain("<script>alert(1)</script>");
+    expect(html).not.toContain("<img src=x onerror=alert(2)>");
+  });
+
   it("keeps a dual-track subject's Arabic and English-cousin teacher lists separate", async () => {
     await env.DB.prepare(
       "INSERT INTO teachers (id, name, subject, phase, mode, schedule, track) VALUES ('t2', 'Mr. Sam', 'math', NULL, 'اونلاين', '', 'لغات')"
@@ -1058,6 +1084,43 @@ describe("/admin/students/:id/pay + balance (added 2026-07-13, migration 0011_pa
     await adminFetch(`https://example.com/admin/students/${id}/pay`, { method: "POST", body: form });
     const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM payments WHERE student_id = ?").bind(id).first();
     expect(count?.n).toBe(0);
+  });
+
+  it("blocks a viewer role from recording a payment (added 2026-07-15, PR #11 claude-review finding: pay had no role check at all)", async () => {
+    const id = await insertStudent({ name: "Viewer Pay Test", status: "approved" });
+    const form = new FormData();
+    form.set("amount", "50");
+    const res = await viewerFetch(`https://example.com/admin/students/${id}/pay`, { method: "POST", body: form });
+    expect(res.status).toBe(403);
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM payments WHERE student_id = ?").bind(id).first();
+    expect(count?.n).toBe(0);
+  });
+
+  it("allows a clerk role to record a payment — clerks handle day-to-day student-level financial ops per the access-control policy", async () => {
+    const id = await insertStudent({ name: "Clerk Pay Test", status: "approved" });
+    const form = new FormData();
+    form.set("amount", "50");
+    const res = await clerkFetch(`https://example.com/admin/students/${id}/pay`, { method: "POST", body: form });
+    expect(res.status).toBe(200); // follows the 303 redirect
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM payments WHERE student_id = ?").bind(id).first();
+    expect(count?.n).toBe(1);
+  });
+
+  it("redirects cleanly instead of throwing on a nonexistent student id", async () => {
+    const res = await adminFetch("https://example.com/admin/students/999999/pay", { method: "POST", body: new FormData() });
+    expect(res.status).toBe(200); // follows the redirect to /admin, doesn't 500
+  });
+
+  it("does not double-record a payment resubmitted within seconds (double-tap / slow network guard)", async () => {
+    const id = await insertStudent({ name: "Double Submit Test", status: "approved" });
+    const form1 = new FormData();
+    form1.set("amount", "75");
+    const form2 = new FormData();
+    form2.set("amount", "75");
+    await adminFetch(`https://example.com/admin/students/${id}/pay`, { method: "POST", body: form1 });
+    await adminFetch(`https://example.com/admin/students/${id}/pay`, { method: "POST", body: form2 });
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM payments WHERE student_id = ?").bind(id).first();
+    expect(count?.n).toBe(1);
   });
 
   it("an overpayment from one student doesn't mask another student's outstanding balance — the dashboard tile clamps each student's balance at 0 before summing (regression: a naive global SUM(owed)-SUM(paid) would let one student's overpayment cancel out another's real debt)", async () => {
@@ -1459,6 +1522,22 @@ describe("/admin/staff management (added 2026-07-13)", () => {
     expect(row?.role).toBe("owner");
   });
 
+  it("forces the very first staff row ever added to owner, even if the form submitted a lesser role (claude-review finding on PR #12: an empty-table INSERT with role='clerk' would end bootstrap mode with zero owners and no in-app recovery)", async () => {
+    await env.DB.prepare("DELETE FROM staff").run();
+    const form = new FormData();
+    form.set("email", "first-admin@test.local");
+    form.set("role", "clerk"); // the form's default dropdown value
+    const res = await SELF.fetch("https://example.com/admin/staff", {
+      method: "POST",
+      body: form,
+      // Bootstrap mode: no staff rows yet, so this request is itself auto-owner.
+      headers: { "Cf-Access-Authenticated-User-Email": "first-admin@test.local", "Cf-Access-Jwt-Assertion": "test" }
+    });
+    expect(res.status).toBe(200); // follows the redirect
+    const row = await env.DB.prepare("SELECT role FROM staff WHERE email = 'first-admin@test.local'").first();
+    expect(row?.role).toBe("owner");
+  });
+
   it("allows deactivating an owner when another active owner remains", async () => {
     await env.DB.prepare("INSERT INTO staff (email, role) VALUES ('owner-a@test.local', 'owner')").run();
     await env.DB.prepare("INSERT INTO staff (email, role) VALUES ('owner-b@test.local', 'owner')").run();
@@ -1518,16 +1597,43 @@ describe("/admin/teachers/:id/settlement: payout math (added 2026-07-13)", () =>
   it("percent: owed = share_value% of payments actually collected against the teacher's groups, not the billed amount (claude-review finding #1 on PR #12)", async () => {
     const { teacherId, groupId } = await makeTeacherWithGroup("percent", 10);
     const s1 = await insertStudent({ name: "Settle Percent 1", status: "approved" });
-    const { meta } = await env.DB.prepare(
+    await env.DB.prepare(
       "INSERT INTO bookings (student_id, subject, amount, group_id, status) VALUES (?, 'math', 500, ?, 'active')"
     ).bind(s1, groupId).run();
-    // Only half collected so far — owed must track the payment, not the 500 billed.
-    await env.DB.prepare(
-      "INSERT INTO payments (student_id, booking_id, amount) VALUES (?, ?, 250)"
-    ).bind(s1, meta.last_row_id).run();
+    // Pay through the REAL endpoint (not a raw INSERT) so payment_allocations
+    // gets populated the way production does -- the old test hand-set a
+    // payments.booking_id the app never actually writes, hiding the fact that
+    // the percent branch's booking_id join matched zero rows for real data.
+    const payForm = new FormData();
+    payForm.set("amount", "250"); // only half collected so far
+    await adminFetch(`https://example.com/admin/students/${s1}/pay`, { method: "POST", body: payForm });
 
     const html = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`)).text();
     expect(html).toContain("25.00"); // 10% of 250 collected, not 10% of 500 billed
+  });
+
+  it("percent: a single payment settling bookings across TWO teachers' groups is split proportionally by each booking's net value, so each teacher is credited only their groups' share of the cash (this session -- the real bug: payments.booking_id was never populated, so every percent teacher computed owed as 0)", async () => {
+    const a = await makeTeacherWithGroup("percent", 10);
+    const b = await makeTeacherWithGroup("percent", 10);
+    const student = await insertStudent({ name: "Split Payment Test", status: "approved" });
+    // 300 with teacher A, 200 with teacher B -- net split target is 60% / 40%.
+    await env.DB.prepare(
+      "INSERT INTO bookings (student_id, subject, amount, group_id, status) VALUES (?, 'math', 300, ?, 'active')"
+    ).bind(student, a.groupId).run();
+    await env.DB.prepare(
+      "INSERT INTO bookings (student_id, subject, amount, group_id, status) VALUES (?, 'math', 200, ?, 'active')"
+    ).bind(student, b.groupId).run();
+    // Front desk takes a 250 lump sum against the whole balance via the REAL
+    // pay endpoint -- no per-booking picker exists, this is the actual flow.
+    const payForm = new FormData();
+    payForm.set("amount", "250");
+    await adminFetch(`https://example.com/admin/students/${student}/pay`, { method: "POST", body: payForm });
+
+    // 250 split 60/40 = 150 to A's group, 100 to B's group.
+    const aHtml = await (await adminFetch(`https://example.com/admin/teachers/${a.teacherId}/settlement`)).text();
+    expect(aHtml).toContain("15.00"); // 10% of 150, NOT 10% of the whole 250 (25.00) and NOT 0
+    const bHtml = await (await adminFetch(`https://example.com/admin/teachers/${b.teacherId}/settlement`)).text();
+    expect(bHtml).toContain("10.00"); // 10% of 100
   });
 
   it("recording a payout inserts a ledger expense row tagged teacher_payout", async () => {
@@ -1723,6 +1829,55 @@ describe("/admin/teachers/:id/settlement: payout math (added 2026-07-13)", () =>
     expect(lastPayout?.d).toBeFalsy();
   });
 
+  it("two teachers with the identical display name don't cross-contaminate each other's payout tracking (claude-review, PR #12 review round on the master-synced branch: payout matching used to be name-based, not by teacher.id)", async () => {
+    const sameName = "أ. توأم";
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject, share_type, share_value) VALUES ('twin-a', ?, 'math', 'per_session', 20)").bind(sameName).run();
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject, share_type, share_value) VALUES ('twin-b', ?, 'math', 'per_session', 20)").bind(sameName).run();
+    const { meta: groupA } = await env.DB.prepare("INSERT INTO groups (teacher_id, teacher_name, subject, active) VALUES ('twin-a', ?, 'math', 1)").bind(sameName).run();
+    await env.DB.prepare("INSERT INTO groups (teacher_id, teacher_name, subject, active) VALUES ('twin-b', ?, 'math', 1)").bind(sameName).run();
+    const student = await insertStudent({ name: "Twin Payout Test", status: "approved" });
+    await env.DB.prepare("INSERT INTO attendance (student_id, group_id, scanned_at) VALUES (?, ?, datetime('now', '-1 day'))").bind(student, groupA.last_row_id).run();
+
+    // Pay teacher A in full.
+    const payForm = new FormData();
+    payForm.set("to", await env.DB.prepare("SELECT date('now') AS d").first().then((r: any) => r.d));
+    payForm.set("amount", "20");
+    await adminFetch("https://example.com/admin/teachers/twin-a/settlement", { method: "POST", body: payForm });
+
+    // Teacher B, same name, no attendance of their own — must still show as
+    // fully unpaid-from-the-start, not inherit A's just-closed period.
+    const bHtml = await (await adminFetch("https://example.com/admin/teachers/twin-b/settlement")).text();
+    expect(bHtml).toContain("0.00");
+    const aRow = await env.DB.prepare("SELECT teacher_id FROM ledger WHERE category = 'teacher_payout' AND note LIKE 'أ. توأم%'").first();
+    expect(aRow?.teacher_id).toBe("twin-a");
+  });
+
+  it("rejects a settlement POST for a teacher with no share configured, even bypassing the UI directly (claude-review, PR #12 review round on the master-synced branch)", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('no-share', 'أ. بدون نسبة', 'math')").run();
+    const form = new FormData();
+    form.set("to", await env.DB.prepare("SELECT date('now') AS d").first().then((r: any) => r.d));
+    form.set("amount", "500");
+    await adminFetch("https://example.com/admin/teachers/no-share/settlement", { method: "POST", body: form });
+    const row = await env.DB.prepare("SELECT * FROM ledger WHERE category = 'teacher_payout' AND teacher_id = 'no-share'").first();
+    expect(row).toBeFalsy();
+  });
+
+  it("a later partial payout doesn't net out an earlier historical window's owed amount (claude-review, PR #12 review round on the master-synced branch: the partial-payout subtraction had no upper bound tied to the settlement's 'to' date)", async () => {
+    const { teacherId, groupId } = await makeTeacherWithGroup("per_session", 20);
+    const student = await insertStudent({ name: "Bounded Netting Test", status: "approved" });
+    // A session 5 days ago -- owed 20 for the historical window ending 3 days ago.
+    await env.DB.prepare("INSERT INTO attendance (student_id, group_id, scanned_at) VALUES (?, ?, datetime('now', '-5 days'))").bind(student, groupId).run();
+    const historicalTo = await env.DB.prepare("SELECT date('now', '-3 days') AS d").first().then((r: any) => r.d);
+    // A partial payout recorded TODAY (after historicalTo) -- must not net
+    // against the earlier window above.
+    await env.DB.prepare(
+      "INSERT INTO ledger (kind, category, amount, note, teacher_id, period_to) VALUES ('expense', 'teacher_payout', 15, 'later partial', ?, NULL)"
+    ).bind(teacherId).run();
+
+    const html = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement?from=2000-01-01&to=${historicalTo}`)).text();
+    expect(html).toContain("20.00"); // NOT 5.00 (which would mean the later partial wrongly netted in)
+  });
+
   it("setting a teacher's share persists share_type and share_value", async () => {
     const { meta } = await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('share-test', 'أ. شير', 'math')").run();
     const form = new FormData();
@@ -1840,6 +1995,14 @@ describe("walk-in fast path: /admin/students POST lands straight on the process 
     expect(html).not.toContain('name="class"');
   });
 });
+
+async function viewerFetch(path: string, init?: RequestInit) {
+  await env.DB.prepare("INSERT OR IGNORE INTO staff (email, role) VALUES ('viewer@test.local', 'viewer')").run();
+  return SELF.fetch(path, {
+    ...init,
+    headers: { ...(init?.headers || {}), "Cf-Access-Authenticated-User-Email": "viewer@test.local", "Cf-Access-Jwt-Assertion": "test" }
+  });
+}
 
 describe("roster: one-tap WhatsApp send per row (added 2026-07-14)", () => {
   it("renders a WhatsApp link linking to the student's own /student page, for an approved student with a phone", async () => {

@@ -1,0 +1,13 @@
+-- End of the [from, to] period a teacher_payout ledger row settles (the
+-- settlement form's own 'to' date, not the recording timestamp — see
+-- claude-review finding #2 on PR #12: the old lastPayout query used
+-- occurred_at, so a payout recorded late for an earlier period would wrongly
+-- exclude that period from the next settlement's owed calculation).
+--
+-- Added as a new migration rather than editing migrations/0011_payments_ledger.sql
+-- in place (claude-review, PR #12 review round on the master-synced branch) --
+-- 0011 was already merged to master and applied to production D1 before this
+-- column was added; D1 tracks applied migrations by filename and won't re-run
+-- an already-applied one just because its contents changed, so editing it
+-- in place would have permanently left production missing this column.
+ALTER TABLE ledger ADD COLUMN period_to TEXT;
