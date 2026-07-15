@@ -30,13 +30,7 @@ CREATE TABLE ledger (
   amount REAL NOT NULL CHECK (amount >= 0),
   note TEXT,
   occurred_at TEXT NOT NULL DEFAULT (datetime('now')),
-  created_by TEXT,
-  -- End of the [from, to] period this row settles, for teacher_payout rows
-  -- (the settlement form's own 'to' date, not the recording timestamp — see
-  -- claude-review finding #2 on PR #12: the old lastPayout query used
-  -- occurred_at, so a payout recorded late for an earlier period would wrongly
-  -- exclude that period from the next settlement's owed calculation).
-  period_to TEXT
+  created_by TEXT
 );
 
 CREATE INDEX idx_ledger_occurred ON ledger(occurred_at);

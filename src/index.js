@@ -530,12 +530,12 @@ const PAY_I18N = {
   ar: {
     owed: "المطلوب", paid: "المدفوع", balance: "المتبقي", fullyPaid: "مدفوع بالكامل", credit: "رصيد للطالب",
     amount: "المبلغ", amountPh: "بالجنيه", method: "طريقة الدفع", note: "ملاحظة (اختياري)", notePh: "اختياري", record: "تسجيل دفعة",
-    history: "سجل الدفعات", receipt: "إيصال"
+    history: "سجل الدفعات", receipt: "إيصال", amountErr: "المبلغ لازم يكون رقم أكبر من صفر — لم يتم تسجيل أي دفعة."
   },
   en: {
     owed: "Owed", paid: "Paid", balance: "Balance", fullyPaid: "Fully paid", credit: "Credit on file",
     amount: "Amount", amountPh: "in EGP", method: "Payment method", note: "Note (optional)", notePh: "optional", record: "Record payment",
-    history: "Payment history", receipt: "Receipt"
+    history: "Payment history", receipt: "Receipt", amountErr: "Amount must be a number greater than zero — no payment was recorded."
   }
 };
 
@@ -610,8 +610,8 @@ const TEACHER_PHOTO_BASE = "https://harvcentereg.com";
 // the fallback so a future non-picking listing doesn't need a new function).
 function teacherCard(lang, t, pickName, checked) {
   const phase = phaseLabel(lang, t.phase);
-  const scheduleText = t.schedule || (lang === "en" ? "Schedule TBD — ask the teacher directly" : "الجدول لسه هيتحدد — اسأل المدرس مباشرة");
-  const modeBadge = t.mode ? `<span class="mode-badge ${modeBadgeClass(t.mode)}">${t.mode}</span>` : "";
+  const scheduleText = escapeHtml(t.schedule || (lang === "en" ? "Schedule TBD — ask the teacher directly" : "الجدول لسه هيتحدد — اسأل المدرس مباشرة"));
+  const modeBadge = t.mode ? `<span class="mode-badge ${modeBadgeClass(t.mode)}">${escapeHtml(t.mode)}</span>` : "";
   const photo = t.photo
     ? `<img class="t-photo" src="${TEACHER_PHOTO_BASE}${escapeHtml(t.photo)}" alt="" loading="lazy" onerror="this.style.display='none'">`
     : `<div class="t-photo t-photo--empty" aria-hidden="true">${(t.name || "").trim().charAt(0)}</div>`;
@@ -623,7 +623,7 @@ function teacherCard(lang, t, pickName, checked) {
     ${input}
     ${photo}
     <div class="t-info">
-      <div class="t-name">${t.name}${phase ? ` <span class="t-phase">· ${phase}</span>` : ""}</div>
+      <div class="t-name">${escapeHtml(t.name)}${phase ? ` <span class="t-phase">· ${escapeHtml(phase)}</span>` : ""}</div>
       <div class="t-schedule">🕒 ${scheduleText}</div>
       ${modeBadge}
     </div>
@@ -1062,7 +1062,10 @@ export default {
         <label>${t.addName}</label>
         <input name="name" placeholder="${t.addNamePh}" required>
         <label>${t.addClass}</label>
-        <input name="class" placeholder="${t.addClassPh}">
+        <select name="stage">
+          <option value="">${t.addClassPh}</option>
+          ${STAGES.map(s => `<option value="${s.v}">${lang === "en" ? s.en : s.ar}</option>`).join("")}
+        </select>
         <button type="submit">${t.addSubmit}</button>
       </form>`;
       const regLink = `<div class="reg-link">${t.regLink}<br><a href="${url.origin}/register">${url.origin}/register</a></div>`;
@@ -1446,6 +1449,7 @@ export default {
       const balance = await getStudentBalance(env, student.id);
       const payments = await getPayments(env, student.id);
       const langQs = lang === "en" ? "?lang=en" : "";
+      const payErrHtml = url.searchParams.get("payErr") === "1" ? `<p class="empty" style="color:var(--red)">${PAY_I18N[lang].amountErr}</p>` : "";
       const trackLabel = (TRACKS.find(tr => tr.v === student.track) || {})[lang] || "";
       const infoRow = (label, value) => value ? `<p><strong>${label}:</strong> ${escapeHtml(value)}</p>` : "";
       const studentPageUrl = `${url.origin}/student?id=${student.id}`;
@@ -1474,6 +1478,7 @@ export default {
       ${infoRow(t.address, student.address)}
       ${bookingTableHtml(lang, bookings, { langQs })}
       ${balanceSummaryHtml(lang, balance)}
+      ${payErrHtml}
       ${paymentFormHtml(lang, student.id, langQs)}
       ${paymentsHistoryHtml(lang, payments)}
       ${droppedBookingsHtml(lang, dropped)}`;
@@ -1504,20 +1509,54 @@ export default {
     // landing in the center's own journal.
     const payMatch = url.pathname.match(/^\/admin\/students\/(\d+)\/pay$/);
     if (payMatch && request.method === "POST") {
+      if (!roleAllowed(staffRole, ["owner", "clerk"])) return forbiddenRole();
       const lang = langOf(url);
+      const langQs = lang === "en" ? "?lang=en" : "";
+      const estamaraUrl = url.origin + `/admin/students/${payMatch[1]}/estamara`;
+      const student = await env.DB.prepare("SELECT id FROM students WHERE id = ?").bind(payMatch[1]).first();
+      if (!student) {
+        return Response.redirect(url.origin + "/admin" + langQs, 303);
+      }
       const form = await request.formData();
       const amount = parseFloat((form.get("amount") || "").toString());
       const method = (form.get("method") || "").toString().trim() || null;
       const note = (form.get("note") || "").toString().trim() || null;
-      if (Number.isFinite(amount) && amount > 0) {
+      if (!Number.isFinite(amount) || amount <= 0) {
+        return Response.redirect(estamaraUrl + langQs + (langQs ? "&" : "?") + "payErr=1", 303);
+      }
+      // ponytail: double-submit guard by recency, not a request token — a slow
+      // network/double-tap resubmits the same student+amount+staff within
+      // seconds; a legit second identical payment minutes later still lands.
+      const dup = await env.DB.prepare(
+        "SELECT id FROM payments WHERE student_id = ? AND amount = ? AND created_by = ? AND created_at >= datetime('now', '-10 seconds')"
+      ).bind(payMatch[1], amount, staffEmail).first();
+      if (!dup) {
+        // Split the payment across the student's active, group-linked bookings
+        // proportionally by net value (amount - discount_amount), so a
+        // 'percent'-share teacher gets credited their groups' actual share of
+        // cash collected (see computeTeacherOwed + migration 0014). Runs inside
+        // the same batch/transaction, right after the payment INSERT, so
+        // last_insert_rowid() is the just-inserted payment's id. Bookings with
+        // no group_id or non-positive net contribute nothing (d.total sums only
+        // qualifying bookings, so the splits add back up to exactly `amount`);
+        // if none qualify no allocation rows are written and the payment is
+        // simply unattributed -- same outcome the old dead booking_id join gave.
         await env.DB.batch([
           env.DB.prepare("INSERT INTO payments (student_id, amount, method, note, created_by) VALUES (?, ?, ?, ?, ?)")
             .bind(payMatch[1], amount, method, note, staffEmail),
+          env.DB.prepare(
+            `INSERT INTO payment_allocations (payment_id, group_id, amount)
+             SELECT last_insert_rowid(), b.group_id, ? * (b.amount - b.discount_amount) / d.total
+             FROM bookings b
+             JOIN (SELECT SUM(amount - discount_amount) AS total FROM bookings
+                   WHERE student_id = ? AND status = 'active' AND group_id IS NOT NULL AND (amount - discount_amount) > 0) d
+             WHERE b.student_id = ? AND b.status = 'active' AND b.group_id IS NOT NULL AND (b.amount - b.discount_amount) > 0 AND d.total > 0`
+          ).bind(amount, payMatch[1], payMatch[1]),
           env.DB.prepare("INSERT INTO ledger (kind, category, amount, note, created_by) VALUES ('income', 'student_payment', ?, ?, ?)")
             .bind(amount, note, staffEmail)
         ]);
       }
-      return Response.redirect(url.origin + `/admin/students/${payMatch[1]}/estamara` + (lang === "en" ? "?lang=en" : ""), 303);
+      return Response.redirect(estamaraUrl + langQs, 303);
     }
 
     const PROMO_I18N = {
@@ -1861,7 +1900,7 @@ export default {
       // finding #4 on PR #12).
       const withStatus = await Promise.all(results.map(async tch => {
         if (!tch.share_type) return { ...tch, needsAttention: true, owed: 0 };
-        const from = await lastPayoutFrom(env, tch.name);
+        const from = await lastPayoutFrom(env, tch.id);
         const { owed } = await computeTeacherOwed(env, tch.id, tch.name, tch.share_type, tch.share_value, from, today);
         return { ...tch, needsAttention: owed > 0, owed };
       }));
@@ -1922,10 +1961,11 @@ export default {
     // what the list just flagged, and submitting it persisted today as the
     // new payout baseline without the real gap actually being paid).
     // period_to falls back to occurred_at for older rows with no period_to on
-    // file. note LIKE match is escaped since teacherName is free-text staff
-    // input, not a slug — an unescaped % or _ could over-match another
-    // teacher's payout note (claude-review finding #5 on PR #12).
-    async function lastPayoutFrom(env, teacherName) {
+    // file. Matched by teacher_id (claude-review, PR #12 review round on the
+    // master-synced branch) rather than a note-text LIKE — two teachers
+    // sharing the exact same display name would otherwise cross-contaminate
+    // each other's payout tracking, since name isn't unique but teachers.id is.
+    async function lastPayoutFrom(env, teacherId) {
       // +1 day (claude-review, PR #12 follow-up round): computeTeacherOwed's
       // BETWEEN is inclusive on both ends, so returning the last period's
       // exact end date would let the boundary day get counted — and paid —
@@ -1936,8 +1976,8 @@ export default {
       // occurred_at here would silently write off the unpaid shortfall by
       // advancing the baseline to today anyway.
       const lastPayout = await env.DB.prepare(
-        "SELECT date(MAX(period_to), '+1 day') AS d FROM ledger WHERE category = 'teacher_payout' AND note LIKE ? ESCAPE '\\' AND period_to IS NOT NULL"
-      ).bind(teacherName.replace(/[%_]/g, "\\$&") + "%").first();
+        "SELECT date(MAX(period_to), '+1 day') AS d FROM ledger WHERE category = 'teacher_payout' AND teacher_id = ? AND period_to IS NOT NULL"
+      ).bind(teacherId).first();
       return lastPayout.d || "2000-01-01";
     }
 
@@ -1946,7 +1986,12 @@ export default {
     // cash actually COLLECTED (payments, not billed bookings.amount — claude-review
     // finding #1 on PR #12: billed value overstates what's actually owed since
     // students can be mid-payment-plan) against this teacher's groups in [from, to],
-    // via payments.booking_id -> bookings.group_id.
+    // read from payment_allocations (the per-group split written at pay time — see
+    // the /admin/students/:id/pay handler + migration 0014). This replaced a dead
+    // JOIN through payments.booking_id -> bookings.group_id: booking_id was never
+    // populated by the real pay path (a payment settles the whole balance, not one
+    // booking), so that join matched zero rows and every percent teacher's owed
+    // silently computed as 0.
     // Groups are matched by teacher_id when set (the /admin/groups form has
     // picked from a real teacher <select> since 2026-07-13) — teacher_name is
     // kept as a fallback for any group created before that, matched by name.
@@ -1971,9 +2016,8 @@ export default {
         owed = row.n * shareValue; detail = row.n;
       } else {
         const row = await env.DB.prepare(
-          `SELECT COALESCE(SUM(p.amount), 0) AS n FROM payments p
-           JOIN bookings b ON b.id = p.booking_id
-           WHERE b.group_id IN (${placeholders}) AND date(p.created_at) BETWEEN ? AND ?`
+          `SELECT COALESCE(SUM(amount), 0) AS n FROM payment_allocations
+           WHERE group_id IN (${placeholders}) AND date(created_at) BETWEEN ? AND ?`
         ).bind(...groupIds, from, to).first();
         owed = row.n * shareValue / 100; detail = row.n;
       }
@@ -1983,9 +2027,14 @@ export default {
       // POST below) -- without subtracting it here, the settlement page keeps
       // showing the FULL original owed amount forever, risking a real
       // double-payout if the owner pays the displayed total again.
+      // Upper-bounded by `to` too (claude-review, PR #12 review round on the
+      // master-synced branch): without it, viewing/submitting an earlier
+      // historical window (`to` before a later partial payment's date) would
+      // still net that later payment out of the earlier window's owed total,
+      // letting a period close as "paid" for a stretch that wasn't.
       const partial = await env.DB.prepare(
-        "SELECT COALESCE(SUM(amount), 0) AS n FROM ledger WHERE category = 'teacher_payout' AND period_to IS NULL AND date(occurred_at) >= ? AND note LIKE ? ESCAPE '\\'"
-      ).bind(from, teacherName.replace(/[%_]/g, "\\$&") + "%").first();
+        "SELECT COALESCE(SUM(amount), 0) AS n FROM ledger WHERE category = 'teacher_payout' AND period_to IS NULL AND date(occurred_at) BETWEEN ? AND ? AND teacher_id = ?"
+      ).bind(from, to, teacherId).first();
       return { owed: Math.max(0, owed - partial.n), detail };
     }
 
@@ -1999,7 +2048,7 @@ export default {
       const langQs = lang === "en" ? "?lang=en" : "";
       const teacher = await env.DB.prepare("SELECT id, name, subject, share_type, share_value FROM teachers WHERE id = ?").bind(settlementMatch[1]).first();
       if (!teacher) return new Response("Not found", { status: 404 });
-      const from = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("from") || "") ? url.searchParams.get("from") : await lastPayoutFrom(env, teacher.name);
+      const from = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("from") || "") ? url.searchParams.get("from") : await lastPayoutFrom(env, teacher.id);
       // Clamped at today (claude-review finding #2, this session): a future
       // `to` (fat-fingered in the date picker) would close a period past
       // today, and since lastPayoutFrom() reads that back as the next
@@ -2067,7 +2116,12 @@ export default {
       // period past today.
       const submittedTo = /^\d{4}-\d{2}-\d{2}$/.test(form.get("to") || "") ? [form.get("to"), new Date().toISOString().slice(0, 10)].sort()[0] : null;
       const teacher = await env.DB.prepare("SELECT id, name, share_type, share_value FROM teachers WHERE id = ?").bind(settlementMatch[1]).first();
-      if (teacher && Number.isFinite(amount) && amount > 0) {
+      // A teacher with no share configured has nothing to owe — the GET page
+      // never renders the payout form in that case, but a direct POST
+      // (still owner-gated) could otherwise close a period at owed=0 against
+      // any submitted amount (claude-review, PR #12 review round on the
+      // master-synced branch).
+      if (teacher && teacher.share_type && Number.isFinite(amount) && amount > 0) {
         // `from` is always recomputed server-side, never trusted from the form
         // (claude-review finding #1, this session): the GET page's `from` can
         // be overridden via ?from= and echoed back in a hidden field -- if the
@@ -2076,7 +2130,7 @@ export default {
         // lastPayoutFrom() derives the next baseline purely from MAX(period_to),
         // everything before the submitted `from` would be permanently written
         // off, not just deferred.
-        const from = await lastPayoutFrom(env, teacher.name);
+        const from = await lastPayoutFrom(env, teacher.id);
         // Recompute owed server-side rather than trusting the client-echoed
         // amount/to (claude-review, PR #12 finding #1) — paying less than what's
         // actually owed for [from, to] must not still close out the period, or
@@ -2090,8 +2144,8 @@ export default {
         // so a teacher paid exactly the displayed "60.30" would otherwise fail
         // amount >= owed and leave the period open forever.
         const periodTo = Math.round(amount * 100) >= Math.round(owed * 100) ? submittedTo : null;
-        await env.DB.prepare("INSERT INTO ledger (kind, category, amount, note, created_by, period_to) VALUES ('expense', 'teacher_payout', ?, ?, ?, ?)")
-          .bind(amount, `${teacher.name}${note ? " — " + note : ""}`, staffEmail, periodTo).run();
+        await env.DB.prepare("INSERT INTO ledger (kind, category, amount, note, created_by, period_to, teacher_id) VALUES ('expense', 'teacher_payout', ?, ?, ?, ?, ?)")
+          .bind(amount, `${teacher.name}${note ? " — " + note : ""}`, staffEmail, periodTo, teacher.id).run();
       }
       return Response.redirect(url.origin + `/admin/teachers/${settlementMatch[1]}/settlement` + (lang === "en" ? "?lang=en" : ""), 303);
     }
@@ -2146,11 +2200,19 @@ export default {
       const name = (form.get("name") || "").toString().trim() || null;
       const role = (form.get("role") || "").toString().trim();
       if (email && ["owner", "clerk", "viewer"].includes(role)) {
-        if (role === "owner") {
+        // Bootstrap mode (getStaffRole() treats an empty table as "everyone
+        // is owner") ends the instant the first row lands. Without this, the
+        // form's role dropdown defaulting to "clerk" can seed that one row as
+        // non-owner and permanently lock everyone out — /admin/staff is
+        // itself owner-gated, so no in-app path could ever recover (claude-review,
+        // PR #12 follow-up round).
+        const staffCount = await env.DB.prepare("SELECT COUNT(*) AS n FROM staff").first();
+        const effectiveRole = staffCount.n === 0 ? "owner" : role;
+        if (effectiveRole === "owner") {
           // Promoting to/keeping owner can never reduce the active-owner
           // count, so no guard needed here.
           await env.DB.prepare("INSERT INTO staff (email, name, role) VALUES (?, ?, ?) ON CONFLICT(email) DO UPDATE SET name = excluded.name, role = excluded.role, active = 1")
-            .bind(email, name, role).run();
+            .bind(email, name, effectiveRole).run();
         } else {
           // Atomic guarded UPDATE (claude-review, PR #12 follow-up round —
           // TOCTOU: a separate check-then-write left a window where two
@@ -2164,7 +2226,7 @@ export default {
                role = 'owner' AND active = 1
                AND (SELECT COUNT(*) FROM staff WHERE role = 'owner' AND active = 1 AND email != ?) = 0
              )`
-          ).bind(name, role, email, email).run();
+          ).bind(name, effectiveRole, email, email).run();
           if (meta.changes === 0) {
             const exists = await env.DB.prepare("SELECT 1 FROM staff WHERE email = ?").bind(email).first();
             if (exists) return lastOwnerBlocked(lang);
@@ -2174,7 +2236,7 @@ export default {
             // INSERT, the second hitting the email PRIMARY KEY and throwing a
             // raw 500. Same ON CONFLICT pattern as the owner branch above.
             await env.DB.prepare("INSERT INTO staff (email, name, role) VALUES (?, ?, ?) ON CONFLICT(email) DO UPDATE SET name = excluded.name, role = excluded.role, active = 1")
-              .bind(email, name, role).run();
+              .bind(email, name, effectiveRole).run();
           }
         }
       }
