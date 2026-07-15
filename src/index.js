@@ -2204,7 +2204,7 @@ export default {
       const t = TEACHER_FORM_I18N[lang];
       const phaseOpts = `<option value="">—</option>` + PHASES.map(p => `<option value="${p.v}" ${teacher?.phase === p.v ? "selected" : ""}>${lang === "en" ? p.en : p.ar}</option>`).join("");
       const modeOpts = `<option value="">—</option>` + MODES.map(m => `<option value="${escapeHtml(m.v)}" ${teacher?.mode === m.v ? "selected" : ""}>${lang === "en" ? m.en : m.ar}</option>`).join("");
-      const trackOpts = `<option value="">${t.trackNone}</option>` + TRACKS.map(tr => `<option value="${tr.v}" ${teacher?.track === tr.v ? "selected" : ""}>${lang === "en" ? tr.en : tr.ar}</option>`).join("");
+      const trackChips = chip("radio", "track", "", !teacher?.track, t.trackNone) + trackRadios(lang, teacher?.track || "");
       const existingPhoto = teacher?.hasPhotoBlob
         ? `<img src="/public/teachers/${teacher.id}/photo" alt="" style="width:96px;height:96px;object-fit:cover;border-radius:12px;margin-bottom:12px;display:block">`
         : "";
@@ -2218,7 +2218,7 @@ export default {
         <label>${t.mode}</label>
         <select name="mode">${modeOpts}</select>
         <label>${t.track}</label>
-        <select name="track">${trackOpts}</select>
+        <div class="subjects-grid">${trackChips}</div>
         <label>${t.schedule}</label>
         <input name="schedule" placeholder="${t.schedulePh}" value="${escapeHtml(teacher?.schedule || "")}">
         <label>${t.photo}</label>
