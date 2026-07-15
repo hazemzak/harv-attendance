@@ -42,7 +42,7 @@ function page(title, body, { nav = true, lang = "ar", toggleHref: toggle = null,
   --line:#E5E7EB; --line-soft:#F3F4F6; --success:#1F9D6B; --success-bg:#E2F5EC;
 }
 *{box-sizing:border-box}
-html,body{margin:0;font-family:'Cairo',ui-sans-serif,system-ui,sans-serif;color:var(--ink);background:var(--paper);font-size:18px;line-height:1.5}
+html,body{margin:0;font-family:'Cairo',ui-sans-serif,system-ui,sans-serif;color:var(--ink);background:var(--paper);font-size:18px;line-height:1.5;color-scheme:light}
 .wrap{max-width:640px;margin:0 auto;padding:0 20px 40px}
 header{display:flex;align-items:center;gap:14px;padding:20px 0;border-bottom:3px solid var(--red);margin-bottom:24px}
 header img{height:48px;width:auto;display:block}
