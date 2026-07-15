@@ -2920,6 +2920,31 @@ ${isOwnerGuide ? sec("s-owner", "⚙️ إدارة (مدير بس)", `
       return new Response(page("بطاقة الحضور", body, { nav: false }), { headers: { "content-type": "text/html;charset=utf-8" } });
     }
 
+    // Public, read-only, edge-cached roster for harvcentereg.com (and later
+    // its مراجعات/Morag3at section — same route, same shape, just more rows).
+    // Explicit column list only — never SELECT *, never attendance/payment/
+    // staff data. No Cf-Access needed: this is exactly what a printed flyer
+    // would show. Cache-Control does the work a commit+rebuild pipeline would
+    // otherwise need — the edge serves repeat reads without invoking the
+    // Worker, so public traffic never touches internal-ops request budget.
+    // See /council verdict, 2026-07-15 (superseded an earlier commit+rebuild
+    // verdict once the public site turned out not to be git-connected at
+    // all) — full reasoning in HARV_ATTENDANCE_SUPPORT_PLAYBOOK.md.
+    if (url.pathname === "/public/roster" && request.method === "GET") {
+      const teachers = await env.DB.prepare(
+        "SELECT id, name, subject, subject_label, phase, mode, schedule, track, photo FROM teachers"
+      ).all();
+      const sessions = await env.DB.prepare(
+        `SELECT g.teacher_name, g.subject, g.stage, g.day, g.time, r.name AS room
+         FROM groups g LEFT JOIN rooms r ON r.id = g.room_id
+         WHERE g.active = 1`
+      ).all();
+      return Response.json(
+        { teachers: teachers.results, sessions: sessions.results },
+        { headers: { "cache-control": "public, max-age=300, s-maxage=300", "access-control-allow-origin": "*" } }
+      );
+    }
+
     if (url.pathname === "/manifest.json" && (request.method === "GET" || request.method === "HEAD")) {
       return Response.json({
         name: "هارف · تسجيل الحضور",

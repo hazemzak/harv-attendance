@@ -2150,3 +2150,52 @@ describe("main page decluttering: collapsible panels + persistent instructions (
     expect(html).toContain("بوابتك اليومية");
   });
 });
+
+describe("/public/roster: column-scoped public endpoint for harvcentereg.com (added 2026-07-15, see /council verdict)", () => {
+  it("requires no Cf-Access header at all — this is the point, it's public", async () => {
+    const res = await SELF.fetch("https://example.com/public/roster");
+    expect(res.status).toBe(200);
+  });
+
+  it("returns a teacher's public columns, keyed correctly", async () => {
+    await env.DB.prepare(
+      "INSERT INTO teachers (id, name, subject, subject_label, photo, share_type, share_value) VALUES ('roster-test-1', 'أ. تيست', 'math', 'رياضيات', 'teachers/roster-test.jpg', 'per_session', 25)"
+    ).run();
+    const body = await (await SELF.fetch("https://example.com/public/roster")).json() as any;
+    const t = body.teachers.find((x: any) => x.id === "roster-test-1");
+    expect(t).toMatchObject({ name: "أ. تيست", subject: "math", subject_label: "رياضيات", photo: "teachers/roster-test.jpg" });
+  });
+
+  it("never leaks payroll columns (share_type/share_value) even though they're on the same row", async () => {
+    await env.DB.prepare(
+      "INSERT INTO teachers (id, name, subject, share_type, share_value) VALUES ('roster-test-2', 'أ. سري', 'math', 'percent', 40)"
+    ).run();
+    const body = await (await SELF.fetch("https://example.com/public/roster")).json() as any;
+    const t = body.teachers.find((x: any) => x.id === "roster-test-2");
+    expect(t).toBeDefined();
+    expect(t.share_type).toBeUndefined();
+    expect(t.share_value).toBeUndefined();
+  });
+
+  it("includes active sessions with room name, excludes inactive ones", async () => {
+    const { meta: roomMeta } = await env.DB.prepare("INSERT INTO rooms (name) VALUES ('قاعة روستر تيست')").run();
+    await env.DB.prepare(
+      "INSERT INTO groups (teacher_name, subject, day, time, room_id, active) VALUES ('أ. نشط روستر', 'math', 'sun', '5pm', ?, 1)"
+    ).bind(roomMeta.last_row_id).run();
+    await env.DB.prepare(
+      "INSERT INTO groups (teacher_name, subject, day, time, active) VALUES ('أ. متوقف روستر', 'math', 'mon', '6pm', 0)"
+    ).run();
+    const body = await (await SELF.fetch("https://example.com/public/roster")).json() as any;
+    const names = body.sessions.map((s: any) => s.teacher_name);
+    expect(names).toContain("أ. نشط روستر");
+    expect(names).not.toContain("أ. متوقف روستر");
+    const activeRow = body.sessions.find((s: any) => s.teacher_name === "أ. نشط روستر");
+    expect(activeRow.room).toBe("قاعة روستر تيست");
+  });
+
+  it("sets edge cache headers so Cloudflare serves repeat reads without invoking the Worker", async () => {
+    const res = await SELF.fetch("https://example.com/public/roster");
+    expect(res.headers.get("cache-control")).toContain("max-age=300");
+    expect(res.headers.get("access-control-allow-origin")).toBe("*");
+  });
+});
