@@ -1334,6 +1334,544 @@ async function clerkFetch(path: string, init?: RequestInit) {
   });
 }
 
+describe("staff roles: owner-only routes (added 2026-07-13)", () => {
+  it("a clerk is blocked from the ledger, teacher list, teacher settlement, and staff management", async () => {
+    expect((await clerkFetch("https://example.com/admin/ledger")).status).toBe(403);
+    expect((await clerkFetch("https://example.com/admin/ledger/expense", { method: "POST", body: new FormData() })).status).toBe(403);
+    expect((await clerkFetch("https://example.com/admin/teachers")).status).toBe(403);
+    expect((await clerkFetch("https://example.com/admin/teachers/1/settlement")).status).toBe(403);
+    expect((await clerkFetch("https://example.com/admin/staff")).status).toBe(403);
+  });
+
+  it("a clerk can still reach ordinary staff routes (registration, attendance, groups)", async () => {
+    expect((await clerkFetch("https://example.com/admin")).status).toBe(200);
+    expect((await clerkFetch("https://example.com/admin/groups")).status).toBe(200);
+    expect((await clerkFetch("https://example.com/admin/today")).status).toBe(200);
+  });
+
+  it("with an empty staff table (bootstrap mode), any Access-authenticated email is treated as owner", async () => {
+    // Explicitly cleared, not relying on file/test load order — other tests in
+    // this shared-state file may already have seeded rows by the time this runs.
+    await env.DB.prepare("DELETE FROM staff").run();
+    const res = await SELF.fetch("https://example.com/admin/ledger", {
+      headers: { "Cf-Access-Authenticated-User-Email": "nobody-registered-yet@test.local", "Cf-Access-Jwt-Assertion": "test" }
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("with staff seeded, an unrecognized-but-Access-authenticated email defaults to clerk, not owner (regression: the naive version would fall through to owner)", async () => {
+    await env.DB.prepare("INSERT INTO staff (email, role) VALUES ('someone-else@test.local', 'clerk')").run();
+    const res = await SELF.fetch("https://example.com/admin/ledger", {
+      headers: { "Cf-Access-Authenticated-User-Email": "totally-unknown@test.local", "Cf-Access-Jwt-Assertion": "test" }
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("a deactivated clerk is blocked from /admin entirely, not silently downgraded to a working clerk session (claude-review, PR #12 follow-up round)", async () => {
+    await env.DB.prepare("INSERT INTO staff (email, role, active) VALUES ('fired-clerk@test.local', 'clerk', 0)").run();
+    const res = await SELF.fetch("https://example.com/admin", {
+      headers: { "Cf-Access-Authenticated-User-Email": "fired-clerk@test.local", "Cf-Access-Jwt-Assertion": "test" }
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("a deactivated owner is blocked from /admin entirely, not silently downgraded to clerk", async () => {
+    await env.DB.prepare("INSERT INTO staff (email, role, active) VALUES ('fired-owner@test.local', 'owner', 0)").run();
+    const res = await SELF.fetch("https://example.com/admin/ledger", {
+      headers: { "Cf-Access-Authenticated-User-Email": "fired-owner@test.local", "Cf-Access-Jwt-Assertion": "test" }
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("a viewer can read ordinary staff pages but is blocked from any POST (mutation) route, unlike a clerk", async () => {
+    await env.DB.prepare("INSERT INTO staff (email, role) VALUES ('viewer@test.local', 'viewer')").run();
+    const viewerHeaders = { "Cf-Access-Authenticated-User-Email": "viewer@test.local", "Cf-Access-Jwt-Assertion": "test" };
+    const getRes = await SELF.fetch("https://example.com/admin", { headers: viewerHeaders });
+    expect(getRes.status).toBe(200);
+
+    const id = await insertStudent({ name: "Viewer Block Test", status: "approved" });
+    await env.DB.prepare("INSERT INTO bookings (student_id, subject, amount, status) VALUES (?, 'math', 300, 'active')").bind(id).run();
+    const payForm = new FormData();
+    payForm.set("amount", "50");
+    const postRes = await SELF.fetch(`https://example.com/admin/students/${id}/pay`, { method: "POST", body: payForm, headers: viewerHeaders });
+    expect(postRes.status).toBe(403);
+    const payment = await env.DB.prepare("SELECT id FROM payments WHERE student_id = ?").bind(id).first();
+    expect(payment).toBeFalsy();
+  });
+
+  it("recording a payment and an expense both stamp created_by with the acting staff member's email", async () => {
+    const id = await insertStudent({ name: "Stamp Test", status: "approved" });
+    await env.DB.prepare("INSERT INTO bookings (student_id, subject, amount, status) VALUES (?, 'math', 300, 'active')").bind(id).run();
+    const payForm = new FormData();
+    payForm.set("amount", "50");
+    await adminFetch(`https://example.com/admin/students/${id}/pay`, { method: "POST", body: payForm });
+    const payment = await env.DB.prepare("SELECT created_by FROM payments WHERE student_id = ?").bind(id).first();
+    expect(payment?.created_by).toBe("staff@test.local");
+
+    const expenseForm = new FormData();
+    expenseForm.set("category", "rent");
+    expenseForm.set("amount", "200");
+    await adminFetch("https://example.com/admin/ledger/expense", { method: "POST", body: expenseForm });
+    const expense = await env.DB.prepare("SELECT created_by FROM ledger WHERE category = 'rent' AND amount = 200").first();
+    expect(expense?.created_by).toBe("staff@test.local");
+  });
+});
+
+describe("/admin/staff management (added 2026-07-13)", () => {
+  it("adds a staff member and their role shows on the list", async () => {
+    const form = new FormData();
+    form.set("email", "NewClerk@Test.local");
+    form.set("name", "New Clerk");
+    form.set("role", "clerk");
+    await adminFetch("https://example.com/admin/staff", { method: "POST", body: form });
+
+    const row = await env.DB.prepare("SELECT email, name, role FROM staff WHERE name = 'New Clerk'").first();
+    expect(row?.email).toBe("newclerk@test.local"); // lowercased on write
+    expect(row?.role).toBe("clerk");
+  });
+
+  it("rejects an unknown role instead of storing it raw", async () => {
+    const form = new FormData();
+    form.set("email", "bad-role@test.local");
+    form.set("role", "<script>alert(1)</script>");
+    await adminFetch("https://example.com/admin/staff", { method: "POST", body: form });
+    const row = await env.DB.prepare("SELECT * FROM staff WHERE email = 'bad-role@test.local'").first();
+    expect(row).toBeFalsy();
+  });
+
+  it("toggling a staff member flips their active flag", async () => {
+    await env.DB.prepare("INSERT INTO staff (email, role) VALUES ('toggle@test.local', 'clerk')").run();
+    await adminFetch("https://example.com/admin/staff/toggle%40test.local/toggle", { method: "POST" });
+    const row = await env.DB.prepare("SELECT active FROM staff WHERE email = 'toggle@test.local'").first();
+    expect(row?.active).toBe(0);
+  });
+
+  it("rejects deactivating the sole active owner with a 400, and leaves them active (claude-review finding #3 on PR #12)", async () => {
+    // adminFetch() itself re-seeds 'staff@test.local' as owner via INSERT OR
+    // IGNORE on every call — target that same email so the toggle request's
+    // own adminFetch call doesn't silently add a second owner behind our back.
+    await env.DB.prepare("DELETE FROM staff").run();
+    await env.DB.prepare("INSERT INTO staff (email, role) VALUES ('staff@test.local', 'owner')").run();
+    const res = await adminFetch("https://example.com/admin/staff/staff%40test.local/toggle", { method: "POST" });
+    expect(res.status).toBe(400);
+    const row = await env.DB.prepare("SELECT active FROM staff WHERE email = 'staff@test.local'").first();
+    expect(row?.active).toBe(1);
+  });
+
+  it("rejects demoting the sole active owner to clerk with a 400 (claude-review finding #3 on PR #12)", async () => {
+    await env.DB.prepare("DELETE FROM staff").run();
+    await env.DB.prepare("INSERT INTO staff (email, role) VALUES ('staff@test.local', 'owner')").run();
+    const form = new FormData();
+    form.set("email", "staff@test.local");
+    form.set("role", "clerk");
+    const res = await adminFetch("https://example.com/admin/staff", { method: "POST", body: form });
+    expect(res.status).toBe(400);
+    const row = await env.DB.prepare("SELECT role FROM staff WHERE email = 'staff@test.local'").first();
+    expect(row?.role).toBe("owner");
+  });
+
+  it("forces the very first staff row ever added to owner, even if the form submitted a lesser role (claude-review finding on PR #12: an empty-table INSERT with role='clerk' would end bootstrap mode with zero owners and no in-app recovery)", async () => {
+    await env.DB.prepare("DELETE FROM staff").run();
+    const form = new FormData();
+    form.set("email", "first-admin@test.local");
+    form.set("role", "clerk"); // the form's default dropdown value
+    const res = await SELF.fetch("https://example.com/admin/staff", {
+      method: "POST",
+      body: form,
+      // Bootstrap mode: no staff rows yet, so this request is itself auto-owner.
+      headers: { "Cf-Access-Authenticated-User-Email": "first-admin@test.local", "Cf-Access-Jwt-Assertion": "test" }
+    });
+    expect(res.status).toBe(200); // follows the redirect
+    const row = await env.DB.prepare("SELECT role FROM staff WHERE email = 'first-admin@test.local'").first();
+    expect(row?.role).toBe("owner");
+  });
+
+  it("allows deactivating an owner when another active owner remains", async () => {
+    await env.DB.prepare("INSERT INTO staff (email, role) VALUES ('owner-a@test.local', 'owner')").run();
+    await env.DB.prepare("INSERT INTO staff (email, role) VALUES ('owner-b@test.local', 'owner')").run();
+    const res = await adminFetch("https://example.com/admin/staff/owner-a%40test.local/toggle", { method: "POST" });
+    expect(res.status).not.toBe(400);
+    const row = await env.DB.prepare("SELECT active FROM staff WHERE email = 'owner-a@test.local'").first();
+    expect(row?.active).toBe(0);
+  });
+});
+
+describe("/admin/guide", () => {
+  it("the owner section documents that multiple staff can hold the owner role", async () => {
+    const html = await (await adminFetch("https://example.com/admin/guide")).text();
+    expect(html).toContain("أي عدد من الموظفين كـ\"مدير\"");
+  });
+});
+
+describe("/admin/teachers/:id/settlement: payout math (added 2026-07-13)", () => {
+  // computeTeacherOwed() matches groups by teacher_name string equality (see
+  // the Phase 4 code comment) — every teacher/group pair here needs a unique
+  // name, or two tests in this same shared-state file would pick up each
+  // other's groups/attendance.
+  let settleCounter = 0;
+  async function makeTeacherWithGroup(shareType: string, shareValue: number) {
+    settleCounter++;
+    const teacherId = `settle-${shareType}-${settleCounter}`;
+    const teacherName = `أ. تسوية ${settleCounter}`;
+    await env.DB.prepare(
+      "INSERT INTO teachers (id, name, subject, share_type, share_value) VALUES (?, ?, 'math', ?, ?)"
+    ).bind(teacherId, teacherName, shareType, shareValue).run();
+    const { meta: groupMeta } = await env.DB.prepare(
+      "INSERT INTO groups (teacher_name, subject, active) VALUES (?, 'math', 1)"
+    ).bind(teacherName).run();
+    return { teacherId, groupId: groupMeta.last_row_id as number };
+  }
+
+  it("per_session: owed = share_value * distinct class meetings (group+day), NOT one payout per student who attended (claude-review finding #1, this session's continuation)", async () => {
+    // attendance has one row per (student, group, day) -- a teacher paid
+    // "per session" is owed once per class meeting regardless of headcount.
+    const { teacherId, groupId } = await makeTeacherWithGroup("per_session", 20);
+    const s1 = await insertStudent({ name: "Settle Session 1", status: "approved" });
+    const s2 = await insertStudent({ name: "Settle Session 2", status: "approved" });
+    // Both students attend the SAME class meeting (same group, same day) --
+    // this must count as ONE session, not two.
+    await SELF.fetch(`https://example.com/scan?student=${s1}&group=${groupId}`);
+    await SELF.fetch(`https://example.com/scan?student=${s2}&group=${groupId}`);
+    const sameDayHtml = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`)).text();
+    expect(sameDayHtml).toContain("20.00"); // 1 session, not 40.00 for "2 attendees"
+
+    // A second class meeting on a different day for the same group DOES add
+    // a second session.
+    await env.DB.prepare("INSERT INTO attendance (student_id, group_id, scanned_at) VALUES (?, ?, datetime('now', '-1 day'))").bind(s1, groupId).run();
+    const twoSessionsHtml = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`)).text();
+    expect(twoSessionsHtml).toContain("40.00"); // 2 distinct session days * 20
+  });
+
+  it("percent: owed = share_value% of payments actually collected against the teacher's groups, not the billed amount (claude-review finding #1 on PR #12)", async () => {
+    const { teacherId, groupId } = await makeTeacherWithGroup("percent", 10);
+    const s1 = await insertStudent({ name: "Settle Percent 1", status: "approved" });
+    await env.DB.prepare(
+      "INSERT INTO bookings (student_id, subject, amount, group_id, status) VALUES (?, 'math', 500, ?, 'active')"
+    ).bind(s1, groupId).run();
+    // Pay through the REAL endpoint (not a raw INSERT) so payment_allocations
+    // gets populated the way production does -- the old test hand-set a
+    // payments.booking_id the app never actually writes, hiding the fact that
+    // the percent branch's booking_id join matched zero rows for real data.
+    const payForm = new FormData();
+    payForm.set("amount", "250"); // only half collected so far
+    await adminFetch(`https://example.com/admin/students/${s1}/pay`, { method: "POST", body: payForm });
+
+    const html = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`)).text();
+    expect(html).toContain("25.00"); // 10% of 250 collected, not 10% of 500 billed
+  });
+
+  it("percent: a single payment settling bookings across TWO teachers' groups is split proportionally by each booking's net value, so each teacher is credited only their groups' share of the cash (this session -- the real bug: payments.booking_id was never populated, so every percent teacher computed owed as 0)", async () => {
+    const a = await makeTeacherWithGroup("percent", 10);
+    const b = await makeTeacherWithGroup("percent", 10);
+    const student = await insertStudent({ name: "Split Payment Test", status: "approved" });
+    // 300 with teacher A, 200 with teacher B -- net split target is 60% / 40%.
+    await env.DB.prepare(
+      "INSERT INTO bookings (student_id, subject, amount, group_id, status) VALUES (?, 'math', 300, ?, 'active')"
+    ).bind(student, a.groupId).run();
+    await env.DB.prepare(
+      "INSERT INTO bookings (student_id, subject, amount, group_id, status) VALUES (?, 'math', 200, ?, 'active')"
+    ).bind(student, b.groupId).run();
+    // Front desk takes a 250 lump sum against the whole balance via the REAL
+    // pay endpoint -- no per-booking picker exists, this is the actual flow.
+    const payForm = new FormData();
+    payForm.set("amount", "250");
+    await adminFetch(`https://example.com/admin/students/${student}/pay`, { method: "POST", body: payForm });
+
+    // 250 split 60/40 = 150 to A's group, 100 to B's group.
+    const aHtml = await (await adminFetch(`https://example.com/admin/teachers/${a.teacherId}/settlement`)).text();
+    expect(aHtml).toContain("15.00"); // 10% of 150, NOT 10% of the whole 250 (25.00) and NOT 0
+    const bHtml = await (await adminFetch(`https://example.com/admin/teachers/${b.teacherId}/settlement`)).text();
+    expect(bHtml).toContain("10.00"); // 10% of 100
+  });
+
+  it("recording a payout inserts a ledger expense row tagged teacher_payout", async () => {
+    const { teacherId } = await makeTeacherWithGroup("per_session", 20);
+    const form = new FormData();
+    form.set("from", "2026-01-01");
+    form.set("to", "2026-01-01");
+    form.set("amount", "40");
+    form.set("note", "January");
+    await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`, { method: "POST", body: form });
+
+    const row = await env.DB.prepare("SELECT kind, category, amount, note FROM ledger WHERE category = 'teacher_payout'").first();
+    expect(row?.kind).toBe("expense");
+    expect(row?.amount).toBe(40);
+    expect(row?.note).toContain("January");
+  });
+
+  it("paying less than owed doesn't close the period -- the shortfall stays owed on the next settlement instead of being silently written off (claude-review finding #1, new session)", async () => {
+    const { teacherId, groupId } = await makeTeacherWithGroup("per_session", 20);
+    const student = await insertStudent({ name: "Underpay Test", status: "approved" });
+    await env.DB.prepare("INSERT INTO attendance (student_id, group_id, scanned_at) VALUES (?, ?, datetime('now', '-2 days'))").bind(student, groupId).run();
+    await env.DB.prepare("INSERT INTO attendance (student_id, group_id) VALUES (?, ?)").bind(student, groupId).run();
+    // owed = 40 (2 sessions * 20), but only 20 is actually paid.
+    const form = new FormData();
+    form.set("from", "2000-01-01");
+    form.set("to", new Date().toISOString().slice(0, 10));
+    form.set("amount", "20");
+    await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`, { method: "POST", body: form });
+
+    const row = await env.DB.prepare("SELECT period_to FROM ledger WHERE category = 'teacher_payout' AND amount = 20").first();
+    expect(row?.period_to).toBeNull(); // underpaid -- must not record a closing period_to
+
+    // The next settlement (no explicit from/to, so it uses lastPayoutFrom())
+    // must show the REMAINING 20 owed (40 total minus the 20 already paid
+    // toward this still-open period), not the full original 40 again --
+    // showing the full amount again would let the owner double-pay the
+    // teacher (claude-review finding #1, this session's continuation).
+    const settlementHtml = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`)).text();
+    expect(settlementHtml).toContain("20.00");
+    expect(settlementHtml).not.toContain("40.00");
+  });
+
+  it("paying at least what's owed does close the period, recording the submitted 'to' as period_to", async () => {
+    const { teacherId, groupId } = await makeTeacherWithGroup("per_session", 20);
+    const student = await insertStudent({ name: "Full Pay Test", status: "approved" });
+    await env.DB.prepare("INSERT INTO attendance (student_id, group_id) VALUES (?, ?)").bind(student, groupId).run();
+    const to = new Date().toISOString().slice(0, 10);
+    const form = new FormData();
+    form.set("from", "2000-01-01");
+    form.set("to", to);
+    form.set("amount", "20"); // exactly owed
+    await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`, { method: "POST", body: form });
+
+    const row = await env.DB.prepare("SELECT period_to FROM ledger WHERE category = 'teacher_payout' AND amount = 20 ORDER BY id DESC LIMIT 1").first();
+    expect(row?.period_to).toBe(to);
+  });
+
+  it("paying the exact owed amount closes the period even when share math drifts in floating point (opus review, same session)", async () => {
+    // 20.1 * 3 = 60.30000000000004 in JS float math -- the settlement form
+    // prefills the displayed/paid amount as owed.toFixed(2) = "60.30", which
+    // parses back to 60.3. A raw `amount >= owed` comparison fails here.
+    const { teacherId, groupId } = await makeTeacherWithGroup("per_session", 20.1);
+    for (let i = 0; i < 3; i++) {
+      const student = await insertStudent({ name: `FP Drift Test ${i}`, status: "approved" });
+      await env.DB.prepare("INSERT INTO attendance (student_id, group_id) VALUES (?, ?)").bind(student, groupId).run();
+    }
+    const to = new Date().toISOString().slice(0, 10);
+    const form = new FormData();
+    form.set("from", "2000-01-01");
+    form.set("to", to);
+    form.set("amount", "60.30");
+    await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`, { method: "POST", body: form });
+
+    const row = await env.DB.prepare("SELECT period_to FROM ledger WHERE category = 'teacher_payout' AND amount = 60.3 ORDER BY id DESC LIMIT 1").first();
+    expect(row?.period_to).toBe(to);
+  });
+
+  it("submitted 'from' on the settlement POST is ignored -- a stale/tampered date can't permanently write off older unpaid sessions (claude-review finding #1, this session's continuation)", async () => {
+    const { teacherId, groupId } = await makeTeacherWithGroup("per_session", 20);
+    // Two distinct class-meeting days count as two sessions (per_session pays
+    // per distinct group+day, not per attendance row -- see the test above).
+    const oldStudent1 = await insertStudent({ name: "Old Session Student 1", status: "approved" });
+    const oldStudent2 = await insertStudent({ name: "Old Session Student 2", status: "approved" });
+    await env.DB.prepare("INSERT INTO attendance (student_id, group_id, scanned_at) VALUES (?, ?, datetime('now', '-10 days'))").bind(oldStudent1, groupId).run();
+    await env.DB.prepare("INSERT INTO attendance (student_id, group_id, scanned_at) VALUES (?, ?, datetime('now', '-9 days'))").bind(oldStudent2, groupId).run();
+    const newStudent = await insertStudent({ name: "New Session Student", status: "approved" });
+    await env.DB.prepare("INSERT INTO attendance (student_id, group_id) VALUES (?, ?)").bind(newStudent, groupId).run();
+    // Real owed since the teacher's real baseline (lastPayoutFrom's default
+    // "2000-01-01", no prior payout) is 60 (3 sessions * 20). A fat-fingered
+    // or tampered `from` narrows the window to "today only" (1 session = 20)
+    // and pays exactly that -- must be ignored server-side.
+    const today = new Date().toISOString().slice(0, 10);
+    const form = new FormData();
+    form.set("from", today);
+    form.set("to", today);
+    form.set("amount", "20");
+    await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`, { method: "POST", body: form });
+
+    // Must NOT close the period -- the real owed (60) wasn't fully paid, only
+    // the fake narrow window's 20 was.
+    const row = await env.DB.prepare("SELECT period_to FROM ledger WHERE category = 'teacher_payout' AND amount = 20").first();
+    expect(row?.period_to).toBeNull();
+
+    // The two older sessions must still be counted next time -- not silently
+    // written off by a period_to that jumped past them.
+    const settlementHtml = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`)).text();
+    expect(settlementHtml).toContain("40.00"); // 60 real owed minus the 20 already paid
+  });
+
+  it("a future 'to' date is clamped to today, both on the settlement GET filter and the POST -- can't close a period past today (claude-review finding #2, this session's continuation)", async () => {
+    const { teacherId, groupId } = await makeTeacherWithGroup("per_session", 20);
+    const student = await insertStudent({ name: "Future To Test", status: "approved" });
+    await SELF.fetch(`https://example.com/scan?student=${student}&group=${groupId}`);
+    const futureTo = "2099-01-01";
+
+    const getHtml = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement?from=2000-01-01&to=${futureTo}`)).text();
+    // The "to" date input's value is clamped (the lang-toggle link below it
+    // still echoes the raw query string, which is harmless -- it's re-clamped
+    // on the next GET, not a source of truth).
+    expect(getHtml).not.toContain(`name="to" value="${futureTo}"`);
+
+    const form = new FormData();
+    form.set("from", "2000-01-01");
+    form.set("to", futureTo);
+    form.set("amount", "20"); // exactly owed for the one real session
+    await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`, { method: "POST", body: form });
+
+    const row = await env.DB.prepare("SELECT period_to FROM ledger WHERE category = 'teacher_payout' AND amount = 20 ORDER BY id DESC LIMIT 1").first();
+    expect(row?.period_to).not.toBe(futureTo);
+    expect(row?.period_to <= new Date().toISOString().slice(0, 10)).toBe(true);
+  });
+
+  it("the settlement page's default date range matches what /admin/teachers just flagged as owed, not a 'today only' window (claude-review finding #1 on a later PR #12 review round)", async () => {
+    const { teacherId, groupId } = await makeTeacherWithGroup("per_session", 15);
+    const student = await insertStudent({ name: "Settle Range Test", status: "approved" });
+    // 3 days ago — a settlement default of "today" alone would miss this
+    // entirely, even though the list page's "since last payout" range covers it.
+    await env.DB.prepare(
+      "INSERT INTO attendance (student_id, group_id, scanned_at) VALUES (?, ?, datetime('now', '-3 days'))"
+    ).bind(student, groupId).run();
+
+    const listHtml = await (await adminFetch("https://example.com/admin/teachers")).text();
+    expect(listHtml).toContain("15.00");
+
+    const settlementHtml = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`)).text();
+    expect(settlementHtml).toContain("15.00");
+  });
+
+  it("the next settlement excludes the day already paid through, instead of double-counting/double-paying it (claude-review, follow-up round on PR #12)", async () => {
+    const { teacherId, groupId } = await makeTeacherWithGroup("per_session", 10);
+    const student = await insertStudent({ name: "Boundary Day Test", status: "approved" });
+    const periodTo = await env.DB.prepare("SELECT date('now', '-2 days') AS d").first();
+    // Attendance on the day the payout below settles through.
+    await env.DB.prepare(
+      "INSERT INTO attendance (student_id, group_id, scanned_at) VALUES (?, ?, datetime('now', '-2 days'))"
+    ).bind(student, groupId).run();
+
+    const payoutForm = new FormData();
+    payoutForm.set("from", "2000-01-01");
+    payoutForm.set("to", periodTo.d as string);
+    payoutForm.set("amount", "10");
+    await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`, { method: "POST", body: payoutForm });
+
+    // A second, later session — the only one the next settlement should count.
+    await env.DB.prepare("INSERT INTO attendance (student_id, group_id) VALUES (?, ?)").bind(student, groupId).run();
+
+    const settlementHtml = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`)).text();
+    expect(settlementHtml).toContain("10.00"); // only the new session — 20.00 would mean the paid day was counted again
+  });
+
+  it("a settlement's 'to' date persists as period_to, not the recording timestamp (claude-review finding #2 on PR #12)", async () => {
+    const { teacherId } = await makeTeacherWithGroup("per_session", 20);
+    const form = new FormData();
+    form.set("from", "2026-01-01");
+    form.set("to", "2026-01-31"); // period end, deliberately far from "now"
+    form.set("amount", "20");
+    await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`, { method: "POST", body: form });
+
+    const row = await env.DB.prepare("SELECT period_to FROM ledger WHERE category = 'teacher_payout' AND period_to = '2026-01-31'").first();
+    expect(row?.period_to).toBe("2026-01-31");
+  });
+
+  it("a teacher name containing a LIKE wildcard (%) doesn't over-match another teacher's payout note (claude-review finding #5 on PR #12)", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject, share_type, share_value) VALUES ('wild-a', 'أ. علي', 'math', 'per_session', 10)").run();
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject, share_type, share_value) VALUES ('wild-b', 'أ. علي%', 'math', 'per_session', 10)").run();
+    // A payout for 'أ. علي' (no wildcard) must not appear as a match for 'أ. علي%'
+    // once its name is escaped — an unescaped LIKE would treat the literal '%'
+    // in the second teacher's name as a wildcard and match the first's note too.
+    await env.DB.prepare("INSERT INTO ledger (kind, category, amount, note) VALUES ('expense', 'teacher_payout', 15, 'أ. علي — test')").run();
+    const lastPayout = await env.DB.prepare(
+      "SELECT MAX(COALESCE(period_to, occurred_at)) AS d FROM ledger WHERE category = 'teacher_payout' AND note LIKE ? ESCAPE '\\'"
+    ).bind("أ. علي\\%%").first();
+    expect(lastPayout?.d).toBeFalsy();
+  });
+
+  it("two teachers with the identical display name don't cross-contaminate each other's payout tracking (claude-review, PR #12 review round on the master-synced branch: payout matching used to be name-based, not by teacher.id)", async () => {
+    const sameName = "أ. توأم";
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject, share_type, share_value) VALUES ('twin-a', ?, 'math', 'per_session', 20)").bind(sameName).run();
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject, share_type, share_value) VALUES ('twin-b', ?, 'math', 'per_session', 20)").bind(sameName).run();
+    const { meta: groupA } = await env.DB.prepare("INSERT INTO groups (teacher_id, teacher_name, subject, active) VALUES ('twin-a', ?, 'math', 1)").bind(sameName).run();
+    await env.DB.prepare("INSERT INTO groups (teacher_id, teacher_name, subject, active) VALUES ('twin-b', ?, 'math', 1)").bind(sameName).run();
+    const student = await insertStudent({ name: "Twin Payout Test", status: "approved" });
+    await env.DB.prepare("INSERT INTO attendance (student_id, group_id, scanned_at) VALUES (?, ?, datetime('now', '-1 day'))").bind(student, groupA.last_row_id).run();
+
+    // Pay teacher A in full.
+    const payForm = new FormData();
+    payForm.set("to", await env.DB.prepare("SELECT date('now') AS d").first().then((r: any) => r.d));
+    payForm.set("amount", "20");
+    await adminFetch("https://example.com/admin/teachers/twin-a/settlement", { method: "POST", body: payForm });
+
+    // Teacher B, same name, no attendance of their own — must still show as
+    // fully unpaid-from-the-start, not inherit A's just-closed period.
+    const bHtml = await (await adminFetch("https://example.com/admin/teachers/twin-b/settlement")).text();
+    expect(bHtml).toContain("0.00");
+    const aRow = await env.DB.prepare("SELECT teacher_id FROM ledger WHERE category = 'teacher_payout' AND note LIKE 'أ. توأم%'").first();
+    expect(aRow?.teacher_id).toBe("twin-a");
+  });
+
+  it("rejects a settlement POST for a teacher with no share configured, even bypassing the UI directly (claude-review, PR #12 review round on the master-synced branch)", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('no-share', 'أ. بدون نسبة', 'math')").run();
+    const form = new FormData();
+    form.set("to", await env.DB.prepare("SELECT date('now') AS d").first().then((r: any) => r.d));
+    form.set("amount", "500");
+    await adminFetch("https://example.com/admin/teachers/no-share/settlement", { method: "POST", body: form });
+    const row = await env.DB.prepare("SELECT * FROM ledger WHERE category = 'teacher_payout' AND teacher_id = 'no-share'").first();
+    expect(row).toBeFalsy();
+  });
+
+  it("a later partial payout doesn't net out an earlier historical window's owed amount (claude-review, PR #12 review round on the master-synced branch: the partial-payout subtraction had no upper bound tied to the settlement's 'to' date)", async () => {
+    const { teacherId, groupId } = await makeTeacherWithGroup("per_session", 20);
+    const student = await insertStudent({ name: "Bounded Netting Test", status: "approved" });
+    // A session 5 days ago -- owed 20 for the historical window ending 3 days ago.
+    await env.DB.prepare("INSERT INTO attendance (student_id, group_id, scanned_at) VALUES (?, ?, datetime('now', '-5 days'))").bind(student, groupId).run();
+    const historicalTo = await env.DB.prepare("SELECT date('now', '-3 days') AS d").first().then((r: any) => r.d);
+    // A partial payout recorded TODAY (after historicalTo) -- must not net
+    // against the earlier window above.
+    await env.DB.prepare(
+      "INSERT INTO ledger (kind, category, amount, note, teacher_id, period_to) VALUES ('expense', 'teacher_payout', 15, 'later partial', ?, NULL)"
+    ).bind(teacherId).run();
+
+    const html = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement?from=2000-01-01&to=${historicalTo}`)).text();
+    expect(html).toContain("20.00"); // NOT 5.00 (which would mean the later partial wrongly netted in)
+  });
+
+  it("setting a teacher's share persists share_type and share_value", async () => {
+    const { meta } = await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('share-test', 'أ. شير', 'math')").run();
+    const form = new FormData();
+    form.set("share_type", "percent");
+    form.set("share_value", "15");
+    await adminFetch("https://example.com/admin/teachers/share-test/share", { method: "POST", body: form });
+
+    const row = await env.DB.prepare("SELECT share_type, share_value FROM teachers WHERE id = 'share-test'").first();
+    expect(row?.share_type).toBe("percent");
+    expect(row?.share_value).toBe(15);
+  });
+});
+
+describe("/admin/teachers: subject grouping + needs-attention ordering (added 2026-07-14)", () => {
+  it("a teacher with no share configured appears in the needs-attention section", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('no-share-teacher', 'أ. لسه', 'math')").run();
+    const html = await (await adminFetch("https://example.com/admin/teachers")).text();
+    const nameIdx = html.indexOf("أ. لسه");
+    expect(nameIdx).toBeGreaterThan(-1);
+    expect(html).toContain("لسه معملتش تسوية"); // "no share set yet" label still shown
+  });
+
+  it("a fully-settled teacher (share configured, zero owed since last payout) is not flagged as needing attention", async () => {
+    await env.DB.prepare(
+      "INSERT INTO teachers (id, name, subject, share_type, share_value) VALUES ('settled-teacher', 'أ. متسوي', 'physics', 'per_session', 20)"
+    ).run();
+    // No attendance logged against this teacher's groups at all, so owed = 0
+    // regardless of date range — should not appear in the attention section.
+    const html = await (await adminFetch("https://example.com/admin/teachers")).text();
+    const attentionHeadingIdx = html.indexOf("⚠️");
+    const nameIdx = html.indexOf("أ. متسوي");
+    expect(nameIdx).toBeGreaterThan(-1);
+    // Appears only in its subject section (after the attention heading + its
+    // own empty-state text), not inside the attention list itself.
+    expect(nameIdx).toBeGreaterThan(attentionHeadingIdx);
+  });
+
+  it("groups teachers under subject section headings in the site's canonical subject order", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('bio-teacher', 'أ. أحياء تجربة', 'biology')").run();
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('math-teacher-group', 'أ. رياضة تجربة', 'math')").run();
+    const html = await (await adminFetch("https://example.com/admin/teachers")).text();
+    // SUBJECTS lists math before biology — math's <h2> should appear first.
+    expect(html.indexOf(">رياضيات<")).toBeLessThan(html.indexOf(">أحياء<"));
+  });
+});
+
 async function viewerFetch(path: string, init?: RequestInit) {
   await env.DB.prepare("INSERT OR IGNORE INTO staff (email, role) VALUES ('viewer@test.local', 'viewer')").run();
   return SELF.fetch(path, {

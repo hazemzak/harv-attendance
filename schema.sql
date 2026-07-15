@@ -148,7 +148,25 @@ CREATE TABLE ledger (
   amount REAL NOT NULL CHECK (amount >= 0),
   note TEXT,
   occurred_at TEXT NOT NULL DEFAULT (datetime('now')),
-  created_by TEXT
+  created_by TEXT,
+  period_to TEXT,
+  teacher_id TEXT
 );
 
 CREATE INDEX idx_ledger_occurred ON ledger(occurred_at);
+
+-- Per-group split of each payment (see migration 0014). A payment settles a
+-- student's whole balance across possibly several teachers' groups, and this
+-- table proportionally attributes each payment's cash to the student's active
+-- bookings, so a 'percent'-share teacher's owed = their share_value% of
+-- what was actually collected against their groups. group_id is a snapshot
+-- (no FK) so an allocation survives a later booking drop / group removal.
+CREATE TABLE payment_allocations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  payment_id INTEGER NOT NULL REFERENCES payments(id) ON DELETE CASCADE,
+  group_id INTEGER NOT NULL,
+  amount REAL NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_payment_alloc_group ON payment_allocations(group_id);
