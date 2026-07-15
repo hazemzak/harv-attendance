@@ -499,6 +499,70 @@ describe("/ no longer serves the dashboard unauthenticated (found post-deploy 20
 // 2026-07-13: /admin/dashboard retired in favor of the /council-verdict
 // role-first/time-first split (/admin/intake, /admin/session, /admin/owner) —
 // kept as a bare redirect for old bookmarks/muscle memory.
+describe("/admin/dashboard now just redirects to /admin/intake (added 2026-07-13)", () => {
+  it("redirects instead of rendering its own body", async () => {
+    const res = await adminFetch("https://example.com/admin/dashboard", { redirect: "manual" });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toContain("/admin/intake");
+  });
+});
+
+describe("/admin/owner: role-gated management hub, real stat tiles (added 2026-07-13)", () => {
+  it("blocks a clerk", async () => {
+    expect((await clerkFetch("https://example.com/admin/owner")).status).toBe(403);
+  });
+
+  it("renders real numeric stat tiles, not just the CSS class name (regression: the old dashboard test only checked for the class name, present on every page's shared stylesheet regardless of whether tiles render) — checked via getStudentBalance() for one student rather than scraping an exact total off the page, since the outstanding tile sums the whole DB and other tests in this file add their own students/bookings", async () => {
+    const id = await insertStudent({ name: "Owner Hub Content Test", status: "approved" });
+    await env.DB.prepare(
+      "INSERT INTO bookings (student_id, subject, teacher_name, schedule, amount) VALUES (?, 'math', 'x', '', 500)"
+    ).bind(id).run();
+
+    const balance = await getStudentBalance(env, id);
+    expect(balance.owed).toBe(500);
+
+    const res = await adminFetch("https://example.com/admin/owner");
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('class="stat-num"'); // the actual tile markup, not just the .stat-tile rule text
+  });
+});
+
+describe("/admin/intake + /admin/session: staff landing split by time (added 2026-07-13)", () => {
+  it("intake links to groups/rooms/estamarat/promotions and the session button, not owner-only pages", async () => {
+    const res = await adminFetch("https://example.com/admin/intake");
+    const html = await res.text();
+    expect(html).toContain("/admin/groups");
+    expect(html).toContain("/admin/session");
+    expect(html).not.toContain("/admin/ledger");
+  });
+
+  it("session links to today's attendance, the counter kiosk, and print", async () => {
+    const res = await adminFetch("https://example.com/admin/session");
+    const html = await res.text();
+    expect(html).toContain("/admin/today");
+    expect(html).toContain("/admin/counter");
+    expect(html).toContain("/admin/print");
+  });
+
+  it("a clerk can reach both intake and session (they are not owner-gated)", async () => {
+    expect((await clerkFetch("https://example.com/admin/intake")).status).toBe(200);
+    expect((await clerkFetch("https://example.com/admin/session")).status).toBe(200);
+  });
+});
+
+describe("nav: owner link only renders for an owner (added 2026-07-13)", () => {
+  it("a clerk's rendered nav has no link to /admin/owner", async () => {
+    const html = await (await clerkFetch("https://example.com/admin/intake")).text();
+    expect(html).not.toContain("/admin/owner");
+  });
+
+  it("an owner's rendered nav includes a link to /admin/owner", async () => {
+    const html = await (await adminFetch("https://example.com/admin/intake")).text();
+    expect(html).toContain("/admin/owner");
+  });
+});
+
 describe("/admin/students/:id/process: track whitelist", () => {
   it("drops an invalid track value instead of storing it raw", async () => {
     const id = await insertStudent({ name: "Track Test", status: "pending" });
@@ -727,18 +791,6 @@ describe("/admin/counter: hardware-scanner kiosk page (added 2026-07-13)", () =>
     const html = await res.text();
     const rule = html.match(/\.counter-input\{[^}]*\}/)?.[0] || "";
     expect(rule).toMatch(/width:\s*1px/);
-  });
-});
-
-describe("/admin/dashboard: owner-only server-side gate (found by manual review 2026-07-14, forbiddenRole() was dead code)", () => {
-  it("rejects a clerk-role staff member with 403, not just hiding the nav link", async () => {
-    const res = await clerkFetch("https://example.com/admin/dashboard");
-    expect(res.status).toBe(403);
-  });
-
-  it("still allows an owner through", async () => {
-    const res = await adminFetch("https://example.com/admin/dashboard");
-    expect(res.status).toBe(200);
   });
 });
 
@@ -1872,6 +1924,78 @@ describe("/admin/teachers: subject grouping + needs-attention ordering (added 20
   });
 });
 
+describe("/admin/guide: sectioned + hyperlinked, role-aware (rewritten 2026-07-14)", () => {
+  it("links to every major destination a clerk can reach", async () => {
+    const html = await (await clerkFetch("https://example.com/admin/guide")).text();
+    expect(html).toContain('href="/admin/intake"');
+    expect(html).toContain('href="/admin/session"');
+    expect(html).toContain('href="/admin/today"');
+    expect(html).toContain('href="/admin/counter"');
+    expect(html).toContain('href="/admin/groups"');
+  });
+
+  it("hides the owner-only management section from a clerk", async () => {
+    const html = await (await clerkFetch("https://example.com/admin/guide")).text();
+    expect(html).not.toContain("s-owner");
+    expect(html).not.toContain('href="/admin/ledger"');
+  });
+
+  it("shows the owner-only management section, with links, to an owner", async () => {
+    const html = await (await adminFetch("https://example.com/admin/guide")).text();
+    expect(html).toContain('id="s-owner"');
+    expect(html).toContain('href="/admin/ledger"');
+    expect(html).toContain('href="/admin/teachers"');
+    expect(html).toContain('href="/admin/staff"');
+  });
+
+  it("the table of contents jump-links match real section ids on the page", async () => {
+    const html = await (await adminFetch("https://example.com/admin/guide")).text();
+    const hrefs = [...html.matchAll(/href="#(s-[a-z]+)"/g)].map(m => m[1]);
+    expect(hrefs.length).toBeGreaterThan(0);
+    for (const id of hrefs) {
+      expect(html).toContain(`id="${id}"`);
+    }
+  });
+});
+
+describe("walk-in fast path: /admin/students POST lands straight on the process form (added 2026-07-14)", () => {
+  it("redirects to /admin/students/:id/process instead of back to the roster, storing the picked stage", async () => {
+    const form = new FormData();
+    form.set("name", "Walk In Test");
+    form.set("stage", "تالتة ثانوي");
+    const res = await adminFetch("https://example.com/admin/students", { method: "POST", body: form, redirect: "manual" });
+    expect(res.status).toBe(303);
+    const location = res.headers.get("location") || "";
+    expect(location).toMatch(/\/admin\/students\/\d+\/process/);
+
+    const row = await env.DB.prepare("SELECT status, stage FROM students WHERE name = 'Walk In Test'").first();
+    expect(row?.status).toBe("pending");
+    expect(row?.stage).toBe("تالتة ثانوي");
+  });
+
+  it("rejects a stage value outside the whitelisted STAGES pool instead of storing it raw", async () => {
+    const form = new FormData();
+    form.set("name", "Walk In Bad Stage Test");
+    form.set("stage", "<script>alert(1)</script>");
+    await adminFetch("https://example.com/admin/students", { method: "POST", body: form, redirect: "manual" });
+    const row = await env.DB.prepare("SELECT stage FROM students WHERE name = 'Walk In Bad Stage Test'").first();
+    expect(row?.stage).toBe("");
+  });
+
+  it("the always-visible walk-in form on /admin/intake is not conditional on there being other pending students", async () => {
+    const html = await (await adminFetch("https://example.com/admin/intake")).text();
+    expect(html).toContain("طالب جديد وصل دلوقتي");
+    expect(html).toContain('action="/admin/students"');
+  });
+
+  it("offers the stage as a fixed picker (select) rather than free text", async () => {
+    const html = await (await adminFetch("https://example.com/admin/intake")).text();
+    expect(html).toContain('<select name="stage">');
+    expect(html).toContain('<option value="تالتة ثانوي">');
+    expect(html).not.toContain('name="class"');
+  });
+});
+
 async function viewerFetch(path: string, init?: RequestInit) {
   await env.DB.prepare("INSERT OR IGNORE INTO staff (email, role) VALUES ('viewer@test.local', 'viewer')").run();
   return SELF.fetch(path, {
@@ -1971,3 +2095,42 @@ describe("/admin/students/:id/process: booking group_id validated against real, 
   });
 });
 
+describe("persistent help button (added 2026-07-14)", () => {
+  it("appears on an admin page", async () => {
+    const html = await (await adminFetch("https://example.com/admin/intake")).text();
+    expect(html).toContain('class="help-fab');
+    expect(html).toContain('href="/admin/guide"');
+  });
+
+  it("does not appear on a public, nav-free page like /register", async () => {
+    const html = await (await SELF.fetch("https://example.com/register")).text();
+    expect(html).not.toContain('class="help-fab');
+  });
+});
+
+describe("main page decluttering: collapsible panels + persistent instructions (added 2026-07-14)", () => {
+  it("wraps the walk-in and 'coming up' panels in native <details> so they start collapsed", async () => {
+    const html = await (await adminFetch("https://example.com/admin/intake")).text();
+    const walkInStart = html.indexOf("طالب جديد وصل دلوقتي");
+    const walkInDetailsOpen = html.lastIndexOf("<details", walkInStart);
+    expect(html.slice(walkInDetailsOpen, walkInStart)).not.toContain(" open");
+
+    const comingStart = html.indexOf("الحصص والمجموعات");
+    const comingDetailsOpen = html.lastIndexOf("<details", comingStart);
+    expect(html.slice(comingDetailsOpen, comingStart)).not.toContain(" open");
+  });
+
+  it("auto-expands the pending panel when there's a real pending student to check", async () => {
+    await insertStudent({ name: "Pending Auto Open Test", status: "pending" });
+    const html = await (await adminFetch("https://example.com/admin/intake")).text();
+    const pendingStart = html.indexOf("بانتظار المعالجة");
+    const pendingDetailsOpen = html.lastIndexOf("<details", pendingStart);
+    expect(html.slice(pendingDetailsOpen, pendingStart)).toContain(" open");
+  });
+
+  it("shows an always-visible instructions hint, not gated behind a click", async () => {
+    const html = await (await adminFetch("https://example.com/admin/intake")).text();
+    expect(html).toContain('class="hint-banner');
+    expect(html).toContain("بوابتك اليومية");
+  });
+});

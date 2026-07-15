@@ -1072,69 +1072,108 @@ export default {
       return new Response(page(t.title, regLink + pendingCards + form + cards, { lang, toggleHref: toggleHref(url, lang), isOwner: roleAllowed(staffRole, ["owner"]) }), { headers: { "content-type": "text/html;charset=utf-8" } });
     }
 
-    const DASH_I18N = {
-      ar: {
-        title: "لوحة التحكم",
-        totalStudents: "إجمالي الطلاب", pending: "بانتظار المعالجة",
-        today: "حضور النهاردة", revenue: "إجمالي قيمة الحجوزات",
-        attendanceTitle: "تسجيل الحضور", attendanceStudents: "الطلاب / التسجيلات",
-        attendanceToday: "حضور اليوم", attendancePrint: "🖨️ كشف ورقي",
-        estamaratTitle: "الاستمارات", estamaratAll: "كل الاستمارات", promos: "📢 العروض",
-        guideTitle: "محتاج مساعدة؟", guideLink: "📖 دليل الموظفين"
-      },
-      en: {
-        title: "Dashboard",
-        totalStudents: "Total students", pending: "Pending processing",
-        today: "Today's attendance", revenue: "Total reservation value",
-        attendanceTitle: "Attendance", attendanceStudents: "Students / registrations",
-        attendanceToday: "Today's attendance", attendancePrint: "🖨️ Print sheet",
-        estamaratTitle: "Applications", estamaratAll: "All applications", promos: "📢 Promotions",
-        guideTitle: "Need help?", guideLink: "📖 Staff Guide"
-      }
-    };
+    // Old bookmarks/muscle memory (per /council recommended next steps) — kept
+    // as a redirect for one release cycle rather than deleted outright.
     if (url.pathname === "/admin/dashboard" && request.method === "GET") {
+      return Response.redirect(new URL("/admin/intake" + url.search, request.url).toString(), 302);
+    }
+
+    if (url.pathname === "/admin/intake" && request.method === "GET") {
+      const lang = langOf(url);
+      const t = INTAKE_I18N[lang];
+      const langQs = lang === "en" ? "?lang=en" : "";
+      const pendingCount = await env.DB.prepare("SELECT COUNT(*) AS n FROM students WHERE status = 'pending'").first();
+      const body = `
+      <a href="/admin/session${langQs}"><button type="button">${t.sessionCta}</button></a>
+      <a href="/admin/counter"><button type="button" class="btn-reject">${t.counterCta}</button></a>
+      <p class="hint-banner no-print">${t.hint}</p>
+      <details class="dash-card">
+        <summary>${t.walkInTitle}</summary>
+        <form method="POST" action="/admin/students${langQs}">
+          <label>${t.walkInName}</label>
+          <input name="name" placeholder="${t.walkInNamePh}" required autofocus>
+          <label>${t.walkInClass}</label>
+          <select name="stage">
+            <option value="">${t.walkInClassPh}</option>
+            ${STAGES.map(s => `<option value="${s.v}">${lang === "en" ? s.en : s.ar}</option>`).join("")}
+          </select>
+          <button type="submit">${t.walkInSubmit}</button>
+        </form>
+      </details>
+      <details class="dash-card"${pendingCount.n ? " open" : ""}>
+        <summary>${t.pendingTitle}${pendingCount.n ? ` (${pendingCount.n})` : ""}</summary>
+        <div class="dash-links">
+          <a href="/admin${langQs}">${t.pendingLink}</a>
+        </div>
+        ${pendingCount.n ? "" : `<p class="empty">${t.pendingNone}</p>`}
+      </details>
+      <details class="dash-card">
+        <summary>${t.comingTitle}</summary>
+        <div class="dash-links">
+          <a href="/admin/groups${langQs}">${t.groupsLink}</a>
+          <a href="/admin/rooms${langQs}">${t.roomsLink}</a>
+          <a href="/admin/estamarat${langQs}">${t.estamaratLink}</a>
+          <a href="/admin/promotions${langQs}">${t.promosLink}</a>
+        </div>
+      </details>`;
+      return new Response(page(t.title, body, { lang, toggleHref: toggleHref(url, lang), isOwner: roleAllowed(staffRole, ["owner"]) }), { headers: { "content-type": "text/html;charset=utf-8" } });
+    }
+
+    if (url.pathname === "/admin/session" && request.method === "GET") {
+      const lang = langOf(url);
+      const t = SESSION_I18N[lang];
+      const langQs = lang === "en" ? "?lang=en" : "";
+      const body = `
+      <p><a href="/admin/intake${langQs}">${t.back}</a></p>
+      <div class="dash-card">
+        <div class="dash-links">
+          <a href="/admin/today${langQs}">${t.todayLink}</a>
+          <a href="/admin/counter">${t.counterLink}</a>
+          <a href="/admin/print">${t.printLink}</a>
+          <a href="/admin${langQs}">${t.findStudentLink}</a>
+        </div>
+      </div>`;
+      return new Response(page(t.title, body, { lang, toggleHref: toggleHref(url, lang), isOwner: roleAllowed(staffRole, ["owner"]) }), { headers: { "content-type": "text/html;charset=utf-8" } });
+    }
+
+    if (url.pathname === "/admin/owner" && request.method === "GET") {
       if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
       const lang = langOf(url);
-      const t = DASH_I18N[lang];
+      const t = OWNER_I18N[lang];
       const langQs = lang === "en" ? "?lang=en" : "";
-      const [totalStudents, pending, today, revenue] = await Promise.all([
-        env.DB.prepare("SELECT COUNT(*) AS n FROM students").first(),
+      const [pending, today, collectedToday, outstanding] = await Promise.all([
         env.DB.prepare("SELECT COUNT(*) AS n FROM students WHERE status = 'pending'").first(),
         env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE date(scanned_at) = date('now')").first(),
-        env.DB.prepare("SELECT COALESCE(SUM(amount), 0) AS n FROM bookings WHERE status = 'active'").first()
+        env.DB.prepare("SELECT COALESCE(SUM(amount), 0) AS n FROM payments WHERE date(created_at) = date('now')").first(),
+        // Per-student balance, clamped at 0, then summed — a raw global SUM(owed) -
+        // SUM(paid) would let one student's overpayment silently mask another's real
+        // debt, understating what the center is actually still owed.
+        env.DB.prepare(
+          `SELECT COALESCE(SUM(MAX(owed - paid, 0)), 0) AS n FROM (
+             SELECT s.id,
+               COALESCE((SELECT SUM(amount - discount_amount) FROM bookings WHERE student_id = s.id AND status = 'active'), 0) AS owed,
+               COALESCE((SELECT SUM(amount) FROM payments WHERE student_id = s.id), 0) AS paid
+             FROM students s
+           )`
+        ).first()
       ]);
       const tile = (num, label) => `<div class="stat-tile"><div class="stat-num">${num}</div><div class="stat-label">${label}</div></div>`;
       const body = `
       <div class="stat-tiles">
-        ${tile(totalStudents.n, t.totalStudents)}
         ${tile(pending.n, t.pending)}
         ${tile(today.n, t.today)}
-        ${tile(revenue.n, t.revenue)}
+        ${tile(collectedToday.n.toFixed(2), t.collectedToday)}
+        ${tile(Math.max(0, outstanding.n).toFixed(2), t.outstanding)}
       </div>
-      <div class="dash-sections">
-        <div class="dash-card">
-          <h2>${t.attendanceTitle}</h2>
-          <div class="dash-links">
-            <a href="/admin${langQs}">${t.attendanceStudents}</a>
-            <a href="/admin/today${langQs}">${t.attendanceToday}</a>
-            <a href="/admin/print">${t.attendancePrint}</a>
-          </div>
-        </div>
-        <div class="dash-card">
-          <h2>${t.estamaratTitle}</h2>
-          <div class="dash-links">
-            <a href="/admin/estamarat${langQs}">${t.estamaratAll}</a>
-            <a href="/admin/promotions${langQs}">${t.promos}</a>
-          </div>
-        </div>
-        <div class="dash-card">
-          <h2>${t.guideTitle}</h2>
-          <div class="dash-links"><a href="/admin/guide">${t.guideLink}</a></div>
+      <div class="dash-card">
+        <div class="dash-links">
+          <a href="/admin/ledger${langQs}">${t.ledgerLink}</a>
+          <a href="/admin/teachers${langQs}">${t.teachersLink}</a>
+          <a href="/admin/staff${langQs}">${t.staffLink}</a>
         </div>
       </div>`;
-      return new Response(page(t.title, body, { lang, toggleHref: toggleHref(url, lang) }), { headers: { "content-type": "text/html;charset=utf-8" } });
+      return new Response(page(t.title, body, { lang, toggleHref: toggleHref(url, lang), isOwner: true }), { headers: { "content-type": "text/html;charset=utf-8" } });
     }
-
 
     if (url.pathname === "/admin/students" && request.method === "POST") {
       const lang = langOf(url);
