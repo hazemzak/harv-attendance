@@ -1956,6 +1956,22 @@ describe("/admin/guide: sectioned + hyperlinked, role-aware (rewritten 2026-07-1
       expect(html).toContain(`id="${id}"`);
     }
   });
+
+  it("explains the balance terms (owed/paid/remaining, credit, partial payment) to any staff member, not just owners (added 2026-07-15)", async () => {
+    const html = await (await clerkFetch("https://example.com/admin/guide")).text();
+    expect(html).toContain("رصيد للطالب");
+    expect(html).toContain("دفعة جزء");
+  });
+
+  it("explains teacher settlement math and the three staff roles to owners only (added 2026-07-15)", async () => {
+    const ownerHtml = await (await adminFetch("https://example.com/admin/guide")).text();
+    expect(ownerHtml).toContain("بالحصة");
+    expect(ownerHtml).toContain("مشاهدة فقط");
+    expect(ownerHtml).toContain("آخر مدير شغال");
+
+    const clerkHtml = await (await clerkFetch("https://example.com/admin/guide")).text();
+    expect(clerkHtml).not.toContain("صلاحيات الموظفين");
+  });
 });
 
 describe("walk-in fast path: /admin/students POST lands straight on the process form (added 2026-07-14)", () => {
