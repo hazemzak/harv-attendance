@@ -52,7 +52,7 @@ nav a{
   display:inline-block;padding:14px 20px;border-radius:999px;background:var(--surface);
   border:2px solid var(--line);color:var(--ink);text-decoration:none;font-weight:600;font-size:16px;
 }
-nav a:hover{border-color:var(--red)}
+nav a:hover,nav a:focus-visible{border-color:var(--red)}
 h1{font-size:26px;font-weight:700;margin:0 0 20px}
 .card{
   background:var(--surface);border:1px solid var(--line);border-radius:14px;
