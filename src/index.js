@@ -1492,9 +1492,27 @@ export default {
         "SELECT id FROM payments WHERE student_id = ? AND amount = ? AND created_by = ? AND created_at >= datetime('now', '-10 seconds')"
       ).bind(payMatch[1], amount, staffEmail).first();
       if (!dup) {
+        // Split the payment across the student's active, group-linked bookings
+        // proportionally by net value (amount - discount_amount), so a
+        // 'percent'-share teacher gets credited their groups' actual share of
+        // cash collected (see computeTeacherOwed + migration 0014). Runs inside
+        // the same batch/transaction, right after the payment INSERT, so
+        // last_insert_rowid() is the just-inserted payment's id. Bookings with
+        // no group_id or non-positive net contribute nothing (d.total sums only
+        // qualifying bookings, so the splits add back up to exactly `amount`);
+        // if none qualify no allocation rows are written and the payment is
+        // simply unattributed -- same outcome the old dead booking_id join gave.
         await env.DB.batch([
           env.DB.prepare("INSERT INTO payments (student_id, amount, method, note, created_by) VALUES (?, ?, ?, ?, ?)")
             .bind(payMatch[1], amount, method, note, staffEmail),
+          env.DB.prepare(
+            `INSERT INTO payment_allocations (payment_id, group_id, amount)
+             SELECT last_insert_rowid(), b.group_id, ? * (b.amount - b.discount_amount) / d.total
+             FROM bookings b
+             JOIN (SELECT SUM(amount - discount_amount) AS total FROM bookings
+                   WHERE student_id = ? AND status = 'active' AND group_id IS NOT NULL AND (amount - discount_amount) > 0) d
+             WHERE b.student_id = ? AND b.status = 'active' AND b.group_id IS NOT NULL AND (b.amount - b.discount_amount) > 0 AND d.total > 0`
+          ).bind(amount, payMatch[1], payMatch[1]),
           env.DB.prepare("INSERT INTO ledger (kind, category, amount, note, created_by) VALUES ('income', 'student_payment', ?, ?, ?)")
             .bind(amount, note, staffEmail)
         ]);
@@ -1929,7 +1947,12 @@ export default {
     // cash actually COLLECTED (payments, not billed bookings.amount — claude-review
     // finding #1 on PR #12: billed value overstates what's actually owed since
     // students can be mid-payment-plan) against this teacher's groups in [from, to],
-    // via payments.booking_id -> bookings.group_id.
+    // read from payment_allocations (the per-group split written at pay time — see
+    // the /admin/students/:id/pay handler + migration 0014). This replaced a dead
+    // JOIN through payments.booking_id -> bookings.group_id: booking_id was never
+    // populated by the real pay path (a payment settles the whole balance, not one
+    // booking), so that join matched zero rows and every percent teacher's owed
+    // silently computed as 0.
     // Groups are matched by teacher_id when set (the /admin/groups form has
     // picked from a real teacher <select> since 2026-07-13) — teacher_name is
     // kept as a fallback for any group created before that, matched by name.
@@ -1954,9 +1977,8 @@ export default {
         owed = row.n * shareValue; detail = row.n;
       } else {
         const row = await env.DB.prepare(
-          `SELECT COALESCE(SUM(p.amount), 0) AS n FROM payments p
-           JOIN bookings b ON b.id = p.booking_id
-           WHERE b.group_id IN (${placeholders}) AND date(p.created_at) BETWEEN ? AND ?`
+          `SELECT COALESCE(SUM(amount), 0) AS n FROM payment_allocations
+           WHERE group_id IN (${placeholders}) AND date(created_at) BETWEEN ? AND ?`
         ).bind(...groupIds, from, to).first();
         owed = row.n * shareValue / 100; detail = row.n;
       }

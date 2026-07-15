@@ -1545,16 +1545,43 @@ describe("/admin/teachers/:id/settlement: payout math (added 2026-07-13)", () =>
   it("percent: owed = share_value% of payments actually collected against the teacher's groups, not the billed amount (claude-review finding #1 on PR #12)", async () => {
     const { teacherId, groupId } = await makeTeacherWithGroup("percent", 10);
     const s1 = await insertStudent({ name: "Settle Percent 1", status: "approved" });
-    const { meta } = await env.DB.prepare(
+    await env.DB.prepare(
       "INSERT INTO bookings (student_id, subject, amount, group_id, status) VALUES (?, 'math', 500, ?, 'active')"
     ).bind(s1, groupId).run();
-    // Only half collected so far — owed must track the payment, not the 500 billed.
-    await env.DB.prepare(
-      "INSERT INTO payments (student_id, booking_id, amount) VALUES (?, ?, 250)"
-    ).bind(s1, meta.last_row_id).run();
+    // Pay through the REAL endpoint (not a raw INSERT) so payment_allocations
+    // gets populated the way production does -- the old test hand-set a
+    // payments.booking_id the app never actually writes, hiding the fact that
+    // the percent branch's booking_id join matched zero rows for real data.
+    const payForm = new FormData();
+    payForm.set("amount", "250"); // only half collected so far
+    await adminFetch(`https://example.com/admin/students/${s1}/pay`, { method: "POST", body: payForm });
 
     const html = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement`)).text();
     expect(html).toContain("25.00"); // 10% of 250 collected, not 10% of 500 billed
+  });
+
+  it("percent: a single payment settling bookings across TWO teachers' groups is split proportionally by each booking's net value, so each teacher is credited only their groups' share of the cash (this session -- the real bug: payments.booking_id was never populated, so every percent teacher computed owed as 0)", async () => {
+    const a = await makeTeacherWithGroup("percent", 10);
+    const b = await makeTeacherWithGroup("percent", 10);
+    const student = await insertStudent({ name: "Split Payment Test", status: "approved" });
+    // 300 with teacher A, 200 with teacher B -- net split target is 60% / 40%.
+    await env.DB.prepare(
+      "INSERT INTO bookings (student_id, subject, amount, group_id, status) VALUES (?, 'math', 300, ?, 'active')"
+    ).bind(student, a.groupId).run();
+    await env.DB.prepare(
+      "INSERT INTO bookings (student_id, subject, amount, group_id, status) VALUES (?, 'math', 200, ?, 'active')"
+    ).bind(student, b.groupId).run();
+    // Front desk takes a 250 lump sum against the whole balance via the REAL
+    // pay endpoint -- no per-booking picker exists, this is the actual flow.
+    const payForm = new FormData();
+    payForm.set("amount", "250");
+    await adminFetch(`https://example.com/admin/students/${student}/pay`, { method: "POST", body: payForm });
+
+    // 250 split 60/40 = 150 to A's group, 100 to B's group.
+    const aHtml = await (await adminFetch(`https://example.com/admin/teachers/${a.teacherId}/settlement`)).text();
+    expect(aHtml).toContain("15.00"); // 10% of 150, NOT 10% of the whole 250 (25.00) and NOT 0
+    const bHtml = await (await adminFetch(`https://example.com/admin/teachers/${b.teacherId}/settlement`)).text();
+    expect(bHtml).toContain("10.00"); // 10% of 100
   });
 
   it("recording a payout inserts a ledger expense row tagged teacher_payout", async () => {
