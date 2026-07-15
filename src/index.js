@@ -297,6 +297,25 @@ function sanitizeStage(v) {
   return STAGES.some(s => s.v === v) ? v : "";
 }
 
+// Teacher-identity dropdowns (added for the /admin/teachers add/edit form) —
+// same "never free text" reasoning as SUBJECTS/TRACKS/STAGES above, so a
+// teacher record can't drift from the values every other renderer expects.
+const PHASES = [
+  { v: "bac2", ar: "تانية ثانوي", en: "2nd Secondary" },
+  { v: "bac3", ar: "تالتة ثانوي", en: "3rd Secondary" }
+];
+const MODES = [
+  { v: "سنتر", ar: "سنتر", en: "Center" },
+  { v: "اونلاين", ar: "اونلاين", en: "Online" },
+  { v: "سنتر واونلاين", ar: "سنتر واونلاين", en: "Center + Online" }
+];
+function sanitizePhase(v) {
+  return PHASES.some(p => p.v === v) ? v : "";
+}
+function sanitizeMode(v) {
+  return MODES.some(m => m.v === v) ? v : "";
+}
+
 const PAYMENT_METHODS = {
   cash: { ar: "كاش", en: "Cash" },
   instapay: { ar: "إنستاباي", en: "InstaPay" },
@@ -350,7 +369,7 @@ async function getTeachersForSubjects(env, subjectsCsv) {
   if (!slugs.length) return {};
   const placeholders = slugs.map(() => "?").join(",");
   const { results } = await env.DB.prepare(
-    `SELECT id, subject, name, phase, mode, schedule, track, photo FROM teachers WHERE subject IN (${placeholders}) ORDER BY name`
+    `SELECT id, subject, name, phase, mode, schedule, track, photo, photo_blob IS NOT NULL AS hasPhotoBlob FROM teachers WHERE subject IN (${placeholders}) ORDER BY name`
   ).bind(...slugs).all();
   const grouped = {};
   for (const r of results) (grouped[r.subject] ||= []).push(r);
@@ -362,7 +381,7 @@ async function getTeachersForSubjects(env, subjectsCsv) {
 // as the student checks boxes — no server round-trip per checkbox.
 async function getAllTeachersGrouped(env) {
   const { results } = await env.DB.prepare(
-    `SELECT id, subject, name, phase, mode, schedule, track, photo FROM teachers ORDER BY name`
+    `SELECT id, subject, name, phase, mode, schedule, track, photo, photo_blob IS NOT NULL AS hasPhotoBlob FROM teachers ORDER BY name`
   ).all();
   const grouped = {};
   for (const r of results) (grouped[r.subject] ||= []).push(r);
@@ -612,8 +631,13 @@ function teacherCard(lang, t, pickName, checked) {
   const phase = phaseLabel(lang, t.phase);
   const scheduleText = escapeHtml(t.schedule || (lang === "en" ? "Schedule TBD — ask the teacher directly" : "الجدول لسه هيتحدد — اسأل المدرس مباشرة"));
   const modeBadge = t.mode ? `<span class="mode-badge ${modeBadgeClass(t.mode)}">${escapeHtml(t.mode)}</span>` : "";
-  const photo = t.photo
-    ? `<img class="t-photo" src="${TEACHER_PHOTO_BASE}${escapeHtml(t.photo)}" alt="" loading="lazy" onerror="this.style.display='none'">`
+  // A teacher added/edited through /admin/teachers stores an uploaded photo
+  // blob instead of a path into the design-system repo's static folder — its
+  // own route lives on this worker's origin, so it's used relative (no
+  // TEACHER_PHOTO_BASE prefix), unlike the 52 pre-existing path-based photos.
+  const photoSrc = t.hasPhotoBlob ? `/public/teachers/${t.id}/photo` : t.photo ? `${TEACHER_PHOTO_BASE}${escapeHtml(t.photo)}` : null;
+  const photo = photoSrc
+    ? `<img class="t-photo" src="${photoSrc}" alt="" loading="lazy" onerror="this.style.display='none'">`
     : `<div class="t-photo t-photo--empty" aria-hidden="true">${(t.name || "").trim().charAt(0)}</div>`;
   const input = pickName
     ? `<input type="radio" name="${pickName}" value="${t.id}" ${checked ? "checked" : ""} data-teacher-name="${escapeHtml(t.name)}" data-teacher-schedule="${escapeHtml(t.schedule || "")}">`
@@ -737,6 +761,14 @@ function contactFields(lang, s = {}) {
   <input name="home_phone" type="tel" value="${escapeHtml(s.home_phone || "")}">
   <label>${L.address}</label>
   <input name="address" value="${escapeHtml(s.address || "")}">`;
+}
+
+// Stored value for teachers.subject_label — always the Arabic short label,
+// since that's what the public site (harvcentereg.com, Arabic-first) reads
+// via /public/roster regardless of which language an admin used this form in.
+function subjectLabelFor(subject) {
+  const s = SUBJECTS.find(x => x.v === subject) || SUBJECT_EN_COUSINS.find(x => x.v === subject);
+  return s ? (s.ar || s.en) : subject;
 }
 
 function subjectOptions(lang, selected) {
@@ -1870,12 +1902,12 @@ export default {
       ar: {
         title: "الأساتذة", noShare: "لسه معملتش تسوية", perSession: "بالحصة", percent: "نسبة %",
         settlement: "التسوية", attentionTitle: "⚠️ يحتاج متابعة", attentionEmpty: "الكل متسوّي، مفيش حد محتاج متابعة دلوقتي.",
-        owed: "مستحق"
+        owed: "مستحق", addNew: "➕ ضيف أستاذ جديد", edit: "✏️ عدّل"
       },
       en: {
         title: "Teachers", noShare: "No payout share set", perSession: "Per session", percent: "Percent %",
         settlement: "Settlement", attentionTitle: "⚠️ Needs follow-up", attentionEmpty: "Everyone's settled — nobody needs follow-up right now.",
-        owed: "owed"
+        owed: "owed", addNew: "➕ Add new teacher", edit: "✏️ Edit"
       }
     };
 
@@ -1912,8 +1944,11 @@ export default {
         <small>${escapeHtml(shareLabel(tch))}${tch.owed > 0 ? ` · ${t.owed}: ${tch.owed.toFixed(2)}` : ""}</small>
         <div class="pending-actions">
           <a href="/admin/teachers/${tch.id}/settlement${langQs}"><button type="button">${t.settlement}</button></a>
+          <a href="/admin/teachers/${tch.id}/edit${langQs}"><button type="button">${t.edit}</button></a>
         </div>
       </div></div>`;
+
+      const addNewLink = `<a href="/admin/teachers/new${langQs}"><button type="button">${t.addNew}</button></a>`;
 
       const needingAttention = withStatus.filter(tch => tch.needsAttention);
       const attentionSection = `<div class="dash-card">
@@ -1935,7 +1970,7 @@ export default {
           ${bySubject[s.v].map(teacherCard).join("")}
         </div>`).join("");
 
-      return new Response(page(t.title, attentionSection + subjectSections, { lang, toggleHref: toggleHref(url, lang), isOwner: roleAllowed(staffRole, ["owner"]) }), { headers: { "content-type": "text/html;charset=utf-8" } });
+      return new Response(page(t.title, addNewLink + attentionSection + subjectSections, { lang, toggleHref: toggleHref(url, lang), isOwner: roleAllowed(staffRole, ["owner"]) }), { headers: { "content-type": "text/html;charset=utf-8" } });
     }
 
     const SETTLEMENT_I18N = {
@@ -2148,6 +2183,155 @@ export default {
           .bind(amount, `${teacher.name}${note ? " — " + note : ""}`, staffEmail, periodTo, teacher.id).run();
       }
       return Response.redirect(url.origin + `/admin/teachers/${settlementMatch[1]}/settlement` + (lang === "en" ? "?lang=en" : ""), 303);
+    }
+
+    const TEACHER_FORM_I18N = {
+      ar: {
+        addTitle: "أستاذ جديد", editTitle: "تعديل بيانات الأستاذ", name: "الاسم", namePh: "اسم الأستاذ",
+        subject: "المادة", phase: "المرحلة", mode: "طريقة الحضور", track: "المسار", trackNone: "—",
+        schedule: "الجدول", schedulePh: "مثلاً: الأربعاء ٥–٧ مساءً", photo: "الصورة", save: "حفظ",
+        confirm: "متأكد إنك عايز تحفظ التغييرات دي؟"
+      },
+      en: {
+        addTitle: "New teacher", editTitle: "Edit teacher", name: "Name", namePh: "Teacher's name",
+        subject: "Subject", phase: "Phase", mode: "Attendance mode", track: "Track", trackNone: "—",
+        schedule: "Schedule", schedulePh: "e.g. Wednesday 5-7pm", photo: "Photo", save: "Save",
+        confirm: "Are you sure you want to save these changes?"
+      }
+    };
+
+    function teacherFormHtml(lang, action, teacher) {
+      const t = TEACHER_FORM_I18N[lang];
+      const phaseOpts = `<option value="">—</option>` + PHASES.map(p => `<option value="${p.v}" ${teacher?.phase === p.v ? "selected" : ""}>${lang === "en" ? p.en : p.ar}</option>`).join("");
+      const modeOpts = `<option value="">—</option>` + MODES.map(m => `<option value="${escapeHtml(m.v)}" ${teacher?.mode === m.v ? "selected" : ""}>${lang === "en" ? m.en : m.ar}</option>`).join("");
+      const trackOpts = `<option value="">${t.trackNone}</option>` + TRACKS.map(tr => `<option value="${tr.v}" ${teacher?.track === tr.v ? "selected" : ""}>${lang === "en" ? tr.en : tr.ar}</option>`).join("");
+      const existingPhoto = teacher?.hasPhotoBlob
+        ? `<img src="/public/teachers/${teacher.id}/photo" alt="" style="width:96px;height:96px;object-fit:cover;border-radius:12px;margin-bottom:12px;display:block">`
+        : "";
+      return `<form method="POST" action="${action}" enctype="multipart/form-data" onsubmit="return confirm(${JSON.stringify(t.confirm)})">
+        <label>${t.name}</label>
+        <input name="name" placeholder="${t.namePh}" value="${escapeHtml(teacher?.name || "")}" required>
+        <label>${t.subject}</label>
+        <select name="subject" required>${subjectOptions(lang, teacher?.subject || "")}</select>
+        <label>${t.phase}</label>
+        <select name="phase">${phaseOpts}</select>
+        <label>${t.mode}</label>
+        <select name="mode">${modeOpts}</select>
+        <label>${t.track}</label>
+        <select name="track">${trackOpts}</select>
+        <label>${t.schedule}</label>
+        <input name="schedule" placeholder="${t.schedulePh}" value="${escapeHtml(teacher?.schedule || "")}">
+        <label>${t.photo}</label>
+        ${existingPhoto}
+        <img id="teacher-photo-preview" alt="" style="width:96px;height:96px;object-fit:cover;border-radius:12px;margin-bottom:12px;display:none">
+        <input name="photo" type="file" accept="image/*" onchange="
+          var f=this.files[0], img=document.getElementById('teacher-photo-preview');
+          if(!f){img.style.display='none';return}
+          var reader=new FileReader();
+          reader.onload=function(e){img.src=e.target.result;img.style.display='block'};
+          reader.readAsDataURL(f);
+        ">
+        <button type="submit">${t.save}</button>
+      </form>`;
+    }
+
+    if (url.pathname === "/admin/teachers/new" && request.method === "GET") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
+      const lang = langOf(url);
+      const t = TEACHER_FORM_I18N[lang];
+      const langQs = lang === "en" ? "?lang=en" : "";
+      return new Response(page(t.addTitle, teacherFormHtml(lang, `/admin/teachers${langQs}`, null), { lang, toggleHref: toggleHref(url, lang), isOwner: true }), { headers: { "content-type": "text/html;charset=utf-8" } });
+    }
+
+    // teachers.id is a TEXT slug (e.g. "reda", "sayed") sourced historically
+    // from data/teachers.json's own id field — a new teacher added through
+    // this form has no such source, so a short random id is generated instead
+    // of attempting Arabic-name transliteration (the id is an internal DB key/
+    // URL segment, never shown to staff or students).
+    function newTeacherId() {
+      return "t" + Math.random().toString(36).slice(2, 10);
+    }
+
+    async function readTeacherForm(request) {
+      const form = await request.formData();
+      const name = (form.get("name") || "").toString().trim();
+      const subject = KNOWN_SUBJECT_SLUGS.has((form.get("subject") || "").toString().trim()) ? (form.get("subject") || "").toString().trim() : "";
+      const phase = sanitizePhase((form.get("phase") || "").toString().trim());
+      const mode = sanitizeMode((form.get("mode") || "").toString().trim());
+      const track = sanitizeTrack((form.get("track") || "").toString().trim());
+      const schedule = (form.get("schedule") || "").toString().trim();
+      const photoFile = form.get("photo");
+      let photoBuf = null, photoType = null;
+      if (photoFile && typeof photoFile === "object" && photoFile.size > 0) {
+        photoBuf = await photoFile.arrayBuffer();
+        const ALLOWED_PHOTO_TYPES = ["image/jpeg", "image/png", "image/webp"];
+        photoType = ALLOWED_PHOTO_TYPES.includes(photoFile.type) ? photoFile.type : "image/jpeg";
+      }
+      return { name, subject, phase, mode, track, schedule, photoBuf, photoType };
+    }
+
+    if (url.pathname === "/admin/teachers" && request.method === "POST") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
+      const lang = langOf(url);
+      const langQs = lang === "en" ? "?lang=en" : "";
+      const { name, subject, phase, mode, track, schedule, photoBuf, photoType } = await readTeacherForm(request);
+      if (!name || !subject) {
+        return new Response(page(TEACHER_FORM_I18N[lang].addTitle, teacherFormHtml(lang, `/admin/teachers${langQs}`, null), { lang, isOwner: true }), { status: 400, headers: { "content-type": "text/html;charset=utf-8" } });
+      }
+      const id = newTeacherId();
+      await env.DB.prepare(
+        `INSERT INTO teachers (id, name, subject, subject_label, phase, mode, schedule, track, photo_blob, photo_blob_type)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(id, name, subject, subjectLabelFor(subject), phase || null, mode || null, schedule || null, track || null, photoBuf, photoType).run();
+      return Response.redirect(url.origin + `/admin/teachers${langQs}`, 303);
+    }
+
+    const teacherEditMatch = url.pathname.match(/^\/admin\/teachers\/([^/]+)\/edit$/);
+    if (teacherEditMatch && request.method === "GET") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
+      const lang = langOf(url);
+      const t = TEACHER_FORM_I18N[lang];
+      const langQs = lang === "en" ? "?lang=en" : "";
+      const teacher = await env.DB.prepare("SELECT id, name, subject, phase, mode, schedule, track, photo_blob IS NOT NULL AS hasPhotoBlob FROM teachers WHERE id = ?").bind(teacherEditMatch[1]).first();
+      if (!teacher) return new Response("Not found", { status: 404 });
+      return new Response(page(t.editTitle, teacherFormHtml(lang, `/admin/teachers/${teacher.id}${langQs}`, teacher), { lang, toggleHref: toggleHref(url, lang), isOwner: true }), { headers: { "content-type": "text/html;charset=utf-8" } });
+    }
+
+    const teacherUpdateMatch = url.pathname.match(/^\/admin\/teachers\/([^/]+)$/);
+    if (teacherUpdateMatch && request.method === "POST") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
+      const lang = langOf(url);
+      const langQs = lang === "en" ? "?lang=en" : "";
+      const teacherId = teacherUpdateMatch[1];
+      const existing = await env.DB.prepare("SELECT id FROM teachers WHERE id = ?").bind(teacherId).first();
+      if (!existing) return new Response("Not found", { status: 404 });
+      const { name, subject, phase, mode, track, schedule, photoBuf, photoType } = await readTeacherForm(request);
+      if (!name || !subject) {
+        const teacher = { id: teacherId, name, subject, phase, mode, track, schedule };
+        return new Response(page(TEACHER_FORM_I18N[lang].editTitle, teacherFormHtml(lang, `/admin/teachers/${teacherId}${langQs}`, teacher), { lang, isOwner: true }), { status: 400, headers: { "content-type": "text/html;charset=utf-8" } });
+      }
+      if (photoBuf) {
+        await env.DB.prepare(
+          `UPDATE teachers SET name = ?, subject = ?, subject_label = ?, phase = ?, mode = ?, schedule = ?, track = ?, photo_blob = ?, photo_blob_type = ? WHERE id = ?`
+        ).bind(name, subject, subjectLabelFor(subject), phase || null, mode || null, schedule || null, track || null, photoBuf, photoType, teacherId).run();
+      } else {
+        await env.DB.prepare(
+          `UPDATE teachers SET name = ?, subject = ?, subject_label = ?, phase = ?, mode = ?, schedule = ?, track = ? WHERE id = ?`
+        ).bind(name, subject, subjectLabelFor(subject), phase || null, mode || null, schedule || null, track || null, teacherId).run();
+      }
+      return Response.redirect(url.origin + `/admin/teachers${langQs}`, 303);
+    }
+
+    const teacherPhotoMatch = url.pathname.match(/^\/public\/teachers\/([^/]+)\/photo$/);
+    if (teacherPhotoMatch && request.method === "GET") {
+      const teacher = await env.DB.prepare("SELECT photo_blob, photo_blob_type FROM teachers WHERE id = ?").bind(teacherPhotoMatch[1]).first();
+      if (!teacher || !teacher.photo_blob) return new Response("", { status: 404 });
+      // D1 can hand a BLOB column back as a plain array-like rather than a
+      // real ArrayBuffer/TypedArray (observed in the vitest-pool-workers test
+      // environment) — Response() silently drops a plain array's bytes
+      // instead of erroring, so normalize explicitly rather than trust the
+      // driver's return shape.
+      return new Response(new Uint8Array(teacher.photo_blob), { headers: { "content-type": teacher.photo_blob_type || "image/jpeg", "cache-control": "public, max-age=300" } });
     }
 
     const STAFF_I18N = {
@@ -2936,15 +3120,23 @@ ${isOwnerGuide ? sec("s-owner", "⚙️ إدارة (مدير بس)", `
       // rendering code reads t.subjectLabel at several call sites, and this
       // keeps the "zero rendering changes needed" claim true.
       const teachers = await env.DB.prepare(
-        "SELECT id, name, subject, subject_label AS subjectLabel, phase, mode, schedule, track, photo FROM teachers"
+        "SELECT id, name, subject, subject_label AS subjectLabel, phase, mode, schedule, track, photo, photo_blob IS NOT NULL AS hasPhotoBlob FROM teachers"
       ).all();
       const sessions = await env.DB.prepare(
         `SELECT g.teacher_name, g.subject, g.stage, g.day, g.time, r.name AS room
          FROM groups g LEFT JOIN rooms r ON r.id = g.room_id
          WHERE g.active = 1`
       ).all();
+      // Teachers added/edited through /admin/teachers store their photo as an
+      // uploaded blob, not a path into the design-system repo's static folder
+      // — resolve to the public blob-serving route here so a teacher added
+      // this way "just works" on the live site with zero rendering changes,
+      // while the 52 pre-existing path-based photos are untouched.
+      const teachersOut = teachers.results.map(({ hasPhotoBlob, ...tch }) =>
+        hasPhotoBlob ? { ...tch, photo: `/public/teachers/${tch.id}/photo` } : tch
+      );
       return Response.json(
-        { teachers: teachers.results, sessions: sessions.results },
+        { teachers: teachersOut, sessions: sessions.results },
         { headers: { "cache-control": "public, max-age=300, s-maxage=300", "access-control-allow-origin": "*" } }
       );
     }

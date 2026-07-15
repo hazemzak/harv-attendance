@@ -55,7 +55,9 @@ CREATE TABLE teachers (
   track TEXT,
   photo TEXT,
   share_type TEXT CHECK (share_type IN ('percent', 'per_session')),
-  share_value REAL
+  share_value REAL,
+  photo_blob BLOB,
+  photo_blob_type TEXT
 );
 
 -- Staff roles, keyed by the Cloudflare Access-authenticated email (no separate

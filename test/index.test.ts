@@ -2199,3 +2199,100 @@ describe("/public/roster: column-scoped public endpoint for harvcentereg.com (ad
     expect(res.headers.get("access-control-allow-origin")).toBe("*");
   });
 });
+
+describe("/admin/teachers/new + /admin/teachers (add): teacher-editor screen (added 2026-07-15)", () => {
+  it("creates a new teacher with a whitelisted subject/phase/mode/track", async () => {
+    const form = new FormData();
+    form.set("name", "أ. تيست جديد");
+    form.set("subject", "math");
+    form.set("phase", "bac2");
+    form.set("mode", "سنتر");
+    form.set("track", "arabic");
+    form.set("schedule", "الاثنين ٥-٧");
+    const res = await adminFetch("https://example.com/admin/teachers", { method: "POST", body: form, redirect: "manual" });
+    expect(res.status).toBe(303);
+    const row = await env.DB.prepare("SELECT * FROM teachers WHERE name = 'أ. تيست جديد'").first();
+    expect(row).toMatchObject({ subject: "math", subject_label: "رياضيات", phase: "bac2", mode: "سنتر", track: "arabic", schedule: "الاثنين ٥-٧" });
+  });
+
+  it("rejects an unknown/crafted subject value instead of storing it raw", async () => {
+    const form = new FormData();
+    form.set("name", "أ. مادة مزورة");
+    form.set("subject", "<script>alert(1)</script>");
+    const res = await adminFetch("https://example.com/admin/teachers", { method: "POST", body: form });
+    expect(res.status).toBe(400);
+    const row = await env.DB.prepare("SELECT * FROM teachers WHERE name = 'أ. مادة مزورة'").first();
+    expect(row).toBeNull();
+  });
+
+  it("uploads a photo as a blob and serves it back via /public/teachers/:id/photo", async () => {
+    const form = new FormData();
+    form.set("name", "أ. صورة تيست");
+    form.set("subject", "physics");
+    form.set("photo", new File([new Uint8Array([1, 2, 3])], "x.png", { type: "image/png" }));
+    await adminFetch("https://example.com/admin/teachers", { method: "POST", body: form });
+    const row = await env.DB.prepare("SELECT id FROM teachers WHERE name = 'أ. صورة تيست'").first() as any;
+    const photoRes = await SELF.fetch(`https://example.com/public/teachers/${row.id}/photo`);
+    expect(photoRes.status).toBe(200);
+    expect(photoRes.headers.get("content-type")).toBe("image/png");
+    expect(new Uint8Array(await photoRes.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
+  });
+
+  it("404s /public/teachers/:id/photo for a teacher with no uploaded photo", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('no-photo-test', 'أ. بدون صورة', 'math')").run();
+    const res = await SELF.fetch("https://example.com/public/teachers/no-photo-test/photo");
+    expect(res.status).toBe(404);
+  });
+
+  it("blocks a clerk from adding or editing a teacher", async () => {
+    expect((await clerkFetch("https://example.com/admin/teachers/new")).status).toBe(403);
+    expect((await clerkFetch("https://example.com/admin/teachers", { method: "POST", body: new FormData() })).status).toBe(403);
+  });
+});
+
+describe("/admin/teachers/:id/edit + /admin/teachers/:id (update): editing an existing teacher (added 2026-07-15)", () => {
+  it("updates the existing row's fields instead of creating a duplicate", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('edit-test-1', 'أ. قبل التعديل', 'math')").run();
+    const form = new FormData();
+    form.set("name", "أ. بعد التعديل");
+    form.set("subject", "physics");
+    const res = await adminFetch("https://example.com/admin/teachers/edit-test-1", { method: "POST", body: form, redirect: "manual" });
+    expect(res.status).toBe(303);
+    const rows = (await env.DB.prepare("SELECT * FROM teachers WHERE id = 'edit-test-1'").all()).results;
+    expect(rows.length).toBe(1);
+    expect(rows[0]).toMatchObject({ name: "أ. بعد التعديل", subject: "physics" });
+  });
+
+  it("keeps the existing photo blob when the edit submits no new file", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject, photo_blob, photo_blob_type) VALUES ('edit-test-2', 'أ. صورة قديمة', 'math', ?, 'image/png')")
+      .bind(new Uint8Array([9, 9, 9]).buffer).run();
+    const form = new FormData();
+    form.set("name", "أ. صورة قديمة معدّلة");
+    form.set("subject", "math");
+    await adminFetch("https://example.com/admin/teachers/edit-test-2", { method: "POST", body: form });
+    const row = await env.DB.prepare("SELECT photo_blob_type FROM teachers WHERE id = 'edit-test-2'").first();
+    expect(row?.photo_blob_type).toBe("image/png");
+  });
+
+  it("blocks a clerk from the edit form and update route", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('edit-test-3', 'أ. محمي', 'math')").run();
+    expect((await clerkFetch("https://example.com/admin/teachers/edit-test-3/edit")).status).toBe(403);
+    expect((await clerkFetch("https://example.com/admin/teachers/edit-test-3", { method: "POST", body: new FormData() })).status).toBe(403);
+  });
+});
+
+describe("/public/roster: resolves a blob-photo teacher to /public/teachers/:id/photo (added 2026-07-15)", () => {
+  it("returns the blob-serving URL when photo_blob is present, instead of the raw (empty) photo path", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject, photo_blob, photo_blob_type) VALUES ('roster-blob-test', 'أ. بلوب', 'math', ?, 'image/png')")
+      .bind(new Uint8Array([1]).buffer).run();
+    const body = await (await SELF.fetch("https://example.com/public/roster")).json() as any;
+    const t = body.teachers.find((x: any) => x.id === "roster-blob-test");
+    expect(t.photo).toBe("/public/teachers/roster-blob-test/photo");
+  });
+
+  it("still returns the raw path for a teacher with no photo_blob", async () => {
+    const body = await (await SELF.fetch("https://example.com/public/roster")).json() as any;
+    const t = body.teachers.find((x: any) => x.id === "roster-test-1");
+    expect(t.photo).toBe("teachers/roster-test.jpg");
+  });
+});
