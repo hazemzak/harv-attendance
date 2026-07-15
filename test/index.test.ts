@@ -1783,6 +1783,22 @@ describe("/admin/teachers/:id/settlement: payout math (added 2026-07-13)", () =>
     expect(row).toBeFalsy();
   });
 
+  it("a later partial payout doesn't net out an earlier historical window's owed amount (claude-review, PR #12 review round on the master-synced branch: the partial-payout subtraction had no upper bound tied to the settlement's 'to' date)", async () => {
+    const { teacherId, groupId } = await makeTeacherWithGroup("per_session", 20);
+    const student = await insertStudent({ name: "Bounded Netting Test", status: "approved" });
+    // A session 5 days ago -- owed 20 for the historical window ending 3 days ago.
+    await env.DB.prepare("INSERT INTO attendance (student_id, group_id, scanned_at) VALUES (?, ?, datetime('now', '-5 days'))").bind(student, groupId).run();
+    const historicalTo = await env.DB.prepare("SELECT date('now', '-3 days') AS d").first().then((r: any) => r.d);
+    // A partial payout recorded TODAY (after historicalTo) -- must not net
+    // against the earlier window above.
+    await env.DB.prepare(
+      "INSERT INTO ledger (kind, category, amount, note, teacher_id, period_to) VALUES ('expense', 'teacher_payout', 15, 'later partial', ?, NULL)"
+    ).bind(teacherId).run();
+
+    const html = await (await adminFetch(`https://example.com/admin/teachers/${teacherId}/settlement?from=2000-01-01&to=${historicalTo}`)).text();
+    expect(html).toContain("20.00"); // NOT 5.00 (which would mean the later partial wrongly netted in)
+  });
+
   it("setting a teacher's share persists share_type and share_value", async () => {
     const { meta } = await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('share-test', 'أ. شير', 'math')").run();
     const form = new FormData();

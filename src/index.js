@@ -1966,9 +1966,14 @@ export default {
       // POST below) -- without subtracting it here, the settlement page keeps
       // showing the FULL original owed amount forever, risking a real
       // double-payout if the owner pays the displayed total again.
+      // Upper-bounded by `to` too (claude-review, PR #12 review round on the
+      // master-synced branch): without it, viewing/submitting an earlier
+      // historical window (`to` before a later partial payment's date) would
+      // still net that later payment out of the earlier window's owed total,
+      // letting a period close as "paid" for a stretch that wasn't.
       const partial = await env.DB.prepare(
-        "SELECT COALESCE(SUM(amount), 0) AS n FROM ledger WHERE category = 'teacher_payout' AND period_to IS NULL AND date(occurred_at) >= ? AND teacher_id = ?"
-      ).bind(from, teacherId).first();
+        "SELECT COALESCE(SUM(amount), 0) AS n FROM ledger WHERE category = 'teacher_payout' AND period_to IS NULL AND date(occurred_at) BETWEEN ? AND ? AND teacher_id = ?"
+      ).bind(from, to, teacherId).first();
       return { owed: Math.max(0, owed - partial.n), detail };
     }
 
