@@ -1470,6 +1470,22 @@ describe("/admin/staff management (added 2026-07-13)", () => {
     expect(row?.role).toBe("owner");
   });
 
+  it("forces the very first staff row ever added to owner, even if the form submitted a lesser role (claude-review finding on PR #12: an empty-table INSERT with role='clerk' would end bootstrap mode with zero owners and no in-app recovery)", async () => {
+    await env.DB.prepare("DELETE FROM staff").run();
+    const form = new FormData();
+    form.set("email", "first-admin@test.local");
+    form.set("role", "clerk"); // the form's default dropdown value
+    const res = await SELF.fetch("https://example.com/admin/staff", {
+      method: "POST",
+      body: form,
+      // Bootstrap mode: no staff rows yet, so this request is itself auto-owner.
+      headers: { "Cf-Access-Authenticated-User-Email": "first-admin@test.local", "Cf-Access-Jwt-Assertion": "test" }
+    });
+    expect(res.status).toBe(200); // follows the redirect
+    const row = await env.DB.prepare("SELECT role FROM staff WHERE email = 'first-admin@test.local'").first();
+    expect(row?.role).toBe("owner");
+  });
+
   it("allows deactivating an owner when another active owner remains", async () => {
     await env.DB.prepare("INSERT INTO staff (email, role) VALUES ('owner-a@test.local', 'owner')").run();
     await env.DB.prepare("INSERT INTO staff (email, role) VALUES ('owner-b@test.local', 'owner')").run();

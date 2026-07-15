@@ -2128,11 +2128,19 @@ export default {
       const name = (form.get("name") || "").toString().trim() || null;
       const role = (form.get("role") || "").toString().trim();
       if (email && ["owner", "clerk", "viewer"].includes(role)) {
-        if (role === "owner") {
+        // Bootstrap mode (getStaffRole() treats an empty table as "everyone
+        // is owner") ends the instant the first row lands. Without this, the
+        // form's role dropdown defaulting to "clerk" can seed that one row as
+        // non-owner and permanently lock everyone out — /admin/staff is
+        // itself owner-gated, so no in-app path could ever recover (claude-review,
+        // PR #12 follow-up round).
+        const staffCount = await env.DB.prepare("SELECT COUNT(*) AS n FROM staff").first();
+        const effectiveRole = staffCount.n === 0 ? "owner" : role;
+        if (effectiveRole === "owner") {
           // Promoting to/keeping owner can never reduce the active-owner
           // count, so no guard needed here.
           await env.DB.prepare("INSERT INTO staff (email, name, role) VALUES (?, ?, ?) ON CONFLICT(email) DO UPDATE SET name = excluded.name, role = excluded.role, active = 1")
-            .bind(email, name, role).run();
+            .bind(email, name, effectiveRole).run();
         } else {
           // Atomic guarded UPDATE (claude-review, PR #12 follow-up round —
           // TOCTOU: a separate check-then-write left a window where two
@@ -2146,7 +2154,7 @@ export default {
                role = 'owner' AND active = 1
                AND (SELECT COUNT(*) FROM staff WHERE role = 'owner' AND active = 1 AND email != ?) = 0
              )`
-          ).bind(name, role, email, email).run();
+          ).bind(name, effectiveRole, email, email).run();
           if (meta.changes === 0) {
             const exists = await env.DB.prepare("SELECT 1 FROM staff WHERE email = ?").bind(email).first();
             if (exists) return lastOwnerBlocked(lang);
@@ -2156,7 +2164,7 @@ export default {
             // INSERT, the second hitting the email PRIMARY KEY and throwing a
             // raw 500. Same ON CONFLICT pattern as the owner branch above.
             await env.DB.prepare("INSERT INTO staff (email, name, role) VALUES (?, ?, ?) ON CONFLICT(email) DO UPDATE SET name = excluded.name, role = excluded.role, active = 1")
-              .bind(email, name, role).run();
+              .bind(email, name, effectiveRole).run();
           }
         }
       }
