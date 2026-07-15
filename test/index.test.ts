@@ -1750,6 +1750,39 @@ describe("/admin/teachers/:id/settlement: payout math (added 2026-07-13)", () =>
     expect(lastPayout?.d).toBeFalsy();
   });
 
+  it("two teachers with the identical display name don't cross-contaminate each other's payout tracking (claude-review, PR #12 review round on the master-synced branch: payout matching used to be name-based, not by teacher.id)", async () => {
+    const sameName = "أ. توأم";
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject, share_type, share_value) VALUES ('twin-a', ?, 'math', 'per_session', 20)").bind(sameName).run();
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject, share_type, share_value) VALUES ('twin-b', ?, 'math', 'per_session', 20)").bind(sameName).run();
+    const { meta: groupA } = await env.DB.prepare("INSERT INTO groups (teacher_id, teacher_name, subject, active) VALUES ('twin-a', ?, 'math', 1)").bind(sameName).run();
+    await env.DB.prepare("INSERT INTO groups (teacher_id, teacher_name, subject, active) VALUES ('twin-b', ?, 'math', 1)").bind(sameName).run();
+    const student = await insertStudent({ name: "Twin Payout Test", status: "approved" });
+    await env.DB.prepare("INSERT INTO attendance (student_id, group_id, scanned_at) VALUES (?, ?, datetime('now', '-1 day'))").bind(student, groupA.last_row_id).run();
+
+    // Pay teacher A in full.
+    const payForm = new FormData();
+    payForm.set("to", await env.DB.prepare("SELECT date('now') AS d").first().then((r: any) => r.d));
+    payForm.set("amount", "20");
+    await adminFetch("https://example.com/admin/teachers/twin-a/settlement", { method: "POST", body: payForm });
+
+    // Teacher B, same name, no attendance of their own — must still show as
+    // fully unpaid-from-the-start, not inherit A's just-closed period.
+    const bHtml = await (await adminFetch("https://example.com/admin/teachers/twin-b/settlement")).text();
+    expect(bHtml).toContain("0.00");
+    const aRow = await env.DB.prepare("SELECT teacher_id FROM ledger WHERE category = 'teacher_payout' AND note LIKE 'أ. توأم%'").first();
+    expect(aRow?.teacher_id).toBe("twin-a");
+  });
+
+  it("rejects a settlement POST for a teacher with no share configured, even bypassing the UI directly (claude-review, PR #12 review round on the master-synced branch)", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('no-share', 'أ. بدون نسبة', 'math')").run();
+    const form = new FormData();
+    form.set("to", await env.DB.prepare("SELECT date('now') AS d").first().then((r: any) => r.d));
+    form.set("amount", "500");
+    await adminFetch("https://example.com/admin/teachers/no-share/settlement", { method: "POST", body: form });
+    const row = await env.DB.prepare("SELECT * FROM ledger WHERE category = 'teacher_payout' AND teacher_id = 'no-share'").first();
+    expect(row).toBeFalsy();
+  });
+
   it("setting a teacher's share persists share_type and share_value", async () => {
     const { meta } = await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('share-test', 'أ. شير', 'math')").run();
     const form = new FormData();

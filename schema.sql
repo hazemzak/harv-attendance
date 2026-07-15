@@ -149,7 +149,8 @@ CREATE TABLE ledger (
   note TEXT,
   occurred_at TEXT NOT NULL DEFAULT (datetime('now')),
   created_by TEXT,
-  period_to TEXT
+  period_to TEXT,
+  teacher_id TEXT
 );
 
 CREATE INDEX idx_ledger_occurred ON ledger(occurred_at);

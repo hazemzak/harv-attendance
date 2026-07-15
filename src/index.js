@@ -1843,7 +1843,7 @@ export default {
       // finding #4 on PR #12).
       const withStatus = await Promise.all(results.map(async tch => {
         if (!tch.share_type) return { ...tch, needsAttention: true, owed: 0 };
-        const from = await lastPayoutFrom(env, tch.name);
+        const from = await lastPayoutFrom(env, tch.id);
         const { owed } = await computeTeacherOwed(env, tch.id, tch.name, tch.share_type, tch.share_value, from, today);
         return { ...tch, needsAttention: owed > 0, owed };
       }));
@@ -1904,10 +1904,11 @@ export default {
     // what the list just flagged, and submitting it persisted today as the
     // new payout baseline without the real gap actually being paid).
     // period_to falls back to occurred_at for older rows with no period_to on
-    // file. note LIKE match is escaped since teacherName is free-text staff
-    // input, not a slug — an unescaped % or _ could over-match another
-    // teacher's payout note (claude-review finding #5 on PR #12).
-    async function lastPayoutFrom(env, teacherName) {
+    // file. Matched by teacher_id (claude-review, PR #12 review round on the
+    // master-synced branch) rather than a note-text LIKE — two teachers
+    // sharing the exact same display name would otherwise cross-contaminate
+    // each other's payout tracking, since name isn't unique but teachers.id is.
+    async function lastPayoutFrom(env, teacherId) {
       // +1 day (claude-review, PR #12 follow-up round): computeTeacherOwed's
       // BETWEEN is inclusive on both ends, so returning the last period's
       // exact end date would let the boundary day get counted — and paid —
@@ -1918,8 +1919,8 @@ export default {
       // occurred_at here would silently write off the unpaid shortfall by
       // advancing the baseline to today anyway.
       const lastPayout = await env.DB.prepare(
-        "SELECT date(MAX(period_to), '+1 day') AS d FROM ledger WHERE category = 'teacher_payout' AND note LIKE ? ESCAPE '\\' AND period_to IS NOT NULL"
-      ).bind(teacherName.replace(/[%_]/g, "\\$&") + "%").first();
+        "SELECT date(MAX(period_to), '+1 day') AS d FROM ledger WHERE category = 'teacher_payout' AND teacher_id = ? AND period_to IS NOT NULL"
+      ).bind(teacherId).first();
       return lastPayout.d || "2000-01-01";
     }
 
@@ -1966,8 +1967,8 @@ export default {
       // showing the FULL original owed amount forever, risking a real
       // double-payout if the owner pays the displayed total again.
       const partial = await env.DB.prepare(
-        "SELECT COALESCE(SUM(amount), 0) AS n FROM ledger WHERE category = 'teacher_payout' AND period_to IS NULL AND date(occurred_at) >= ? AND note LIKE ? ESCAPE '\\'"
-      ).bind(from, teacherName.replace(/[%_]/g, "\\$&") + "%").first();
+        "SELECT COALESCE(SUM(amount), 0) AS n FROM ledger WHERE category = 'teacher_payout' AND period_to IS NULL AND date(occurred_at) >= ? AND teacher_id = ?"
+      ).bind(from, teacherId).first();
       return { owed: Math.max(0, owed - partial.n), detail };
     }
 
@@ -1981,7 +1982,7 @@ export default {
       const langQs = lang === "en" ? "?lang=en" : "";
       const teacher = await env.DB.prepare("SELECT id, name, subject, share_type, share_value FROM teachers WHERE id = ?").bind(settlementMatch[1]).first();
       if (!teacher) return new Response("Not found", { status: 404 });
-      const from = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("from") || "") ? url.searchParams.get("from") : await lastPayoutFrom(env, teacher.name);
+      const from = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("from") || "") ? url.searchParams.get("from") : await lastPayoutFrom(env, teacher.id);
       // Clamped at today (claude-review finding #2, this session): a future
       // `to` (fat-fingered in the date picker) would close a period past
       // today, and since lastPayoutFrom() reads that back as the next
@@ -2049,7 +2050,12 @@ export default {
       // period past today.
       const submittedTo = /^\d{4}-\d{2}-\d{2}$/.test(form.get("to") || "") ? [form.get("to"), new Date().toISOString().slice(0, 10)].sort()[0] : null;
       const teacher = await env.DB.prepare("SELECT id, name, share_type, share_value FROM teachers WHERE id = ?").bind(settlementMatch[1]).first();
-      if (teacher && Number.isFinite(amount) && amount > 0) {
+      // A teacher with no share configured has nothing to owe — the GET page
+      // never renders the payout form in that case, but a direct POST
+      // (still owner-gated) could otherwise close a period at owed=0 against
+      // any submitted amount (claude-review, PR #12 review round on the
+      // master-synced branch).
+      if (teacher && teacher.share_type && Number.isFinite(amount) && amount > 0) {
         // `from` is always recomputed server-side, never trusted from the form
         // (claude-review finding #1, this session): the GET page's `from` can
         // be overridden via ?from= and echoed back in a hidden field -- if the
@@ -2058,7 +2064,7 @@ export default {
         // lastPayoutFrom() derives the next baseline purely from MAX(period_to),
         // everything before the submitted `from` would be permanently written
         // off, not just deferred.
-        const from = await lastPayoutFrom(env, teacher.name);
+        const from = await lastPayoutFrom(env, teacher.id);
         // Recompute owed server-side rather than trusting the client-echoed
         // amount/to (claude-review, PR #12 finding #1) — paying less than what's
         // actually owed for [from, to] must not still close out the period, or
@@ -2072,8 +2078,8 @@ export default {
         // so a teacher paid exactly the displayed "60.30" would otherwise fail
         // amount >= owed and leave the period open forever.
         const periodTo = Math.round(amount * 100) >= Math.round(owed * 100) ? submittedTo : null;
-        await env.DB.prepare("INSERT INTO ledger (kind, category, amount, note, created_by, period_to) VALUES ('expense', 'teacher_payout', ?, ?, ?, ?)")
-          .bind(amount, `${teacher.name}${note ? " — " + note : ""}`, staffEmail, periodTo).run();
+        await env.DB.prepare("INSERT INTO ledger (kind, category, amount, note, created_by, period_to, teacher_id) VALUES ('expense', 'teacher_payout', ?, ?, ?, ?, ?)")
+          .bind(amount, `${teacher.name}${note ? " — " + note : ""}`, staffEmail, periodTo, teacher.id).run();
       }
       return Response.redirect(url.origin + `/admin/teachers/${settlementMatch[1]}/settlement` + (lang === "en" ? "?lang=en" : ""), 303);
     }
