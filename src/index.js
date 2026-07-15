@@ -530,12 +530,12 @@ const PAY_I18N = {
   ar: {
     owed: "المطلوب", paid: "المدفوع", balance: "المتبقي", fullyPaid: "مدفوع بالكامل", credit: "رصيد للطالب",
     amount: "المبلغ", amountPh: "بالجنيه", method: "طريقة الدفع", note: "ملاحظة (اختياري)", notePh: "اختياري", record: "تسجيل دفعة",
-    history: "سجل الدفعات", receipt: "إيصال"
+    history: "سجل الدفعات", receipt: "إيصال", amountErr: "المبلغ لازم يكون رقم أكبر من صفر — لم يتم تسجيل أي دفعة."
   },
   en: {
     owed: "Owed", paid: "Paid", balance: "Balance", fullyPaid: "Fully paid", credit: "Credit on file",
     amount: "Amount", amountPh: "in EGP", method: "Payment method", note: "Note (optional)", notePh: "optional", record: "Record payment",
-    history: "Payment history", receipt: "Receipt"
+    history: "Payment history", receipt: "Receipt", amountErr: "Amount must be a number greater than zero — no payment was recorded."
   }
 };
 
@@ -1383,6 +1383,7 @@ export default {
       const balance = await getStudentBalance(env, student.id);
       const payments = await getPayments(env, student.id);
       const langQs = lang === "en" ? "?lang=en" : "";
+      const payErrHtml = url.searchParams.get("payErr") === "1" ? `<p class="empty" style="color:var(--red)">${PAY_I18N[lang].amountErr}</p>` : "";
       const trackLabel = (TRACKS.find(tr => tr.v === student.track) || {})[lang] || "";
       const infoRow = (label, value) => value ? `<p><strong>${label}:</strong> ${escapeHtml(value)}</p>` : "";
       const studentPageUrl = `${url.origin}/student?id=${student.id}`;
@@ -1411,6 +1412,7 @@ export default {
       ${infoRow(t.address, student.address)}
       ${bookingTableHtml(lang, bookings, { langQs })}
       ${balanceSummaryHtml(lang, balance)}
+      ${payErrHtml}
       ${paymentFormHtml(lang, student.id, langQs)}
       ${paymentsHistoryHtml(lang, payments)}
       ${droppedBookingsHtml(lang, dropped)}`;
@@ -1439,6 +1441,53 @@ export default {
     // row (env.DB.batch(), same atomicity pattern as the booking-rows save in
     // /admin/students/:id/process) so a payment is never recorded without also
     // landing in the center's own journal.
+    const payMatch = url.pathname.match(/^\/admin\/students\/(\d+)\/pay$/);
+    if (payMatch && request.method === "POST") {
+      if (!roleAllowed(staffRole, ["owner", "clerk"])) return forbiddenRole();
+      const lang = langOf(url);
+      const langQs = lang === "en" ? "?lang=en" : "";
+      const estamaraUrl = url.origin + `/admin/students/${payMatch[1]}/estamara`;
+      const student = await env.DB.prepare("SELECT id FROM students WHERE id = ?").bind(payMatch[1]).first();
+      if (!student) {
+        return Response.redirect(url.origin + "/admin" + langQs, 303);
+      }
+      const form = await request.formData();
+      const amount = parseFloat((form.get("amount") || "").toString());
+      const method = (form.get("method") || "").toString().trim() || null;
+      const note = (form.get("note") || "").toString().trim() || null;
+      if (!Number.isFinite(amount) || amount <= 0) {
+        return Response.redirect(estamaraUrl + langQs + (langQs ? "&" : "?") + "payErr=1", 303);
+      }
+      // ponytail: double-submit guard by recency, not a request token — a slow
+      // network/double-tap resubmits the same student+amount+staff within
+      // seconds; a legit second identical payment minutes later still lands.
+      const dup = await env.DB.prepare(
+        "SELECT id FROM payments WHERE student_id = ? AND amount = ? AND created_by = ? AND created_at >= datetime('now', '-10 seconds')"
+      ).bind(payMatch[1], amount, staffEmail).first();
+      if (!dup) {
+        await env.DB.batch([
+          env.DB.prepare("INSERT INTO payments (student_id, amount, method, note, created_by) VALUES (?, ?, ?, ?, ?)")
+            .bind(payMatch[1], amount, method, note, staffEmail),
+          env.DB.prepare("INSERT INTO ledger (kind, category, amount, note, created_by) VALUES ('income', 'student_payment', ?, ?, ?)")
+            .bind(amount, note, staffEmail)
+        ]);
+      }
+      return Response.redirect(estamaraUrl + langQs, 303);
+    }
+
+    const PROMO_I18N = {
+      ar: {
+        title: "العروض", subject: "المادة (اختياري)", subjectAny: "كل المواد",
+        teacher: "اسم المدرس (اختياري)", text: "نص العرض", add: "إضافة عرض",
+        deactivate: "إيقاف", activate: "تفعيل", empty: "لا يوجد عروض حالياً.", inactive: "متوقف"
+      },
+      en: {
+        title: "Promotions", subject: "Subject (optional)", subjectAny: "All subjects",
+        teacher: "Teacher name (optional)", text: "Promo text", add: "Add promotion",
+        deactivate: "Deactivate", activate: "Activate", empty: "No promotions yet.", inactive: "inactive"
+      }
+    };
+
     if (url.pathname === "/admin/promotions" && request.method === "GET") {
       const lang = langOf(url);
       const t = PROMO_I18N[lang];
@@ -1684,6 +1733,66 @@ export default {
     const EXPENSE_CATEGORY_LABELS = {
       ar: { salaries: "مرتبات", rent: "إيجار", phone: "فاتورة تليفون", cleaning: "أدوات نظافة", insurance: "تأمينات", other: "أخرى" },
       en: { salaries: "Salaries", rent: "Rent", phone: "Phone bill", cleaning: "Cleaning", insurance: "Insurance", other: "Other" }
+    };
+
+    if (url.pathname === "/admin/ledger" && request.method === "GET") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
+      const lang = langOf(url);
+      const t = LEDGER_I18N[lang];
+      const langQs = lang === "en" ? "?lang=en" : "";
+      const from = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("from") || "") ? url.searchParams.get("from") : new Date().toISOString().slice(0, 10);
+      const to = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("to") || "") ? url.searchParams.get("to") : from;
+      const { results } = await env.DB.prepare(
+        `SELECT id, kind, category, amount, note, occurred_at FROM ledger
+         WHERE date(occurred_at) BETWEEN ? AND ? ORDER BY occurred_at DESC`
+      ).bind(from, to).all();
+      const totalIncome = results.filter(r => r.kind === "income").reduce((s, r) => s + r.amount, 0);
+      const totalExpense = results.filter(r => r.kind === "expense").reduce((s, r) => s + r.amount, 0);
+      const rows = results.map((r, i) => `<div class="card ${i % 2 === 0 ? "stripe-a" : "stripe-b"}"><div>
+        <strong>${r.kind === "income" ? "🟢" : "🔴"} ${(r.amount || 0).toFixed(2)}</strong> — ${escapeHtml(r.category || (r.kind === "income" ? t.income : t.expense))}<br>
+        <small>${r.occurred_at}${r.note ? ` · ${escapeHtml(r.note)}` : ""}</small>
+      </div></div>`).join("") || `<p class="empty">—</p>`;
+      const categoryOptions = EXPENSE_CATEGORIES.map(c => `<option value="${c}">${EXPENSE_CATEGORY_LABELS[lang][c]}</option>`).join("");
+      const form = `<form method="POST" action="/admin/ledger/expense${langQs}">
+        <label>${t.category}</label><select name="category">${categoryOptions}</select>
+        <label>${t.amount}</label><input name="amount" type="number" step="0.01" min="0.01" placeholder="${t.amountPh}" required>
+        <label>${t.note}</label><input name="note" placeholder="${t.notePh}">
+        <button type="submit">${t.addExpense}</button>
+      </form>`;
+      const filterForm = `<form method="GET" style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+        <label>${t.from}</label><input type="date" name="from" value="${from}">
+        <label>${t.to}</label><input type="date" name="to" value="${to}">
+        <button type="submit">${t.filter}</button>
+      </form>`;
+      const summary = `<p>${t.totalIncome}: <strong style="color:#1F9D55">${totalIncome.toFixed(2)}</strong> · ${t.totalExpense}: <strong style="color:var(--red)">${totalExpense.toFixed(2)}</strong> · ${t.net}: <strong>${(totalIncome - totalExpense).toFixed(2)}</strong></p>`;
+      return new Response(page(t.title, filterForm + summary + form + rows, { lang, toggleHref: toggleHref(url, lang), isOwner: roleAllowed(staffRole, ["owner"]) }), { headers: { "content-type": "text/html;charset=utf-8" } });
+    }
+
+    if (url.pathname === "/admin/ledger/expense" && request.method === "POST") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
+      const lang = langOf(url);
+      const form = await request.formData();
+      const category = (form.get("category") || "").toString().trim();
+      const amount = parseFloat((form.get("amount") || "").toString());
+      const note = (form.get("note") || "").toString().trim() || null;
+      if (EXPENSE_CATEGORIES.includes(category) && Number.isFinite(amount) && amount > 0) {
+        await env.DB.prepare("INSERT INTO ledger (kind, category, amount, note, created_by) VALUES ('expense', ?, ?, ?, ?)")
+          .bind(category, amount, note, staffEmail).run();
+      }
+      return Response.redirect(url.origin + "/admin/ledger" + (lang === "en" ? "?lang=en" : ""), 303);
+    }
+
+    const TEACHERS_I18N = {
+      ar: {
+        title: "الأساتذة", noShare: "لسه معملتش تسوية", perSession: "بالحصة", percent: "نسبة %",
+        settlement: "التسوية", attentionTitle: "⚠️ يحتاج متابعة", attentionEmpty: "الكل متسوّي، مفيش حد محتاج متابعة دلوقتي.",
+        owed: "مستحق"
+      },
+      en: {
+        title: "Teachers", noShare: "No payout share set", perSession: "Per session", percent: "Percent %",
+        settlement: "Settlement", attentionTitle: "⚠️ Needs follow-up", attentionEmpty: "Everyone's settled — nobody needs follow-up right now.",
+        owed: "owed"
+      }
     };
 
     const rejectMatch = url.pathname.match(/^\/admin\/students\/(\d+)\/reject$/);

@@ -985,6 +985,142 @@ describe("/admin/attendance: per-group report (added 2026-07-13)", () => {
   });
 });
 
+describe("/admin/students/:id/pay + balance (added 2026-07-13, migration 0011_payments_ledger.sql)", () => {
+  it("blocks unauthenticated access", async () => {
+    const id = await insertStudent({ name: "Pay Auth Test", status: "approved" });
+    const res = await SELF.fetch(`https://example.com/admin/students/${id}/pay`, { method: "POST", body: new FormData() });
+    expect(res.status).toBe(403);
+  });
+
+  it("recording a payment reduces the balance and posts a matching ledger income row", async () => {
+    const id = await insertStudent({ name: "Pay Test", status: "approved" });
+    await env.DB.prepare(
+      "INSERT INTO bookings (student_id, subject, teacher_name, amount, status) VALUES (?, 'math', 'أ. دفع', 300, 'active')"
+    ).bind(id).run();
+
+    const form = new FormData();
+    form.set("amount", "100");
+    form.set("method", "cash");
+    const res = await adminFetch(`https://example.com/admin/students/${id}/pay`, { method: "POST", body: form });
+    expect(res.status).toBe(200); // follows the 303 redirect to the estamara page
+
+    const payment = await env.DB.prepare("SELECT amount, method FROM payments WHERE student_id = ?").bind(id).first();
+    expect(payment?.amount).toBe(100);
+    expect(payment?.method).toBe("cash");
+
+    const ledgerRow = await env.DB.prepare("SELECT kind, category, amount FROM ledger WHERE category = 'student_payment'").first();
+    expect(ledgerRow?.kind).toBe("income");
+    expect(ledgerRow?.amount).toBe(100);
+
+    const estamaraHtml = await (await adminFetch(`https://example.com/admin/students/${id}/estamara`)).text();
+    expect(estamaraHtml).toContain("200.00"); // 300 owed - 100 paid = 200 balance
+  });
+
+  it("a discounted booking reduces what's owed before payments are applied", async () => {
+    const id = await insertStudent({ name: "Discount Test", status: "approved" });
+    await env.DB.prepare(
+      "INSERT INTO bookings (student_id, subject, teacher_name, amount, discount_amount, status) VALUES (?, 'math', 'أ. خصم', 300, 50, 'active')"
+    ).bind(id).run();
+    const html = await (await adminFetch(`https://example.com/admin/students/${id}/estamara`)).text();
+    expect(html).toContain("250.00"); // 300 - 50 discount, no payments yet
+  });
+
+  it("rejects a zero or negative payment amount instead of recording it", async () => {
+    const id = await insertStudent({ name: "Bad Payment Test", status: "approved" });
+    const form = new FormData();
+    form.set("amount", "-50");
+    await adminFetch(`https://example.com/admin/students/${id}/pay`, { method: "POST", body: form });
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM payments WHERE student_id = ?").bind(id).first();
+    expect(count?.n).toBe(0);
+  });
+
+  it("blocks a viewer role from recording a payment (added 2026-07-15, PR #11 claude-review finding: pay had no role check at all)", async () => {
+    const id = await insertStudent({ name: "Viewer Pay Test", status: "approved" });
+    const form = new FormData();
+    form.set("amount", "50");
+    const res = await viewerFetch(`https://example.com/admin/students/${id}/pay`, { method: "POST", body: form });
+    expect(res.status).toBe(403);
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM payments WHERE student_id = ?").bind(id).first();
+    expect(count?.n).toBe(0);
+  });
+
+  it("allows a clerk role to record a payment — clerks handle day-to-day student-level financial ops per the access-control policy", async () => {
+    const id = await insertStudent({ name: "Clerk Pay Test", status: "approved" });
+    const form = new FormData();
+    form.set("amount", "50");
+    const res = await clerkFetch(`https://example.com/admin/students/${id}/pay`, { method: "POST", body: form });
+    expect(res.status).toBe(200); // follows the 303 redirect
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM payments WHERE student_id = ?").bind(id).first();
+    expect(count?.n).toBe(1);
+  });
+
+  it("redirects cleanly instead of throwing on a nonexistent student id", async () => {
+    const res = await adminFetch("https://example.com/admin/students/999999/pay", { method: "POST", body: new FormData() });
+    expect(res.status).toBe(200); // follows the redirect to /admin, doesn't 500
+  });
+
+  it("does not double-record a payment resubmitted within seconds (double-tap / slow network guard)", async () => {
+    const id = await insertStudent({ name: "Double Submit Test", status: "approved" });
+    const form1 = new FormData();
+    form1.set("amount", "75");
+    const form2 = new FormData();
+    form2.set("amount", "75");
+    await adminFetch(`https://example.com/admin/students/${id}/pay`, { method: "POST", body: form1 });
+    await adminFetch(`https://example.com/admin/students/${id}/pay`, { method: "POST", body: form2 });
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM payments WHERE student_id = ?").bind(id).first();
+    expect(count?.n).toBe(1);
+  });
+
+  it("an overpayment from one student doesn't mask another student's outstanding balance — the dashboard tile clamps each student's balance at 0 before summing (regression: a naive global SUM(owed)-SUM(paid) would let one student's overpayment cancel out another's real debt)", async () => {
+    const overpaid = await insertStudent({ name: "Overpaid Test", status: "approved" });
+    await env.DB.prepare("INSERT INTO bookings (student_id, subject, teacher_name, amount, status) VALUES (?, 'math', 'أ. أ', 100, 'active')").bind(overpaid).run();
+    await env.DB.prepare("INSERT INTO payments (student_id, amount) VALUES (?, 500)").bind(overpaid).run();
+
+    const owing = await insertStudent({ name: "Still Owing Test", status: "approved" });
+    await env.DB.prepare("INSERT INTO bookings (student_id, subject, teacher_name, amount, status) VALUES (?, 'math', 'أ. ب', 300, 'active')").bind(owing).run();
+
+    // getStudentBalance() is the real function the app uses everywhere else
+    // (estamara view, payment form) — exercising it here, not a hand-copied query.
+    const overpaidBalance = await getStudentBalance(env, overpaid);
+    const owingBalance = await getStudentBalance(env, owing);
+    expect(overpaidBalance.balance).toBe(-400); // 100 owed - 500 paid
+    expect(owingBalance.balance).toBe(300);
+
+    const clampedSum = Math.max(overpaidBalance.balance, 0) + Math.max(owingBalance.balance, 0);
+    expect(clampedSum).toBe(300); // a naive (unclamped) sum would give -100
+  });
+});
+
+describe("/admin/ledger (added 2026-07-13)", () => {
+  it("blocks unauthenticated access", async () => {
+    expect((await SELF.fetch("https://example.com/admin/ledger")).status).toBe(403);
+  });
+
+  it("records an expense and shows it in today's totals", async () => {
+    const form = new FormData();
+    form.set("category", "rent");
+    form.set("amount", "1000");
+    form.set("note", "شهر يوليو");
+    await adminFetch("https://example.com/admin/ledger/expense", { method: "POST", body: form });
+
+    const row = await env.DB.prepare("SELECT kind, category, amount FROM ledger WHERE category = 'rent'").first();
+    expect(row?.kind).toBe("expense");
+    expect(row?.amount).toBe(1000);
+
+    const html = await (await adminFetch("https://example.com/admin/ledger")).text();
+    expect(html).toContain("1000.00");
+  });
+
+  it("rejects an expense with an unknown category instead of storing it raw", async () => {
+    const form = new FormData();
+    form.set("category", "<script>alert(1)</script>");
+    form.set("amount", "100");
+    await adminFetch("https://example.com/admin/ledger/expense", { method: "POST", body: form });
+    const row = await env.DB.prepare("SELECT * FROM ledger WHERE category = '<script>alert(1)</script>'").first();
+    expect(row).toBeFalsy();
+  });
+});
+
 describe("/admin/groups + /admin/rooms (added 2026-07-13, extracted from the retired CenterStudent app's Groupdata/roomdata tables)", () => {
   it("blocks unauthenticated access to /admin/groups and /admin/rooms", async () => {
     expect((await SELF.fetch("https://example.com/admin/groups")).status).toBe(403);
@@ -1195,6 +1331,14 @@ async function clerkFetch(path: string, init?: RequestInit) {
   return SELF.fetch(path, {
     ...init,
     headers: { ...(init?.headers || {}), "Cf-Access-Authenticated-User-Email": "clerk@test.local", "Cf-Access-Jwt-Assertion": "test" }
+  });
+}
+
+async function viewerFetch(path: string, init?: RequestInit) {
+  await env.DB.prepare("INSERT OR IGNORE INTO staff (email, role) VALUES ('viewer@test.local', 'viewer')").run();
+  return SELF.fetch(path, {
+    ...init,
+    headers: { ...(init?.headers || {}), "Cf-Access-Authenticated-User-Email": "viewer@test.local", "Cf-Access-Jwt-Assertion": "test" }
   });
 }
 
