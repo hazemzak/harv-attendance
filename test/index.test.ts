@@ -2163,7 +2163,7 @@ describe("/public/roster: column-scoped public endpoint for harvcentereg.com (ad
     ).run();
     const body = await (await SELF.fetch("https://example.com/public/roster")).json() as any;
     const t = body.teachers.find((x: any) => x.id === "roster-test-1");
-    expect(t).toMatchObject({ name: "أ. تيست", subject: "math", subject_label: "رياضيات", photo: "teachers/roster-test.jpg" });
+    expect(t).toMatchObject({ name: "أ. تيست", subject: "math", subjectLabel: "رياضيات", photo: "teachers/roster-test.jpg" });
   });
 
   it("never leaks payroll columns (share_type/share_value) even though they're on the same row", async () => {

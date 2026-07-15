@@ -2931,8 +2931,12 @@ ${isOwnerGuide ? sec("s-owner", "⚙️ إدارة (مدير بس)", `
     // verdict once the public site turned out not to be git-connected at
     // all) — full reasoning in HARV_ATTENDANCE_SUPPORT_PLAYBOOK.md.
     if (url.pathname === "/public/roster" && request.method === "GET") {
+      // subjectLabel is camelCase (not the raw subject_label column name) to
+      // match the exact contract data/teachers.json already used — the site's
+      // rendering code reads t.subjectLabel at several call sites, and this
+      // keeps the "zero rendering changes needed" claim true.
       const teachers = await env.DB.prepare(
-        "SELECT id, name, subject, subject_label, phase, mode, schedule, track, photo FROM teachers"
+        "SELECT id, name, subject, subject_label AS subjectLabel, phase, mode, schedule, track, photo FROM teachers"
       ).all();
       const sessions = await env.DB.prepare(
         `SELECT g.teacher_name, g.subject, g.stage, g.day, g.time, r.name AS room
