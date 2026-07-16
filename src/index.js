@@ -383,6 +383,73 @@ function validateDayTimeRange(day, from, to) {
   return null;
 }
 
+// Maps JS Date.getUTCDay() (0=Sun) to this app's day-of-week slug (sat/sun/.../fri).
+const JS_DAY_TO_SLUG = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+
+// The center is Cairo-only (no DST currently observed) and Date.now() is
+// UTC — same fixed +3h offset already used for scan-time display
+// (strftime('%H:%M', scanned_at, '+3 hours')), applied here so day-of-week/
+// time-of-day comparisons against staff-entered group times (also Cairo
+// local) line up. Unlike the plain new Date().toISOString().slice(0,10)
+// "today" used elsewhere in this file for date-only filters, this one needs
+// the real local clock time, not just the date.
+function cairoNow() {
+  const d = new Date(Date.now() + 3 * 60 * 60 * 1000);
+  return { day: JS_DAY_TO_SLUG[d.getUTCDay()], hhmm: `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}` };
+}
+
+// HH:MM +/- minutes, clamped to one day (00:00-23:59) rather than wrapping —
+// matches this file's existing BUSINESS_CLOSE convention of treating
+// midnight as a hard boundary, not a real day-wraparound case.
+function shiftTime(hhmm, deltaMinutes) {
+  const [h, m] = hhmm.split(":").map(Number);
+  const total = Math.max(0, Math.min(1439, h * 60 + m + deltaMinutes));
+  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+}
+
+const SCAN_WINDOW_MINUTES = 15;
+function isExpectedNow(startTime, endTime, hhmm) {
+  return hhmm >= shiftTime(startTime, -SCAN_WINDOW_MINUTES) && hhmm <= shiftTime(endTime, SCAN_WINDOW_MINUTES);
+}
+
+// Scanner auto-categorization (feature #1, locked decisions in
+// project_harv_attendance_feature_requests_2026_07_15): a lesson is
+// "expected now" within a +/-15min rolling window around its scheduled
+// start/end. Intersects that window against the student's real active
+// bookings, so a scan auto-resolves to the one group they're actually
+// supposed to be in right now instead of the clerk picking a group first.
+// mode: "auto" (exactly 1 match, groupId set) / "ambiguous" (2+ concurrent
+// groups in different halls, candidates set, staff picks) / "none" (0
+// matches — caller falls back to markAttendance's existing ungrouped path).
+async function resolveExpectedGroup(env, studentId) {
+  const { day, hhmm } = cairoNow();
+  const { results } = await env.DB.prepare(
+    `SELECT g.id, g.teacher_name, g.subject, g.start_time, g.end_time, r.name AS room_name
+     FROM groups g
+     JOIN bookings b ON b.group_id = g.id AND b.status = 'active' AND b.student_id = ?
+     LEFT JOIN rooms r ON r.id = g.room_id
+     WHERE g.active = 1 AND g.day = ? AND g.start_time IS NOT NULL AND g.end_time IS NOT NULL`
+  ).bind(studentId, day).all();
+  const candidates = results.filter(g => isExpectedNow(g.start_time, g.end_time, hhmm));
+  if (candidates.length === 1) return { mode: "auto", groupId: candidates[0].id };
+  if (candidates.length > 1) return { mode: "ambiguous", candidates: candidates.map(c => ({ id: c.id, teacher_name: c.teacher_name, subject: c.subject, room_name: c.room_name })) };
+  return { mode: "none" };
+}
+
+// For /admin/counter's landing view — every lesson expected right now across
+// all halls, independent of any one student (unlike resolveExpectedGroup
+// above, which is scoped to a scanned student's own bookings).
+async function getExpectedNowGroups(env) {
+  const { day, hhmm } = cairoNow();
+  const { results } = await env.DB.prepare(
+    `SELECT g.id, g.teacher_name, g.subject, g.start_time, g.end_time, r.name AS room_name
+     FROM groups g LEFT JOIN rooms r ON r.id = g.room_id
+     WHERE g.active = 1 AND g.day = ? AND g.start_time IS NOT NULL AND g.end_time IS NOT NULL
+     ORDER BY r.name, g.start_time`
+  ).bind(day).all();
+  return results.filter(g => isExpectedNow(g.start_time, g.end_time, hhmm));
+}
+
 // Two active groups conflict when they share a teacher OR a hall, land on the
 // same day, and their time ranges overlap. Warn-only — used by both the group
 // edit form and the scheduling grid, never blocks a save (a center may
@@ -3038,18 +3105,39 @@ export default {
     // visits would silently mark a student present).
     if (url.pathname === "/admin/scan-mark" && request.method === "POST") {
       const form = await request.formData();
+      const studentId = (form.get("student") || "").toString();
       const groupParam = parseInt((form.get("group") || "").toString(), 10);
-      const hasGroup = Number.isFinite(groupParam);
-      const r = await markAttendance(env, (form.get("student") || "").toString(), hasGroup ? groupParam : null);
+      // Three ways a scan reaches this endpoint: (1) an explicit group id —
+      // the counter is pinned to a known class (deep-linked from
+      // /admin/groups, or this POST is an ambiguity-picker re-submit); (2)
+      // explicit general=1 — staff opted out of auto-detection on purpose;
+      // (3) neither — the default bare-landing flow, auto-categorize against
+      // the student's own schedule (feature #1, see resolveExpectedGroup()).
+      const explicitGroup = Number.isFinite(groupParam);
+      const isGeneral = form.get("general") === "1";
+
+      let resolvedGroupId = explicitGroup ? groupParam : null;
+      let notExpected = false;
+      if (!explicitGroup && !isGeneral) {
+        const resolved = await resolveExpectedGroup(env, studentId);
+        if (resolved.mode === "ambiguous") {
+          return new Response(JSON.stringify({ result: "ambiguous", candidates: resolved.candidates }), { headers: { "content-type": "application/json" } });
+        }
+        if (resolved.mode === "auto") resolvedGroupId = resolved.groupId;
+        else notExpected = true; // mode === "none" — falls through to the existing ungrouped path
+      }
+
+      const r = await markAttendance(env, studentId, resolvedGroupId);
       // Live running count for the counter kiosk, so whoever's scanning always
       // knows how many have come through today for this class (or overall, if
       // scanning unpinned) — server-truth on every scan, not a client tally
       // that could drift on page reload or a second device scanning the same
       // group. Only attached for real attendance outcomes (marked/already) —
-      // not_found/pending responses stay exactly as before.
+      // not_found/pending/invalid_group responses stay exactly as before.
       if (r.result === "marked" || r.result === "already") {
-        const countRow = hasGroup
-          ? await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE group_id = ? AND date(scanned_at) = date('now')").bind(groupParam).first()
+        if (notExpected) r.notExpected = true;
+        const countRow = resolvedGroupId !== null
+          ? await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE group_id = ? AND date(scanned_at) = date('now')").bind(resolvedGroupId).first()
           : await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE group_id IS NULL AND date(scanned_at) = date('now')").first();
         r.count = countRow.n;
       }
@@ -3080,48 +3168,62 @@ export default {
              FROM groups g LEFT JOIN rooms r ON r.id = g.room_id WHERE g.id = ? AND g.active = 1`
           ).bind(groupParam).first()
         : null;
-      // No group in the URL and none picked yet — offer a lightweight picker
-      // right here (mirrors /admin/attendance's picker) instead of sending
-      // whoever's about to scan to the full groups-management page. Answers
-      // Hazem's "make sure they know what's going on where" directly: you pick
-      // your class before you start scanning, not after.
+      const isGeneralMode = !pinnedGroup && url.searchParams.get("general") === "1";
+      // Bare landing (no pin, no general=1): feature #1, scanner
+      // auto-categorization. Replaces the old "pick your group first" picker
+      // entirely — the scan input is always focused below, and each scan
+      // auto-resolves its own group via resolveExpectedGroup(). This "expected
+      // right now" list is purely informational (what's running, per hall)
+      // plus an explicit pin shortcut per lesson for staff who want to lock
+      // the counter to one known class on purpose.
+      const isAutoMode = !pinnedGroup && !isGeneralMode;
       let pinnedBanner;
       if (pinnedGroup) {
         const roomBadge = pinnedGroup.room_name ? ` · 🚪 ${escapeHtml(pinnedGroup.room_name)}` : "";
         const pinnedTime = pinnedGroup.start_time ? `${pinnedGroup.start_time}–${pinnedGroup.end_time}` : "";
         pinnedBanner = `<p class="counter-pinned">🗂️ ${escapeHtml(pinnedGroup.teacher_name)} — ${subjectsDisplay("ar", pinnedGroup.subject)} · ${escapeHtml([pinnedGroup.day, pinnedTime].filter(Boolean).join(" "))}${roomBadge} <a href="/admin/counter">(إلغاء التثبيت)</a></p>`;
       } else if (Number.isFinite(groupParam)) {
-        pinnedBanner = `<p class="counter-pinned">المجموعة دي مش موجودة. <a href="/admin/counter">اختار تاني</a></p>`;
+        pinnedBanner = `<p class="counter-pinned">المجموعة دي مش موجودة. <a href="/admin/counter">ارجع للوضع التلقائي</a></p>`;
+      } else if (isGeneralMode) {
+        pinnedBanner = `<p class="counter-pinned">📎 بتمسح عام دلوقتي (من غير ربط بمجموعة) · <a href="/admin/counter">ارجع للوضع التلقائي</a></p>`;
       } else {
-        const activeGroups = await getGroupsWithSeats(env, { activeOnly: true });
-        const picker = activeGroups.length
-          ? `<div class="pending-actions" style="justify-content:center;flex-wrap:wrap">${activeGroups.map(g =>
-              `<a href="/admin/counter?group=${g.id}"><button type="button">${escapeHtml(g.teacher_name)} — ${subjectsDisplay("ar", g.subject)}</button></a>`
+        const expectedNow = await getExpectedNowGroups(env);
+        const expectedList = expectedNow.length
+          ? `<div class="pending-actions" style="justify-content:center;flex-wrap:wrap">${expectedNow.map(g =>
+              `<a href="/admin/counter?group=${g.id}"><button type="button">${g.room_name ? `🚪 ${escapeHtml(g.room_name)} — ` : ""}${escapeHtml(g.teacher_name)} — ${subjectsDisplay("ar", g.subject)}</button></a>`
             ).join("")}</div>`
-          : "";
-        pinnedBanner = `<p class="counter-pinned">اختار المجموعة اللي هتمسح لها، أو <a href="/admin/counter?general=1">امسح عام من غير مجموعة</a>.</p>${picker}`;
+          : `<p class="empty">مفيش حصص متوقعة دلوقتي.</p>`;
+        pinnedBanner = `<p class="counter-pinned">🕒 الحصص المتوقعة دلوقتي — امسح مباشرة وهيتسجل تلقائي في الحصة الصح، أو دوس على حصة عشان تثبت السكانر عليها:</p>${expectedList}<p class="counter-pinned"><a href="/admin/counter?general=1">امسح عام من غير ربط بمجموعة</a></p>`;
       }
-      const isGeneralMode = !pinnedGroup && url.searchParams.get("general") === "1";
-      const showScanUi = pinnedGroup || isGeneralMode;
-      const initialCount = showScanUi
-        ? (pinnedGroup
-            ? await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE group_id = ? AND date(scanned_at) = date('now')").bind(pinnedGroup.id).first()
-            : await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE group_id IS NULL AND date(scanned_at) = date('now')").first())
-        : { n: 0 };
-      // Recently-scanned table (2026-07-14): staff asked to see who just came
-      // through, not just a running number — scoped to this counter's own
-      // context (its pinned group/room, or general/ungrouped), same as the count above.
-      const recentScans = showScanUi
+      const initialCount = pinnedGroup
+        ? await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE group_id = ? AND date(scanned_at) = date('now')").bind(pinnedGroup.id).first()
+        : isGeneralMode
+          ? await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE group_id IS NULL AND date(scanned_at) = date('now')").first()
+          : await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE date(scanned_at) = date('now')").first();
+      // Recently-scanned table (2026-07-14, extended 2026-07-16 for auto mode):
+      // staff asked to see who just came through, not just a running number —
+      // scoped to this counter's own context (its pinned group/room, general/
+      // ungrouped, or — new — every scan today when auto-detecting, since each
+      // scan can land in a different group). The room/session column only
+      // renders in auto mode (pinned/general already state their own single
+      // context in the banner above, per row would be redundant there).
+      const recentScans = pinnedGroup
         ? await env.DB.prepare(
-            pinnedGroup
-              ? `SELECT s.id, s.name, s.stage, s.class, a.scanned_at FROM attendance a JOIN students s ON s.id = a.student_id
-                 WHERE a.group_id = ? AND date(a.scanned_at) = date('now') ORDER BY a.scanned_at DESC LIMIT 10`
-              : `SELECT s.id, s.name, s.stage, s.class, a.scanned_at FROM attendance a JOIN students s ON s.id = a.student_id
-                 WHERE a.group_id IS NULL AND date(a.scanned_at) = date('now') ORDER BY a.scanned_at DESC LIMIT 10`
-          ).bind(...(pinnedGroup ? [pinnedGroup.id] : [])).all()
-        : { results: [] };
+            `SELECT s.id, s.name, s.stage, s.class, a.scanned_at FROM attendance a JOIN students s ON s.id = a.student_id
+             WHERE a.group_id = ? AND date(a.scanned_at) = date('now') ORDER BY a.scanned_at DESC LIMIT 10`
+          ).bind(pinnedGroup.id).all()
+        : isGeneralMode
+          ? await env.DB.prepare(
+              `SELECT s.id, s.name, s.stage, s.class, a.scanned_at FROM attendance a JOIN students s ON s.id = a.student_id
+               WHERE a.group_id IS NULL AND date(a.scanned_at) = date('now') ORDER BY a.scanned_at DESC LIMIT 10`
+            ).all()
+          : await env.DB.prepare(
+              `SELECT s.id, s.name, s.stage, s.class, a.scanned_at, r.name AS room_name FROM attendance a
+               JOIN students s ON s.id = a.student_id LEFT JOIN groups g ON g.id = a.group_id LEFT JOIN rooms r ON r.id = g.room_id
+               WHERE date(a.scanned_at) = date('now') ORDER BY a.scanned_at DESC LIMIT 10`
+            ).all();
       const recentRowsHtml = recentScans.results.map(r =>
-        `<tr><td><a href="/admin/students/${r.id}/estamara">${escapeHtml(r.name)}</a></td><td>${escapeHtml(r.stage || r.class || "")}</td><td>${escapeHtml(r.scanned_at)}</td></tr>`
+        `<tr><td><a href="/admin/students/${r.id}/estamara">${escapeHtml(r.name)}</a></td><td>${escapeHtml(r.stage || r.class || "")}</td>${isAutoMode ? `<td>${escapeHtml(r.room_name || "عام")}</td>` : ""}<td>${escapeHtml(r.scanned_at)}</td></tr>`
       ).join("");
       const body = `<style>
 .counter-wrap{max-width:480px;margin:0 auto;text-align:center}
@@ -3130,21 +3232,23 @@ export default {
 .counter-status{border:3px solid var(--line);border-radius:16px;padding:32px 20px;font-size:20px;min-height:120px;display:flex;align-items:center;justify-content:center;gap:14px}
 .counter-status.ok{border-color:#1F9D55;background:#F0FBF4}
 .counter-status.warn{border-color:var(--red);background:#FFF5F5}
+.counter-status .counter-notexpected{display:block;font-size:13px;font-weight:600;color:var(--red);margin-top:6px}
 .counter-count{font-size:15px;color:var(--muted);margin-top:12px}
 .counter-photo{width:48px;height:48px;border-radius:50%;object-fit:cover;flex-shrink:0}
 .counter-recent{width:100%;border-collapse:collapse;margin-top:24px;font-size:14px;text-align:start}
 .counter-recent th,.counter-recent td{border-bottom:1px solid var(--line);padding:8px 6px;text-align:start}
 .counter-recent th{color:var(--muted);font-weight:600}
+.counter-pick{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:14px}
 </style>
 <div class="counter-wrap">
   ${pinnedBanner}
-  ${showScanUi ? `
   <p>وجّه سكانر الاستقبال على كود QR بتاع الطالب — الشاشة دي مش محتاجة أي دوسة بينهم.</p>
   <div id="counter-status" class="counter-status"><span>جاهز للمسح</span></div>
-  <p class="counter-count">عدد اللي حضروا النهاردة: <strong id="counter-count">${initialCount.n}</strong></p>
-  <input id="counter-input" class="counter-input" autocomplete="off" data-group="${pinnedGroup ? pinnedGroup.id : ""}">
+  <div id="counter-pick" class="counter-pick" hidden></div>
+  <p class="counter-count">عدد اللي حضروا النهاردة${isAutoMode ? " (كل الحصص)" : ""}: <strong id="counter-count">${initialCount.n}</strong></p>
+  <input id="counter-input" class="counter-input" autocomplete="off" data-group="${pinnedGroup ? pinnedGroup.id : isGeneralMode ? "general" : ""}">
   <table class="counter-recent">
-    <thead><tr><th>الاسم</th><th>الصف</th><th>الوقت</th></tr></thead>
+    <thead><tr><th>الاسم</th><th>الصف</th>${isAutoMode ? "<th>الحصة</th>" : ""}<th>الوقت</th></tr></thead>
     <tbody id="counter-recent-body">${recentRowsHtml}</tbody>
   </table>
   <p class="empty" id="counter-recent-empty" ${recentScans.results.length ? "hidden" : ""}>محدش اتسجل لسه.</p>
@@ -3152,9 +3256,12 @@ export default {
   (function(){
     var input = document.getElementById("counter-input");
     var status = document.getElementById("counter-status");
+    var pickWrap = document.getElementById("counter-pick");
     var countEl = document.getElementById("counter-count");
     var recentBody = document.getElementById("counter-recent-body");
     var recentEmpty = document.getElementById("counter-recent-empty");
+    var isAutoMode = ${isAutoMode ? "true" : "false"};
+    var pendingStudentId = null;
     function focusInput(){ input.focus(); }
     focusInput();
     document.addEventListener("click", focusInput);
@@ -3162,7 +3269,7 @@ export default {
     // textContent throughout (never innerHTML with a concatenated student
     // name) — a scan result carries a real DB value we don't control the
     // shape of, same reasoning as the escapeHtml() convention server-side.
-    function setStatus(cls, photoUrl, text){
+    function setStatus(cls, photoUrl, text, notExpectedText){
       status.className = "counter-status " + cls;
       status.textContent = "";
       if (photoUrl) {
@@ -3171,14 +3278,25 @@ export default {
         img.src = photoUrl;
         status.appendChild(img);
       }
+      var wrap = document.createElement("span");
       var span = document.createElement("span");
       span.textContent = text;
-      status.appendChild(span);
+      wrap.appendChild(span);
+      if (notExpectedText) {
+        var ne = document.createElement("span");
+        ne.className = "counter-notexpected";
+        ne.textContent = notExpectedText;
+        wrap.appendChild(ne);
+      }
+      status.appendChild(wrap);
     }
-    function prependRecent(r){
+    function prependRecent(r, sessionLabel){
       recentEmpty.hidden = true;
       var tr = document.createElement("tr");
-      [r.name, r.stage || "", new Date().toLocaleTimeString("ar-EG")].forEach(function(v){
+      var cells = [r.name, r.stage || ""];
+      if (isAutoMode) cells.push(sessionLabel || "عام");
+      cells.push(new Date().toLocaleTimeString("ar-EG"));
+      cells.forEach(function(v){
         var td = document.createElement("td");
         td.textContent = v;
         tr.appendChild(td);
@@ -3186,18 +3304,11 @@ export default {
       recentBody.insertBefore(tr, recentBody.firstChild);
       while (recentBody.children.length > 10) recentBody.removeChild(recentBody.lastChild);
     }
-    input.addEventListener("keydown", function(e){
-      if (e.key !== "Enter") return;
-      e.preventDefault();
-      var raw = input.value.trim();
-      input.value = "";
-      var id = null;
-      try { id = new URL(raw).searchParams.get("student"); } catch (err) {}
-      if (!id) { var m = raw.match(/student=(\\d+)/); if (m) id = m[1]; }
-      if (!id && /^\\d+$/.test(raw)) id = raw;
-      if (!id) { setStatus("warn", null, "كود مش معروف"); return; }
-      var body = "student=" + encodeURIComponent(id);
-      if (input.dataset.group) body += "&group=" + encodeURIComponent(input.dataset.group);
+    function submitScan(studentId, explicitGroup){
+      var body = "student=" + encodeURIComponent(studentId);
+      if (explicitGroup) body += "&group=" + encodeURIComponent(explicitGroup);
+      else if (input.dataset.group === "general") body += "&general=1";
+      else if (input.dataset.group) body += "&group=" + encodeURIComponent(input.dataset.group);
       fetch("/admin/scan-mark", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: body })
         .then(function(r){ return r.json(); })
         .then(function(r){
@@ -3205,14 +3316,50 @@ export default {
           if (r.result === "not_found") { setStatus("warn", null, "الطالب غير موجود"); return; }
           if (r.result === "pending") { setStatus("warn", null, r.name + " — التسجيل أو الدفع لسه معلّق"); return; }
           if (r.result === "invalid_group") { setStatus("warn", null, "المجموعة دي مش متاحة للمسح دلوقتي"); return; }
+          if (r.result === "ambiguous") {
+            // Real ambiguity: the scanned student has 2+ concurrent classes
+            // running right now in different halls — staff picks which one
+            // this specific scan belongs to, per the locked feature #1
+            // decision (only interrupts when genuinely ambiguous).
+            pendingStudentId = studentId;
+            setStatus("warn", null, "الطالب ده في أكتر من حصة دلوقتي — اختار واحدة:");
+            pickWrap.textContent = "";
+            pickWrap.hidden = false;
+            r.candidates.forEach(function(c){
+              var btn = document.createElement("button");
+              btn.type = "button";
+              btn.textContent = (c.room_name ? "🚪 " + c.room_name + " — " : "") + c.teacher_name;
+              btn.addEventListener("click", function(){
+                pickWrap.hidden = true;
+                pickWrap.textContent = "";
+                submitScan(pendingStudentId, c.id);
+              });
+              pickWrap.appendChild(btn);
+            });
+            return;
+          }
           var label = r.name + (r.stage ? " · " + r.stage : "") + (r.result === "marked" ? " — تم تسجيل الحضور ✅" : " — مسجل حضور بالفعل اليوم");
-          setStatus("ok", r.photoUrl, label);
-          prependRecent(r);
+          setStatus("ok", r.photoUrl, label, r.notExpected ? "⚠️ مش متوقع دلوقتي" : null);
+          prependRecent(r, r.roomName);
         })
         .catch(function(){ setStatus("warn", null, "في مشكلة في الاتصال — جرب تاني"); });
+    }
+    input.addEventListener("keydown", function(e){
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      var raw = input.value.trim();
+      input.value = "";
+      pickWrap.hidden = true;
+      pickWrap.textContent = "";
+      var id = null;
+      try { id = new URL(raw).searchParams.get("student"); } catch (err) {}
+      if (!id) { var m = raw.match(/student=(\\d+)/); if (m) id = m[1]; }
+      if (!id && /^\\d+$/.test(raw)) id = raw;
+      if (!id) { setStatus("warn", null, "كود مش معروف"); return; }
+      submitScan(id, null);
     });
   })();
-  </script>` : ""}
+  </script>
 </div>`;
       return new Response(page("سكانر الاستقبال", body, { isOwner: roleAllowed(staffRole, ["owner"]) }), { headers: { "content-type": "text/html;charset=utf-8" } });
     }
