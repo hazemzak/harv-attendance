@@ -1503,6 +1503,47 @@ describe("/admin/groups: structured day/start_time/end_time + edit route (added 
     expect(row).toEqual({ day: "wed", start_time: "16:00", end_time: "18:00" });
   });
 
+  it("persists an optional series_key linking two weekly sessions of the same class (added 2026-07-17)", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-groups-series-1', 'أ. سلسلة', 'math')").run();
+    const form = new FormData();
+    form.set("teacher_id", "t-groups-series-1");
+    form.set("subject", "math");
+    form.set("day", "wed");
+    form.set("start_time", "16:00");
+    form.set("end_time", "18:00");
+    form.set("series_key", "my-twice-weekly-class");
+    const res = await adminFetch("https://example.com/admin/groups", { method: "POST", body: form, redirect: "manual" });
+    expect(res.status).toBe(303);
+    const row = await env.DB.prepare("SELECT series_key FROM groups WHERE teacher_name = 'أ. سلسلة'").first() as any;
+    expect(row.series_key).toBe("my-twice-weekly-class");
+  });
+
+  it("leaves series_key NULL when the field is left blank", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-groups-series-2', 'أ. بدون سلسلة', 'math')").run();
+    const form = new FormData();
+    form.set("teacher_id", "t-groups-series-2");
+    form.set("subject", "math");
+    const res = await adminFetch("https://example.com/admin/groups", { method: "POST", body: form, redirect: "manual" });
+    expect(res.status).toBe(303);
+    const row = await env.DB.prepare("SELECT series_key FROM groups WHERE teacher_name = 'أ. بدون سلسلة'").first() as any;
+    expect(row.series_key).toBeNull();
+  });
+
+  it("edit route updates series_key, and the edit form pre-fills the current value", async () => {
+    const { meta } = await env.DB.prepare(
+      "INSERT INTO groups (teacher_id, teacher_name, subject, series_key) VALUES ('t-groups-series-2', 'أ. بدون سلسلة', 'math', 'old-key')"
+    ).run();
+    const prefillHtml = await (await adminFetch(`https://example.com/admin/groups/${meta.last_row_id}/edit`)).text();
+    expect(prefillHtml).toContain('value="old-key"');
+    const form = new FormData();
+    form.set("teacher_id", "t-groups-series-2");
+    form.set("subject", "math");
+    form.set("series_key", "new-key");
+    await adminFetch(`https://example.com/admin/groups/${meta.last_row_id}/edit`, { method: "POST", body: form });
+    const row = await env.DB.prepare("SELECT series_key FROM groups WHERE id = ?").bind(meta.last_row_id).first() as any;
+    expect(row.series_key).toBe("new-key");
+  });
+
   it("rejects a non-slug day (old free-text style) instead of storing it raw", async () => {
     await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-groups-time-2', 'أ. يوم حر', 'math')").run();
     const form = new FormData();
@@ -1670,11 +1711,125 @@ describe("/admin/schedule: weekly grid across halls (added 2026-07-16)", () => {
     for (const m of ownTiles) expect(m[1]).not.toContain("sched-tile--conflict");
   });
 
-  it("lists a group with no hall or no time in the unassigned section instead of hiding it", async () => {
+  it("lists a group with no time at all in the unassigned section instead of hiding it", async () => {
     await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-unassigned', 'أ. غير محدد', 'math')").run();
     await env.DB.prepare("INSERT INTO groups (teacher_id, teacher_name, subject, active) VALUES ('t-sched-unassigned', 'أ. غير محدد', 'math', 1)").run();
     const html = await (await adminFetch("https://example.com/admin/schedule")).text();
     expect(html).toContain("أ. غير محدد");
+  });
+
+  describe("General tab (added 2026-07-17)", () => {
+    it("renders a tab for العام alongside the real halls", async () => {
+      const html = await (await adminFetch("https://example.com/admin/schedule")).text();
+      expect(html).toContain("العام");
+      expect(html).toContain("hall=general");
+    });
+
+    it("shows a scheduled-but-hall-less group in the General grid, flagged as needing a hall -- and no longer in the flat unassigned list, and not on any real hall tab", async () => {
+      await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-nohall', 'أ. بلا قاعة', 'math')").run();
+      await env.DB.prepare(
+        "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES ('t-sched-nohall', 'أ. بلا قاعة', 'math', 'wed', '17:00', '19:00', NULL, 1)"
+      ).run();
+      const generalHtml = await (await adminFetch("https://example.com/admin/schedule?hall=general")).text();
+      expect(generalHtml).toContain("أ. بلا قاعة");
+      // Scoped to this teacher's own tile (not a bare substring check) --
+      // ".sched-nohall-badge{...}" is always present in the page's own
+      // <style> block regardless of any real badge, so a bare toContain()
+      // here would pass even with a real bug.
+      const ownTile = [...generalHtml.matchAll(/<a class="(sched-tile[^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].find(m => m[2].includes("أ. بلا قاعة"));
+      expect(ownTile?.[2]).toContain("sched-nohall-badge");
+      // narrowed unassigned list only holds groups with no time at all now --
+      // a hall-less-but-scheduled group's home is the General grid instead
+      expect(generalHtml.indexOf("مجموعات بدون ميعاد") === -1 || !generalHtml.slice(generalHtml.indexOf("مجموعات بدون ميعاد")).includes("أ. بلا قاعة")).toBe(true);
+      const rooms = (await env.DB.prepare("SELECT id FROM rooms ORDER BY id LIMIT 1").all()).results as any[];
+      const hallHtml = await (await adminFetch(`https://example.com/admin/schedule?hall=${rooms[0].id}`)).text();
+      expect(hallHtml).not.toContain("أ. بلا قاعة");
+    });
+
+    it("shows a real hall-assigned group in the General grid too, with its room name", async () => {
+      await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-general-hall', 'أ. جدول عام', 'math')").run();
+      const room = (await env.DB.prepare("SELECT id, name FROM rooms ORDER BY id LIMIT 1").first()) as any;
+      await env.DB.prepare(
+        "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES ('t-sched-general-hall', 'أ. جدول عام', 'math', 'thu', '17:00', '19:00', ?, 1)"
+      ).bind(room.id).run();
+      const html = await (await adminFetch("https://example.com/admin/schedule?hall=general")).text();
+      expect(html).toContain("أ. جدول عام");
+      expect(html).toContain(room.name);
+    });
+
+    it("is read-only -- renders no '+' create-cell links", async () => {
+      const html = await (await adminFetch("https://example.com/admin/schedule?hall=general")).text();
+      expect(html).not.toContain('class="sched-cell"'); // the CSS block itself legitimately contains ".sched-cell{...}"
+      expect(html).not.toContain("/admin/groups/new?hall=");
+    });
+
+    it("still links a flagged tile to the real group edit form, not an inline hall picker", async () => {
+      await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-general-link', 'أ. رابط عام', 'math')").run();
+      const { meta } = await env.DB.prepare(
+        "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES ('t-sched-general-link', 'أ. رابط عام', 'math', 'fri', '17:00', '19:00', NULL, 1)"
+      ).run();
+      const html = await (await adminFetch("https://example.com/admin/schedule?hall=general")).text();
+      expect(html).toContain(`/admin/groups/${meta.last_row_id}/edit`);
+    });
+  });
+
+  describe("series_key weekly-recurrence badge (added 2026-07-17)", () => {
+    it("shows the x2-weekly badge on both of two groups sharing a series_key", async () => {
+      await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-series', 'أ. مرتين أسبوعيًا', 'math')").run();
+      const room = (await env.DB.prepare("SELECT id FROM rooms ORDER BY id LIMIT 1").first()) as any;
+      await env.DB.prepare(
+        "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active, series_key) VALUES ('t-sched-series', 'أ. مرتين أسبوعيًا', 'math', 'sat', '17:00', '19:00', ?, 1, 'series-test-a')"
+      ).bind(room.id).run();
+      await env.DB.prepare(
+        "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active, series_key) VALUES ('t-sched-series', 'أ. مرتين أسبوعيًا', 'math', 'sun', '17:00', '19:00', ?, 1, 'series-test-a')"
+      ).bind(room.id).run();
+      const html = await (await adminFetch(`https://example.com/admin/schedule?hall=${room.id}`)).text();
+      // Extract each tile as its own <a>...</a> block first (same technique
+      // as the conflict-badge test above) -- a bare substring count would
+      // also match ".sched-weekly-badge{...}" in the page's own <style> block.
+      const allTiles = [...html.matchAll(/<a class="(sched-tile[^"]*)"[^>]*>([\s\S]*?)<\/a>/g)];
+      const ownTiles = allTiles.filter(m => m[2].includes("أ. مرتين أسبوعيًا"));
+      expect(ownTiles.length).toBe(2);
+      for (const m of ownTiles) expect(m[2]).toContain("sched-weekly-badge");
+    });
+
+    it("does not show the badge on a group with no series_key, or one whose series_key is unique to it", async () => {
+      await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-noseries', 'أ. مرة واحدة', 'math')").run();
+      const room = (await env.DB.prepare("SELECT id FROM rooms ORDER BY id LIMIT 1").first()) as any;
+      await env.DB.prepare(
+        "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES ('t-sched-noseries', 'أ. مرة واحدة', 'math', 'mon', '17:00', '19:00', ?, 1)"
+      ).bind(room.id).run();
+      const html = await (await adminFetch(`https://example.com/admin/schedule?hall=${room.id}`)).text();
+      const tile = [...html.matchAll(/<a class="(sched-tile[^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].find(m => m[2].includes("أ. مرة واحدة"));
+      expect(tile?.[2]).not.toContain("sched-weekly-badge");
+    });
+  });
+
+  describe("stage (year) shown on the tile itself (added 2026-07-17)", () => {
+    it("shows the group's stage on its tile, on a real hall tab and on General", async () => {
+      await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-stage', 'أ. مرحلة', 'math')").run();
+      const room = (await env.DB.prepare("SELECT id FROM rooms ORDER BY id LIMIT 1").first()) as any;
+      await env.DB.prepare(
+        "INSERT INTO groups (teacher_id, teacher_name, subject, stage, day, start_time, end_time, room_id, active) VALUES ('t-sched-stage', 'أ. مرحلة', 'math', 'تالتة ثانوي', 'mon', '17:00', '19:00', ?, 1)"
+      ).bind(room.id).run();
+      const hallHtml = await (await adminFetch(`https://example.com/admin/schedule?hall=${room.id}`)).text();
+      const hallTile = [...hallHtml.matchAll(/<a class="(sched-tile[^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].find(m => m[2].includes("أ. مرحلة"));
+      expect(hallTile?.[2]).toContain("تالتة ثانوي");
+      const generalHtml = await (await adminFetch("https://example.com/admin/schedule?hall=general")).text();
+      const generalTile = [...generalHtml.matchAll(/<a class="(sched-tile[^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].find(m => m[2].includes("أ. مرحلة"));
+      expect(generalTile?.[2]).toContain("تالتة ثانوي");
+    });
+
+    it("renders no stage line when a group's stage is unset", async () => {
+      await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-nostage', 'أ. بدون مرحلة', 'math')").run();
+      const room = (await env.DB.prepare("SELECT id FROM rooms ORDER BY id LIMIT 1").first()) as any;
+      await env.DB.prepare(
+        "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES ('t-sched-nostage', 'أ. بدون مرحلة', 'math', 'tue', '17:00', '19:00', ?, 1)"
+      ).bind(room.id).run();
+      const html = await (await adminFetch(`https://example.com/admin/schedule?hall=${room.id}`)).text();
+      const tile = [...html.matchAll(/<a class="(sched-tile[^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].find(m => m[2].includes("أ. بدون مرحلة"));
+      expect(tile?.[2]).not.toContain("sched-stage");
+    });
   });
 });
 
