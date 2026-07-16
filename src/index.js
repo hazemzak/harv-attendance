@@ -745,8 +745,11 @@ export async function getStudentBalance(env, studentId) {
 }
 
 async function getPayments(env, studentId) {
+  // datetime(...,'+3 hours'), not raw created_at (full-app reassessment,
+  // 2026-07-16): same UTC-vs-Cairo display bug fixed across scanned_at
+  // earlier this session -- created_at is stored UTC too.
   const { results } = await env.DB.prepare(
-    "SELECT id, amount, method, note, created_at FROM payments WHERE student_id = ? ORDER BY id"
+    "SELECT id, amount, method, note, datetime(created_at, '+3 hours') AS local_created_at FROM payments WHERE student_id = ? ORDER BY id"
   ).bind(studentId).all();
   return results;
 }
@@ -792,7 +795,7 @@ function paymentsHistoryHtml(lang, payments) {
   const t = PAY_I18N[lang];
   const rows = payments.map(p => html`<div class="card"><div>
     <strong>${(p.amount || 0).toFixed(2)}</strong>${p.method ? raw(html` — ${p.method}`) : ""}<br>
-    <small>${p.created_at}${p.note ? raw(html` · ${p.note}`) : ""}</small>
+    <small>${p.local_created_at}${p.note ? raw(html` · ${p.note}`) : ""}</small>
   </div></div>`).join("");
   return html`<h2 style="font-size:15px;margin:16px 0 8px">${raw(t.history)}</h2>${raw(rows)}`;
 }
@@ -1640,12 +1643,14 @@ export default {
       ar: {
         title: "الاستمارات", count: "استمارة", grandTotal: "إجمالي كل الحجوزات",
         pendingBadge: "بانتظار المعالجة", track: "المسار", subjectsCount: "عدد المواد",
-        total: "الإجمالي", view: "عرض", empty: "لا يوجد طلاب مسجلين بعد."
+        total: "الإجمالي", view: "عرض", empty: "لا يوجد طلاب مسجلين بعد.",
+        search: "دور على اسم طالب", searchPh: "اكتب اسم الطالب هنا", searchEmpty: "مفيش طالب بالاسم ده."
       },
       en: {
         title: "Applications", count: "applications", grandTotal: "Grand total across all bookings",
         pendingBadge: "Pending", track: "Track", subjectsCount: "Subjects",
-        total: "Total", view: "View", empty: "No students registered yet."
+        total: "Total", view: "View", empty: "No students registered yet.",
+        search: "Find a student by name", searchPh: "Type a student's name", searchEmpty: "No student found with that name."
       }
     };
 
@@ -1663,7 +1668,7 @@ export default {
       const trackLabel = v => (TRACKS.find(tr => tr.v === v) || {})[lang] || v || "";
       const rows = results.map((r, i) => {
         const subjectCount = (r.subjects || "").split(",").filter(Boolean).length;
-        return `<div class="card ${i % 2 === 0 ? "stripe-a" : "stripe-b"}">
+        return `<div class="card ${i % 2 === 0 ? "stripe-a" : "stripe-b"}" data-name="${escapeHtml(r.name.toLowerCase())}">
           <div>
             ${r.status === "pending" ? `<span class="badge-pending">${t.pendingBadge}</span><br>` : ""}
             <strong>${escapeHtml(r.name)}</strong><br>
@@ -1676,7 +1681,25 @@ export default {
         </div>`;
       }).join("") || `<p class="empty">${t.empty}</p>`;
       const summary = `<p>${results.length} ${t.count} · ${t.grandTotal}: <strong>${grandTotal.toFixed(2)}</strong></p>`;
-      return new Response(page(t.title, summary + rows, { lang, toggleHref: toggleHref(url, lang), isOwner: roleAllowed(staffRole, ["owner"]) }), { headers: { "content-type": "text/html;charset=utf-8" } });
+      // Same client-side name filter as the /admin roster (2026-07-16 full-app
+      // reassessment) -- identical flat-unsearchable-list problem, same fix,
+      // for consistency (Nielsen's "consistency and standards": the same
+      // interaction should work the same way everywhere it appears).
+      const searchBox = results.length ? `<form onsubmit="return false">
+        <label for="estamarat-search">${t.search}</label>
+        <input id="estamarat-search" type="search" autocomplete="off" placeholder="${t.searchPh}" oninput="
+          var q = this.value.trim().toLowerCase();
+          var any = false;
+          document.querySelectorAll('#estamarat-list [data-name]').forEach(function(el){
+            var match = !q || el.dataset.name.indexOf(q) !== -1;
+            el.hidden = !match;
+            if (match) any = true;
+          });
+          document.getElementById('estamarat-search-empty').hidden = any;
+        ">
+      </form>` : "";
+      const body = summary + searchBox + `<div id="estamarat-list">${rows}</div><p class="empty" id="estamarat-search-empty" hidden>${t.searchEmpty}</p>`;
+      return new Response(page(t.title, body, { lang, toggleHref: toggleHref(url, lang), isOwner: roleAllowed(staffRole, ["owner"]) }), { headers: { "content-type": "text/html;charset=utf-8" } });
     }
 
     // Serves the raw stored photo bytes standalone, so the counter kiosk's scan
@@ -2296,15 +2319,19 @@ export default {
       const langQs = lang === "en" ? "?lang=en" : "";
       const from = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("from") || "") ? url.searchParams.get("from") : new Date().toISOString().slice(0, 10);
       const to = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("to") || "") ? url.searchParams.get("to") : from;
+      // datetime(...,'+3 hours'), not raw occurred_at (full-app reassessment,
+      // 2026-07-16): same UTC-vs-Cairo display bug found across scanned_at/
+      // created_at earlier this session -- occurred_at is stored UTC too, and
+      // this is the money ledger, checked constantly.
       const { results } = await env.DB.prepare(
-        `SELECT id, kind, category, amount, note, occurred_at FROM ledger
+        `SELECT id, kind, category, amount, note, datetime(occurred_at, '+3 hours') AS local_occurred_at FROM ledger
          WHERE date(occurred_at) BETWEEN ? AND ? ORDER BY occurred_at DESC`
       ).bind(from, to).all();
       const totalIncome = results.filter(r => r.kind === "income").reduce((s, r) => s + r.amount, 0);
       const totalExpense = results.filter(r => r.kind === "expense").reduce((s, r) => s + r.amount, 0);
       const rows = results.map((r, i) => `<div class="card ${i % 2 === 0 ? "stripe-a" : "stripe-b"}"><div>
         <strong>${r.kind === "income" ? "🟢" : "🔴"} ${(r.amount || 0).toFixed(2)}</strong> — ${escapeHtml(r.category || (r.kind === "income" ? t.income : t.expense))}<br>
-        <small>${r.occurred_at}${r.note ? ` · ${escapeHtml(r.note)}` : ""}</small>
+        <small>${escapeHtml(r.local_occurred_at)}${r.note ? ` · ${escapeHtml(r.note)}` : ""}</small>
       </div></div>`).join("") || `<p class="empty">—</p>`;
       const categoryOptions = EXPENSE_CATEGORIES.map(c => `<option value="${c}">${EXPENSE_CATEGORY_LABELS[lang][c]}</option>`).join("");
       const form = `<form method="POST" action="/admin/ledger/expense${langQs}">

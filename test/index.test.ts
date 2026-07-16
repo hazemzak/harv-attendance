@@ -295,6 +295,32 @@ describe("/admin/estamarat: management list", () => {
     const html = await res.text();
     expect(html).toContain("550.00");
   });
+
+  it("renders a search box and gives every card a lowercase data-name (same fix as the /admin roster, 2026-07-16)", async () => {
+    await insertStudent({ name: "Estamarat Search Test", status: "approved" });
+    const html = await (await adminFetch("https://example.com/admin/estamarat")).text();
+    expect(html).toContain('id="estamarat-search"');
+    expect(html).toContain('id="estamarat-list"');
+    expect(html).toContain('data-name="estamarat search test"');
+  });
+});
+
+describe("payments/ledger: Cairo-local timestamps, not raw UTC (full-app reassessment, 2026-07-16)", () => {
+  it("payment history shows a datetime(...,'+3 hours')-adjusted value, not the raw stored created_at", async () => {
+    const id = await insertStudent({ name: "Payment TZ Test", status: "approved" });
+    await env.DB.prepare("INSERT INTO payments (student_id, amount, method, created_at) VALUES (?, 100, 'cash', '2026-07-15 20:00:00')").bind(id).run();
+    const html = await (await adminFetch(`https://example.com/admin/students/${id}/estamara`)).text();
+    expect(html).toContain("2026-07-15 23:00:00"); // +3h from the raw UTC value
+    expect(html).not.toContain("2026-07-15 20:00:00");
+  });
+
+  it("the ledger listing shows a Cairo-adjusted timestamp, not the raw stored occurred_at", async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    await env.DB.prepare("INSERT INTO ledger (kind, category, amount, occurred_at) VALUES ('expense', 'other', 10, ?)").bind(`${today} 20:00:00`).run();
+    const html = await (await adminFetch("https://example.com/admin/ledger")).text();
+    expect(html).toContain(`${today} 23:00:00`);
+    expect(html).not.toContain(`${today} 20:00:00`);
+  });
 });
 
 describe("student name: stored-XSS regression (found by claude-review on PR #5, fixed 2026-07-11)", () => {
