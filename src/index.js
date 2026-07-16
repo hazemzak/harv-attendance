@@ -3440,10 +3440,27 @@ export default {
 .counter-recent th,.counter-recent td{border-bottom:1px solid var(--line);padding:8px 6px;text-align:start}
 .counter-recent th{color:var(--muted);font-weight:600}
 .counter-pick{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:14px}
+.scan-mode-switch{display:flex;gap:8px;justify-content:center;margin-bottom:16px}
+.mode-btn{width:auto;padding:10px 18px;font-size:15px;background:#fff;color:var(--ink);border:2px solid var(--line);border-radius:999px}
+.mode-btn-active{background:var(--red);color:#fff;border-color:var(--red)}
+.camera-wrap{position:relative;max-width:360px;margin:0 auto 16px;border-radius:16px;overflow:hidden;background:#000}
+.camera-wrap video{width:100%;display:block}
+.camera-reticle{position:absolute;top:44%;left:50%;transform:translate(-50%,-50%);width:68%;aspect-ratio:1;border:4px solid var(--red);border-radius:16px;box-shadow:0 0 0 2000px rgba(0,0,0,.4);pointer-events:none}
+.camera-caption{position:absolute;bottom:10px;inset-inline:0;text-align:center;color:#fff;font-size:14px;font-weight:600;text-shadow:0 1px 3px rgba(0,0,0,.6);margin:0}
 </style>
 <div class="counter-wrap">
   ${pinnedBanner}
-  <p>وجّه سكانر الاستقبال على كود QR بتاع الطالب — الشاشة دي مش محتاجة أي دوسة بينهم.</p>
+  <div class="scan-mode-switch">
+    <button type="button" id="mode-device" class="mode-btn mode-btn-active">📇 امسح من الجهاز</button>
+    <button type="button" id="mode-phone" class="mode-btn">📱 امسح من الموبايل</button>
+  </div>
+  <p id="device-hint">وجّه سكانر الاستقبال على كود QR بتاع الطالب — الشاشة دي مش محتاجة أي دوسة بينهم.</p>
+  <div id="camera-wrap" class="camera-wrap" hidden>
+    <video id="camera-video" autoplay playsinline muted></video>
+    <div class="camera-reticle"></div>
+    <p class="camera-caption">حط كود الطالب جوّه المربع</p>
+    <canvas id="camera-canvas" hidden></canvas>
+  </div>
   <div id="counter-status" class="counter-status"><span>جاهز للمسح</span></div>
   <div id="counter-pick" class="counter-pick" hidden></div>
   <p class="counter-count">عدد اللي حضروا النهاردة${isAutoMode ? " (كل الحصص)" : ""}: <strong id="counter-count">${initialCount.n}</strong></p>
@@ -3463,7 +3480,13 @@ export default {
     var recentEmpty = document.getElementById("counter-recent-empty");
     var isAutoMode = ${isAutoMode ? "true" : "false"};
     var pendingStudentId = null;
-    function focusInput(){ input.focus(); }
+    // Scan mode: "device" is the existing USB/keyboard-wedge flow (needs the
+    // invisible #counter-input focused at all times); "phone" opens the
+    // camera instead. Focus must stay OFF the input in phone mode -- it's a
+    // real <input>, so focusing it on a touch device would pop the on-screen
+    // keyboard up over the camera view.
+    var scanMode = "device";
+    function focusInput(){ if (scanMode === "device") input.focus(); }
     focusInput();
     document.addEventListener("click", focusInput);
     input.addEventListener("blur", function(){ setTimeout(focusInput, 50); });
@@ -3545,6 +3568,16 @@ export default {
         })
         .catch(function(){ setStatus("warn", null, "في مشكلة في الاتصال — جرب تاني"); });
     }
+    // Shared by both scan modes: the QR payload is the same /scan?student=ID
+    // URL either way (device wedge-scanner or phone camera decode), so both
+    // paths pull the id out the same way instead of duplicating the parse.
+    function extractStudentId(raw){
+      var id = null;
+      try { id = new URL(raw).searchParams.get("student"); } catch (err) {}
+      if (!id) { var m = raw.match(/student=(\\d+)/); if (m) id = m[1]; }
+      if (!id && /^\\d+$/.test(raw)) id = raw;
+      return id;
+    }
     input.addEventListener("keydown", function(e){
       if (e.key !== "Enter") return;
       e.preventDefault();
@@ -3552,13 +3585,95 @@ export default {
       input.value = "";
       pickWrap.hidden = true;
       pickWrap.textContent = "";
-      var id = null;
-      try { id = new URL(raw).searchParams.get("student"); } catch (err) {}
-      if (!id) { var m = raw.match(/student=(\\d+)/); if (m) id = m[1]; }
-      if (!id && /^\\d+$/.test(raw)) id = raw;
+      var id = extractStudentId(raw);
       if (!id) { setStatus("warn", null, "كود مش معروف"); return; }
       submitScan(id, null);
     });
+
+    // Phone-camera mode: opens the phone's own camera live inside the app
+    // (instead of relying on whatever native camera app staff happen to
+    // open) and decodes the QR itself, so the framing guide below is drawn
+    // by us, not left to an OS camera app's own UI.
+    var modeDeviceBtn = document.getElementById("mode-device");
+    var modePhoneBtn = document.getElementById("mode-phone");
+    var deviceHint = document.getElementById("device-hint");
+    var cameraWrap = document.getElementById("camera-wrap");
+    var video = document.getElementById("camera-video");
+    var canvas = document.getElementById("camera-canvas");
+    var cameraStream = null;
+    var cameraScanning = false;
+    var barcodeDetector = ("BarcodeDetector" in window) ? new BarcodeDetector({ formats: ["qr_code"] }) : null;
+    var decodeCooldownUntil = 0; // ponytail: fixed 2s debounce is enough for a walk-up scanner; per-code tracking not worth it here
+    function ensureJsQR(then){
+      if (window.jsQR || barcodeDetector) { then(); return; }
+      var s = document.createElement("script");
+      s.src = "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js";
+      s.onload = then;
+      s.onerror = function(){ setStatus("warn", null, "معرفناش نحمّل أداة قراءة الكود — استخدم سكانر الجهاز"); switchMode("device"); };
+      document.head.appendChild(s);
+    }
+    function handleDecoded(raw){
+      var now = Date.now();
+      if (now < decodeCooldownUntil) return;
+      var id = extractStudentId(raw);
+      if (!id) return;
+      decodeCooldownUntil = now + 2000;
+      submitScan(id, null);
+    }
+    function scanFrame(){
+      if (!cameraScanning) return;
+      if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        if (barcodeDetector) {
+          barcodeDetector.detect(video).then(function(codes){
+            if (codes.length) handleDecoded(codes[0].rawValue);
+          }).catch(function(){});
+        } else if (window.jsQR) {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          var ctx = canvas.getContext("2d");
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          var frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          var code = window.jsQR(frame.data, frame.width, frame.height);
+          if (code) handleDecoded(code.data);
+        }
+      }
+      requestAnimationFrame(scanFrame);
+    }
+    function stopCamera(){
+      cameraScanning = false;
+      if (cameraStream) { cameraStream.getTracks().forEach(function(t){ t.stop(); }); cameraStream = null; }
+    }
+    function startCamera(){
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } }).then(function(s){
+        cameraStream = s;
+        video.srcObject = s;
+        cameraScanning = true;
+        requestAnimationFrame(scanFrame);
+      }).catch(function(){
+        setStatus("warn", null, "معرفناش نوصل لكاميرا الموبايل — استخدم سكانر الجهاز");
+        switchMode("device");
+      });
+    }
+    function switchMode(mode){
+      scanMode = mode;
+      if (mode === "phone") {
+        modeDeviceBtn.classList.remove("mode-btn-active");
+        modePhoneBtn.classList.add("mode-btn-active");
+        deviceHint.hidden = true;
+        cameraWrap.hidden = false;
+        ensureJsQR(startCamera);
+      } else {
+        modePhoneBtn.classList.remove("mode-btn-active");
+        modeDeviceBtn.classList.add("mode-btn-active");
+        deviceHint.hidden = false;
+        cameraWrap.hidden = true;
+        stopCamera();
+        focusInput();
+      }
+    }
+    modeDeviceBtn.addEventListener("click", function(){ switchMode("device"); });
+    modePhoneBtn.addEventListener("click", function(){ switchMode("phone"); });
+    window.addEventListener("pagehide", stopCamera);
   })();
   </script>
 </div>`;

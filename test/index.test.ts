@@ -985,6 +985,26 @@ describe("/admin/counter: hardware-scanner kiosk page (added 2026-07-13)", () =>
     const rule = html.match(/\.counter-input\{[^}]*\}/)?.[0] || "";
     expect(rule).toMatch(/width:\s*1px/);
   });
+
+  // Foolproof scanning: staff pick device (existing USB wedge-scanner flow,
+  // unchanged) or phone (camera opens in-app with a framing guide) instead of
+  // the page assuming one or the other.
+  it("renders both scan-mode buttons and the camera markup, camera hidden by default", async () => {
+    const html = await (await adminFetch("https://example.com/admin/counter")).text();
+    expect(html).toContain('id="mode-device"');
+    expect(html).toContain('id="mode-phone"');
+    expect(html).toContain('id="camera-video"');
+    expect(html).toContain('class="camera-reticle"'); // the branded framing rectangle
+    expect(html).toMatch(/id="camera-wrap"[^>]*hidden/); // camera off until the clerk picks phone mode
+  });
+
+  it("device mode is the default (device button starts active, camera wrap starts hidden)", async () => {
+    const html = await (await adminFetch("https://example.com/admin/counter")).text();
+    const deviceBtn = html.match(/id="mode-device"[^>]*/)?.[0] || "";
+    const phoneBtn = html.match(/id="mode-phone"[^>]*/)?.[0] || "";
+    expect(deviceBtn).toContain("mode-btn-active");
+    expect(phoneBtn).not.toContain("mode-btn-active");
+  });
 });
 
 describe("/register: subject → teacher live panel (added 2026-07-13, most students search by teacher not subject)", () => {
