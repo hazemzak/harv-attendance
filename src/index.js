@@ -2368,13 +2368,15 @@ export default {
         title: "الأساتذة", noShare: "لسه معملتش تسوية", perSession: "بالحصة", percent: "نسبة %",
         settlement: "التسوية", attentionTitle: "⚠️ يحتاج متابعة", attentionEmpty: "الكل متسوّي، مفيش حد محتاج متابعة دلوقتي.",
         owed: "مستحق", addNew: "➕ ضيف أستاذ جديد", edit: "✏️ عدّل",
-        retire: "إيقاف", activateBack: "رجّعه تاني", retiredBadge: "متوقف", confirmRetire: "متأكد إنك عايز توقف الأستاذ ده؟ اسمه هيفضل في القايمة بس مش هيظهر للحجز.", confirmReturn: "متأكد إنك عايز ترجّعه؟"
+        retire: "إيقاف", activateBack: "رجّعه تاني", retiredBadge: "متوقف", confirmRetire: "متأكد إنك عايز توقف الأستاذ ده؟ اسمه هيفضل في القايمة بس مش هيظهر للحجز.", confirmReturn: "متأكد إنك عايز ترجّعه؟",
+        rename: "✏️ غيّر الاسم", renamePrompt: "اكتب الاسم الجديد:"
       },
       en: {
         title: "Teachers", noShare: "No payout share set", perSession: "Per session", percent: "Percent %",
         settlement: "Settlement", attentionTitle: "⚠️ Needs follow-up", attentionEmpty: "Everyone's settled — nobody needs follow-up right now.",
         owed: "owed", addNew: "➕ Add new teacher", edit: "✏️ Edit",
-        retire: "Retire", activateBack: "Bring back", retiredBadge: "Retired", confirmRetire: "Retire this teacher? Their name stays on the list but they'll stop showing up for booking.", confirmReturn: "Bring this teacher back?"
+        retire: "Retire", activateBack: "Bring back", retiredBadge: "Retired", confirmRetire: "Retire this teacher? Their name stays on the list but they'll stop showing up for booking.", confirmReturn: "Bring this teacher back?",
+        rename: "✏️ Rename", renamePrompt: "Enter the new name:"
       }
     };
 
@@ -2412,6 +2414,16 @@ export default {
       const retireForm = tch => `<form method="POST" action="/admin/teachers/${tch.id}/retire-toggle${langQs}" onsubmit="return confirm('${(tch.retired_at ? t.confirmReturn : t.confirmRetire).replace(/'/g, "\\'")}')">
           <button type="submit" class="${tch.retired_at ? "" : "btn-reject"}">${tch.retired_at ? t.activateBack : t.retire}</button>
         </form>`;
+      // Phase 4: rename is deliberately a prompt()-driven single button, not a
+      // form field on the edit screen (see teacherFormHtml) -- the hidden
+      // input carries the new name to the dedicated /rename route. No
+      // pre-filled current name in the prompt (deliberate, not an oversight):
+      // embedding it would put the name in the markup twice, which is exactly
+      // the "same person shown twice" bug class Phase 2's merge fixed.
+      const renameForm = tch => `<form method="POST" action="/admin/teachers/${tch.id}/rename${langQs}" onsubmit="var n=prompt('${t.renamePrompt.replace(/'/g, "\\'")}'); if(!n||!n.trim())return false; this.elements['name'].value=n.trim(); return true;">
+          <input type="hidden" name="name">
+          <button type="submit" class="btn-reject">${t.rename}</button>
+        </form>`;
       const nameDisplay = tch => tch.retired_at
         ? `<s>${escapeHtml(tch.name)}</s> <span class="badge-pending" style="background:#8A93A6">${t.retiredBadge}</span>`
         : escapeHtml(tch.name);
@@ -2421,6 +2433,7 @@ export default {
         <div class="pending-actions">
           <a href="/admin/teachers/${tch.id}/settlement${langQs}"><button type="button">${t.settlement}</button></a>
           <a href="/admin/teachers/${tch.id}/edit${langQs}"><button type="button">${t.edit}</button></a>
+          ${renameForm(tch)}
           ${retireForm(tch)}
         </div>
       </div></div>`;
@@ -2458,8 +2471,14 @@ export default {
       // retired -- a person still active on at least one subject isn't
       // shown as retired overall, even though each row's own retire button
       // still works independently.
+      // Rename lives once at the person level here (not per-row, unlike
+      // settlement/edit/retire which are legitimately per-subject) -- the
+      // /rename route already renames every row sharing a person_id, so
+      // triggering it from any one sibling id (rows[0]) renames the whole
+      // merged person.
       const attentionCard = (entry, i) => `<div class="card ${i % 2 === 0 ? "stripe-a" : "stripe-b"}"><div>
         <strong>${nameDisplay({ name: entry.name, retired_at: entry.rows.every(r => r.retired_at) ? entry.rows[0].retired_at : null })}</strong>
+        ${renameForm({ id: entry.rows[0].id, name: entry.name })}
         ${entry.rows.map(attentionRow).join("")}
       </div></div>`;
       const attentionSection = `<div class="dash-card">
@@ -2745,9 +2764,17 @@ export default {
           </div>
         </div>`;
       }).join("");
+      // Name is only editable on the add path. An existing teacher (teacher.id
+      // set) shows name read-only here -- renaming is its own dedicated,
+      // owner-confirmed action (POST .../rename), not a field on the routine
+      // edit form, so a rename can never happen by accident mid-edit.
+      const nameField = teacher?.id
+        ? `<label>${t.name}</label>
+        <div style="padding:12px 14px;border:2px solid var(--line);border-radius:10px;background:var(--line-soft);color:var(--ink)">${escapeHtml(teacher.name || "")}</div>`
+        : `<label>${t.name}</label>
+        <input name="name" placeholder="${t.namePh}" value="${escapeHtml(teacher?.name || "")}" autocomplete="name" required>`;
       return `<form method="POST" action="${action}" enctype="multipart/form-data" onsubmit="return confirm(${JSON.stringify(t.confirm)})">
-        <label>${t.name}</label>
-        <input name="name" placeholder="${t.namePh}" value="${escapeHtml(teacher?.name || "")}" autocomplete="name" required>
+        ${nameField}
         <label>${t.subject}</label>
         <select name="subject" required>${subjectOptions(lang, teacher?.subject || "")}</select>
         <label>${t.phase}</label>
@@ -2866,20 +2893,26 @@ export default {
       const lang = langOf(url);
       const langQs = lang === "en" ? "?lang=en" : "";
       const teacherId = teacherUpdateMatch[1];
-      const existing = await env.DB.prepare("SELECT id FROM teachers WHERE id = ?").bind(teacherId).first();
+      // Only "name" is fetched beyond id/existence: the routine edit form no
+      // longer submits a name field (Phase 4 -- see teacherFormHtml), so on a
+      // validation-error re-render we need the real current name to display,
+      // not an empty submitted value.
+      const existing = await env.DB.prepare("SELECT id, name FROM teachers WHERE id = ?").bind(teacherId).first();
       if (!existing) return new Response("Not found", { status: 404 });
-      const { name, subject, phase, mode, track, availability, availabilityError, photoBuf, photoType } = await readTeacherForm(request);
-      if (!name || !subject || availabilityError) {
-        const teacher = { id: teacherId, name, subject, phase, mode, track, availability };
+      const { subject, phase, mode, track, availability, availabilityError, photoBuf, photoType } = await readTeacherForm(request);
+      if (!subject || availabilityError) {
+        const teacher = { id: teacherId, name: existing.name, subject, phase, mode, track, availability };
         return new Response(page(TEACHER_FORM_I18N[lang].editTitle, teacherFormHtml(lang, `/admin/teachers/${teacherId}${langQs}`, teacher, await getRooms(env)), { lang, isOwner: true }), { status: 400, headers: { "content-type": "text/html;charset=utf-8" } });
       }
+      // name is deliberately absent from this UPDATE -- see teacherFormHtml's
+      // comment: renaming only happens via the dedicated rename route below.
       const update = photoBuf
         ? env.DB.prepare(
-            `UPDATE teachers SET name = ?, subject = ?, subject_label = ?, phase = ?, mode = ?, track = ?, photo_blob = ?, photo_blob_type = ? WHERE id = ?`
-          ).bind(name, subject, subjectLabelFor(subject), phase || null, mode || null, track || null, photoBuf, photoType, teacherId)
+            `UPDATE teachers SET subject = ?, subject_label = ?, phase = ?, mode = ?, track = ?, photo_blob = ?, photo_blob_type = ? WHERE id = ?`
+          ).bind(subject, subjectLabelFor(subject), phase || null, mode || null, track || null, photoBuf, photoType, teacherId)
         : env.DB.prepare(
-            `UPDATE teachers SET name = ?, subject = ?, subject_label = ?, phase = ?, mode = ?, track = ? WHERE id = ?`
-          ).bind(name, subject, subjectLabelFor(subject), phase || null, mode || null, track || null, teacherId);
+            `UPDATE teachers SET subject = ?, subject_label = ?, phase = ?, mode = ?, track = ? WHERE id = ?`
+          ).bind(subject, subjectLabelFor(subject), phase || null, mode || null, track || null, teacherId);
       // Delete-all-then-reinsert: with only up to 3 slots and no cross-edit
       // identity/ordering that matters, diffing old vs. new rows would be pure
       // overhead. Folded into one batch() with the UPDATE for atomicity.
@@ -2905,6 +2938,42 @@ export default {
       await env.DB.prepare(
         "UPDATE teachers SET retired_at = CASE WHEN retired_at IS NULL THEN datetime('now') ELSE NULL END WHERE id = ?"
       ).bind(teacherRetireMatch[1]).run();
+      return Response.redirect(url.origin + `/admin/teachers${langQs}`, 303);
+    }
+
+    // Phase 4: renaming is its own dedicated owner-only action, deliberately
+    // separate from the routine edit form (see teacherFormHtml's comment).
+    const teacherRenameMatch = url.pathname.match(/^\/admin\/teachers\/([^/]+)\/rename$/);
+    if (teacherRenameMatch && request.method === "POST") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
+      const lang = langOf(url);
+      const langQs = lang === "en" ? "?lang=en" : "";
+      const teacherId = teacherRenameMatch[1];
+      const teacher = await env.DB.prepare("SELECT id, name, person_id FROM teachers WHERE id = ?").bind(teacherId).first();
+      if (!teacher) return new Response("Not found", { status: 404 });
+      const form = await request.formData();
+      const newName = (form.get("name") || "").toString().trim();
+      if (!newName) return new Response("Bad request", { status: 400 });
+      const oldName = teacher.name;
+      // A merged person (Phase 2's person_id) has one teachers row per
+      // subject -- rename every row sharing it so the same real person can't
+      // end up with two different displayed names.
+      const siblingIds = teacher.person_id
+        ? (await env.DB.prepare("SELECT id FROM teachers WHERE person_id = ?").bind(teacher.person_id).all()).results.map(r => r.id)
+        : [teacherId];
+      const stmts = [
+        teacher.person_id
+          ? env.DB.prepare("UPDATE teachers SET name = ? WHERE person_id = ?").bind(newName, teacher.person_id)
+          : env.DB.prepare("UPDATE teachers SET name = ? WHERE id = ?").bind(newName, teacherId)
+      ];
+      // groups.teacher_name is a denormalized snapshot computeTeacherOwed()
+      // falls back to matching directly for legacy groups with no teacher_id
+      // -- refresh both FK-linked (by id, for every sibling subject row) and
+      // legacy-matched (by old name text) rows so owed math and the
+      // schedule display don't silently go stale after a rename.
+      for (const id of siblingIds) stmts.push(env.DB.prepare("UPDATE groups SET teacher_name = ? WHERE teacher_id = ?").bind(newName, id));
+      stmts.push(env.DB.prepare("UPDATE groups SET teacher_name = ? WHERE teacher_id IS NULL AND teacher_name = ?").bind(newName, oldName));
+      await env.DB.batch(stmts);
       return Response.redirect(url.origin + `/admin/teachers${langQs}`, 303);
     }
 

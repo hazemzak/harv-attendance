@@ -2714,13 +2714,23 @@ describe("/admin/teachers/:id/edit + /admin/teachers/:id (update): editing an ex
   it("updates the existing row's fields instead of creating a duplicate", async () => {
     await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('edit-test-1', 'أ. قبل التعديل', 'math')").run();
     const form = new FormData();
-    form.set("name", "أ. بعد التعديل");
+    // Phase 4: the edit form no longer submits a name field at all.
     form.set("subject", "physics");
     const res = await adminFetch("https://example.com/admin/teachers/edit-test-1", { method: "POST", body: form, redirect: "manual" });
     expect(res.status).toBe(303);
     const rows = (await env.DB.prepare("SELECT * FROM teachers WHERE id = 'edit-test-1'").all()).results;
     expect(rows.length).toBe(1);
-    expect(rows[0]).toMatchObject({ name: "أ. بعد التعديل", subject: "physics" });
+    expect(rows[0]).toMatchObject({ name: "أ. قبل التعديل", subject: "physics" });
+  });
+
+  it("Phase 4: ignores a name field even if a crafted/stale request still submits one -- the routine edit route can never rename", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('edit-test-1b', 'أ. اسم بريء', 'math')").run();
+    const form = new FormData();
+    form.set("name", "أ. اسم مزوّر"); // no current UI sends this on the edit route, but the server must ignore it regardless
+    form.set("subject", "chemistry");
+    await adminFetch("https://example.com/admin/teachers/edit-test-1b", { method: "POST", body: form });
+    const row = await env.DB.prepare("SELECT * FROM teachers WHERE id = 'edit-test-1b'").first();
+    expect(row).toMatchObject({ name: "أ. اسم بريء", subject: "chemistry" });
   });
 
   it("keeps the existing photo blob when the edit submits no new file", async () => {
@@ -2744,6 +2754,73 @@ describe("/admin/teachers/:id/edit + /admin/teachers/:id (update): editing an ex
     await env.DB.prepare("INSERT INTO teachers (id, name, subject, photo) VALUES ('edit-test-4', 'أ. صورة قديمة على الموقع', 'math', '/designs/teachers/legacy.jpg')").run();
     const html = await (await adminFetch("https://example.com/admin/teachers/edit-test-4/edit")).text();
     expect(html).toContain("https://harvcentereg.com/designs/teachers/legacy.jpg");
+  });
+});
+
+describe("POST /admin/teachers/:id/rename (Phase 4 — rename is its own dedicated, owner-only action)", () => {
+  it("renames a single teacher with no person_id", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('rename-test-solo', 'أ. اسم قديم', 'math')").run();
+    const form = new FormData();
+    form.set("name", "أ. اسم جديد");
+    const res = await adminFetch("https://example.com/admin/teachers/rename-test-solo/rename", { method: "POST", body: form, redirect: "manual" });
+    expect(res.status).toBe(303);
+    const row = await env.DB.prepare("SELECT name FROM teachers WHERE id = 'rename-test-solo'").first() as any;
+    expect(row.name).toBe("أ. اسم جديد");
+  });
+
+  it("renames every teacher row sharing a person_id, not just the row whose id was clicked", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject, person_id) VALUES ('rename-test-p1', 'أ. شخص واحد', 'math', 'rename-test-person')").run();
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject, person_id) VALUES ('rename-test-p2', 'أ. شخص واحد', 'statistics', 'rename-test-person')").run();
+    const form = new FormData();
+    form.set("name", "أ. اسم بعد الدمج");
+    await adminFetch("https://example.com/admin/teachers/rename-test-p1/rename", { method: "POST", body: form });
+    const rows = (await env.DB.prepare("SELECT id, name FROM teachers WHERE person_id = 'rename-test-person' ORDER BY id").all()).results as any[];
+    expect(rows.map(r => r.name)).toEqual(["أ. اسم بعد الدمج", "أ. اسم بعد الدمج"]);
+  });
+
+  it("refreshes groups.teacher_name for FK-linked groups so scheduling/owed math don't read a stale name", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('rename-test-fk', 'أ. قبل', 'math')").run();
+    await env.DB.prepare("INSERT INTO groups (teacher_id, teacher_name, subject) VALUES ('rename-test-fk', 'أ. قبل', 'math')").run();
+    const form = new FormData();
+    form.set("name", "أ. بعد");
+    await adminFetch("https://example.com/admin/teachers/rename-test-fk/rename", { method: "POST", body: form });
+    const group = await env.DB.prepare("SELECT teacher_name FROM groups WHERE teacher_id = 'rename-test-fk'").first() as any;
+    expect(group.teacher_name).toBe("أ. بعد");
+  });
+
+  it("refreshes groups.teacher_name for legacy groups (teacher_id NULL) matched by the old name, so computeTeacherOwed's legacy fallback keeps matching", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('rename-test-legacy', 'أ. قديم بلا رابط', 'math')").run();
+    await env.DB.prepare("INSERT INTO groups (teacher_id, teacher_name, subject) VALUES (NULL, 'أ. قديم بلا رابط', 'math')").run();
+    const form = new FormData();
+    form.set("name", "أ. جديد بلا رابط");
+    await adminFetch("https://example.com/admin/teachers/rename-test-legacy/rename", { method: "POST", body: form });
+    const group = await env.DB.prepare("SELECT teacher_name FROM groups WHERE teacher_id IS NULL AND teacher_name = 'أ. جديد بلا رابط'").first();
+    expect(group).toBeTruthy();
+  });
+
+  it("blocks a clerk from renaming", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('rename-test-clerk', 'أ. محمي من التغيير', 'math')").run();
+    const form = new FormData();
+    form.set("name", "أ. محاولة تغيير");
+    const res = await clerkFetch("https://example.com/admin/teachers/rename-test-clerk/rename", { method: "POST", body: form });
+    expect(res.status).toBe(403);
+    const row = await env.DB.prepare("SELECT name FROM teachers WHERE id = 'rename-test-clerk'").first() as any;
+    expect(row.name).toBe("أ. محمي من التغيير");
+  });
+
+  it("rejects an empty name instead of silently blanking it", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('rename-test-empty', 'أ. اسم حالي', 'math')").run();
+    const res = await adminFetch("https://example.com/admin/teachers/rename-test-empty/rename", { method: "POST", body: new FormData() });
+    expect(res.status).toBe(400);
+    const row = await env.DB.prepare("SELECT name FROM teachers WHERE id = 'rename-test-empty'").first() as any;
+    expect(row.name).toBe("أ. اسم حالي");
+  });
+
+  it("404s for a nonexistent teacher id", async () => {
+    const form = new FormData();
+    form.set("name", "أ. لا وجود له");
+    const res = await adminFetch("https://example.com/admin/teachers/does-not-exist/rename", { method: "POST", body: form });
+    expect(res.status).toBe(404);
   });
 });
 
