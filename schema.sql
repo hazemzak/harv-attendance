@@ -58,7 +58,8 @@ CREATE TABLE teachers (
   share_value REAL,
   photo_blob BLOB,
   photo_blob_type TEXT,
-  person_id TEXT
+  person_id TEXT,
+  retired_at TEXT
 );
 
 -- Up to 3 day+time-range slots per teacher, replacing free-text

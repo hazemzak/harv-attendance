@@ -2615,6 +2615,47 @@ describe("/admin/teachers: person_id merge in the needs-attention list (added 20
   });
 });
 
+describe("Teacher retire/return via retired_at (added 2026-07-16)", () => {
+  it("excludes a retired teacher from the /register picker but keeps an active one", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject, retired_at) VALUES ('retire-test-gone', 'أ. متقاعد', 'math', datetime('now'))").run();
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('retire-test-active', 'أ. لسه شغال', 'math')").run();
+    const html = await (await SELF.fetch("https://example.com/register")).text();
+    expect(html).not.toContain("أ. متقاعد");
+    expect(html).toContain("أ. لسه شغال");
+  });
+
+  it("keeps a retired teacher fully visible (name + owed) in /admin/teachers, the money view", async () => {
+    await env.DB.prepare(
+      "INSERT INTO teachers (id, name, subject, share_type, share_value, retired_at) VALUES ('retire-test-owed', 'أ. له مستحقات', 'math', 'per_session', 20, datetime('now'))"
+    ).run();
+    const html = await (await adminFetch("https://example.com/admin/teachers")).text();
+    expect(html).toContain("أ. له مستحقات");
+    expect(html).toContain(">متوقف<"); // retired badge shown, but the row itself is not hidden
+  });
+
+  it("retire-toggle flips retired_at on and back off", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('retire-test-toggle', 'أ. تبديل', 'math')").run();
+    await adminFetch("https://example.com/admin/teachers/retire-test-toggle/retire-toggle", { method: "POST" });
+    let row = await env.DB.prepare("SELECT retired_at FROM teachers WHERE id = 'retire-test-toggle'").first() as any;
+    expect(row.retired_at).toBeTruthy();
+    await adminFetch("https://example.com/admin/teachers/retire-test-toggle/retire-toggle", { method: "POST" });
+    row = await env.DB.prepare("SELECT retired_at FROM teachers WHERE id = 'retire-test-toggle'").first() as any;
+    expect(row.retired_at).toBeNull();
+  });
+
+  it("blocks a clerk from retire-toggle", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('retire-test-clerk', 'أ. محمي', 'math')").run();
+    const res = await clerkFetch("https://example.com/admin/teachers/retire-test-clerk/retire-toggle", { method: "POST" });
+    expect(res.status).toBe(403);
+  });
+
+  it("excludes a retired teacher from /public/roster", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject, retired_at) VALUES ('retire-test-public', 'أ. مش هيبان بره', 'math', datetime('now'))").run();
+    const data = await (await SELF.fetch("https://example.com/public/roster")).json() as any;
+    expect(data.teachers.some((t: any) => t.id === "retire-test-public")).toBe(false);
+  });
+});
+
 describe("/admin/teachers/new + /admin/teachers (add): teacher-editor screen (added 2026-07-15)", () => {
   it("creates a new teacher with a whitelisted subject/phase/mode/track", async () => {
     const form = new FormData();
