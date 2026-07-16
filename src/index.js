@@ -101,6 +101,8 @@ select{
 .card.stripe-a{background:#F3F4F6}
 .card.stripe-b{background:#E2E4E9}
 .subjects-grid{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px}
+.subjects-group-label{flex-basis:100%;font-size:13px;font-weight:700;color:#5A6784;margin:8px 0 2px}
+.subjects-group-label:first-child{margin-top:0}
 .avail-grid{margin-bottom:16px}
 .avail-row{border:2px solid var(--line);border-radius:10px;padding:10px;margin-bottom:8px}
 .avail-row-top{display:flex;gap:8px;margin-bottom:8px}
@@ -167,6 +169,20 @@ select{
 .booking-table tfoot td{font-weight:800;font-size:16px}
 .estamara-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
 .estamara-total{font-size:22px;font-weight:800;color:var(--red);text-align:end;margin-top:10px}
+.guide-intro{font-size:16px;color:#5A6784;margin:0 0 18px}
+.guide-tasks{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px;margin:16px 0 8px}
+.guide-task{display:flex;flex-direction:column;align-items:center;gap:8px;text-align:center;background:var(--surface);border:2px solid var(--line);border-radius:16px;padding:20px 14px;text-decoration:none;color:var(--ink);font-weight:700;font-size:16px}
+.guide-task:hover,.guide-task:focus-visible{border-color:var(--red)}
+.guide-task .gt-icon{font-size:34px}
+.guide-owner-zone{background:#F8F9FB;border:2px dashed var(--ink);border-radius:16px;padding:16px;margin:20px 0}
+.guide-owner-zone h2{margin:0 0 6px;font-size:19px}
+.guide-shot{background:#fff;border:2px solid var(--line);border-radius:14px;padding:14px;margin:14px 0;overflow-x:auto}
+.guide-shot svg{display:block;margin:0 auto;max-width:100%;height:auto}
+.guide-steps{line-height:2;padding-inline-start:22px}
+.guide-task-link{display:inline-block;margin-top:6px;padding:12px 18px;border-radius:999px;background:#fff;border:2px solid var(--line);color:var(--ink);text-decoration:none;font-weight:600}
+.guide-task-link:hover,.guide-task-link:focus-visible{border-color:var(--red)}
+.guide-faq{font-size:14px;color:#5A6784;line-height:1.9;margin-top:28px;border-top:1px solid var(--line);padding-top:16px}
+.guide-print-link{display:inline-block;font-size:14px;color:#5A6784;text-decoration:underline}
 @media print{
   header,nav,.no-print{display:none}
   body{font-size:14px}
@@ -231,6 +247,20 @@ const SUBJECT_EN_COUSINS = [
 ];
 
 const KNOWN_SUBJECT_SLUGS = new Set([...SUBJECTS.map(s => s.v), ...SUBJECT_EN_COUSINS.map(s => s.v)]);
+
+// UI-only grouping for subjectsCheckboxes() below — every SUBJECTS slug appears
+// in exactly one group (18 total: 5+6+4+3), matching common Egyptian secondary
+// curriculum clusters. Purely a rendering/chunking change (mom-test cognitive-load
+// fix, reassessment finding P1 2026-07-16 — a flat 29-checkbox wall exceeds
+// Impeccable's own "8+ = overloaded" guidance); the underlying <input> names/
+// values/sanitizeSubjects() are untouched, so nothing downstream of the form
+// POST changes.
+const SUBJECT_GROUPS = [
+  { icon: "🗣️", ar: "لغات", en: "Languages", slugs: ["arabic", "english", "french", "german", "italian"] },
+  { icon: "🔬", ar: "علمي", en: "Science", slugs: ["math", "physics", "chemistry", "biology", "geology", "statistics"] },
+  { icon: "📚", ar: "أدبي", en: "Humanities", slugs: ["history", "geography", "philosophy", "psychology"] },
+  { icon: "💼", ar: "تجارة وبرمجة", en: "Business & Programming", slugs: ["accounting", "business", "programming"] }
+];
 
 // Whitelists against known subject slugs before storing — form.getAll() reflects
 // raw POST data, not just what the checkbox UI rendered, so a crafted request
@@ -388,9 +418,18 @@ function chip(type, name, value, checked, label) {
 
 function subjectsCheckboxes(lang, checkedValues) {
   const checked = new Set((checkedValues || "").split(",").map(s => s.trim()).filter(Boolean));
-  const main = SUBJECTS.map(s => chip("checkbox", "subjects", s.v, checked.has(s.v), lang === "en" ? s.en : s.ar));
+  const bySlug = new Map(SUBJECTS.map(s => [s.v, s]));
+  const groupLabel = (icon, text) => `<div class="subjects-group-label">${icon} ${escapeHtml(text)}</div>`;
+  const groups = SUBJECT_GROUPS.map(g => {
+    const chips = g.slugs.map(slug => {
+      const s = bySlug.get(slug);
+      return chip("checkbox", "subjects", s.v, checked.has(s.v), lang === "en" ? s.en : s.ar);
+    }).join("");
+    return groupLabel(g.icon, lang === "en" ? g.en : g.ar) + chips;
+  }).join("");
   const cousins = SUBJECT_EN_COUSINS.map(s => chip("checkbox", "subjects", s.v, checked.has(s.v), s.en));
-  return main.join("") + cousins.join("");
+  const cousinsLabel = groupLabel("🌍", lang === "en" ? "English-taught (لغات track)" : "بالإنجليزي (مسار لغات)");
+  return groups + cousinsLabel + cousins.join("");
 }
 
 // Escaped here, once, so every consumer (subjectsDisplay's admin/promotions/teacher-panel
@@ -1188,7 +1227,7 @@ export default {
       }).join("") || `<p class="empty">${t.empty}</p>`;
       const form = `<form method="POST" action="/admin/students${langQs}">
         <label>${t.addName}</label>
-        <input name="name" placeholder="${t.addNamePh}" required>
+        <input name="name" placeholder="${t.addNamePh}" autocomplete="name" required>
         <label>${t.addClass}</label>
         <select name="stage">
           <option value="">${t.addClassPh}</option>
@@ -1219,7 +1258,7 @@ export default {
         <summary>${t.walkInTitle}</summary>
         <form method="POST" action="/admin/students${langQs}">
           <label>${t.walkInName}</label>
-          <input name="name" placeholder="${t.walkInNamePh}" required autofocus>
+          <input name="name" placeholder="${t.walkInNamePh}" autocomplete="name" required autofocus>
           <label>${t.walkInClass}</label>
           <select name="stage">
             <option value="">${t.walkInClassPh}</option>
@@ -1375,17 +1414,17 @@ export default {
         <label>${t.name}</label>
         <input name="name" value="${escapeHtml(student.name || "")}" required>
         <label>${t.school}</label>
-        <input name="school" value="${escapeHtml(student.school || "")}">
+        <input name="school" value="${escapeHtml(student.school || "")}" autocomplete="organization">
         <label>${t.stage}</label>
         <div class="subjects-grid">${stageRadios(lang, stageVal)}</div>
         <label>${t.track}</label>
         <div class="subjects-grid">${trackRadios(lang, student.track || "")}</div>
         <label>${t.phone}</label>
-        <input name="phone" type="tel" value="${escapeHtml(student.phone || "")}" required>
+        <input name="phone" type="tel" value="${escapeHtml(student.phone || "")}" autocomplete="tel" required>
         ${parentPhoneField(lang, student.parent_phone)}
         ${contactFields(lang, student)}
         <label>${t.email}</label>
-        <input name="email" type="email" value="${escapeHtml(student.email || "")}">
+        <input name="email" type="email" value="${escapeHtml(student.email || "")}" autocomplete="email">
         <label>${t.subjects}</label>
         <div class="subjects-grid">${subjectsCheckboxes(lang, student.subjects)}</div>
         <label>${t.payment}</label>
@@ -2535,7 +2574,7 @@ export default {
       }).join("");
       return `<form method="POST" action="${action}" enctype="multipart/form-data" onsubmit="return confirm(${JSON.stringify(t.confirm)})">
         <label>${t.name}</label>
-        <input name="name" placeholder="${t.namePh}" value="${escapeHtml(teacher?.name || "")}" required>
+        <input name="name" placeholder="${t.namePh}" value="${escapeHtml(teacher?.name || "")}" autocomplete="name" required>
         <label>${t.subject}</label>
         <select name="subject" required>${subjectOptions(lang, teacher?.subject || "")}</select>
         <label>${t.phase}</label>
@@ -2724,8 +2763,8 @@ export default {
         </div>
       </div></div>`).join("") || `<p class="empty">${t.empty}</p>`;
       const form = `<form method="POST" action="/admin/staff${langQs}">
-        <label>${t.email}</label><input name="email" type="email" placeholder="${t.emailPh}" required>
-        <label>${t.name}</label><input name="name" placeholder="${t.namePh}">
+        <label>${t.email}</label><input name="email" type="email" placeholder="${t.emailPh}" autocomplete="email" required>
+        <label>${t.name}</label><input name="name" placeholder="${t.namePh}" autocomplete="name">
         <label>${t.role}</label>
         <select name="role"><option value="clerk">${t.clerk}</option><option value="owner">${t.owner}</option><option value="viewer">${t.viewer}</option></select>
         <button type="submit">${t.add}</button>
@@ -2853,19 +2892,19 @@ export default {
       const teacherHeading = lang === "en" ? "👨‍🏫 Teachers for the subjects you picked" : "👨‍🏫 مدرسين المواد اللي اخترتها";
       const body = `<form method="POST" action="/register${langQs}" enctype="multipart/form-data">
         <label>${t.name}</label>
-        <input name="name" placeholder="${t.namePh}" required>
+        <input name="name" placeholder="${t.namePh}" autocomplete="name" required>
         <label>${t.school}</label>
-        <input name="school" placeholder="${t.schoolPh}">
+        <input name="school" placeholder="${t.schoolPh}" autocomplete="organization">
         <label>${t.stage}</label>
         <div class="subjects-grid">${stageRadios(lang)}</div>
         <label>${t.track}</label>
         <div class="subjects-grid">${trackRadios(lang, "")}</div>
         <label>${t.phone}</label>
-        <input name="phone" type="tel" placeholder="${t.phonePh}" required>
+        <input name="phone" type="tel" placeholder="${t.phonePh}" autocomplete="tel" required>
         ${parentPhoneField(lang, "")}
         ${contactFields(lang)}
         <label>${t.email}</label>
-        <input name="email" type="email" placeholder="${t.emailPh}">
+        <input name="email" type="email" placeholder="${t.emailPh}" autocomplete="email">
         <label>${t.subjects}</label>
         <div class="subjects-grid">${subjectsCheckboxes(lang)}</div>
         <div class="teacher-ref-panel" id="subject-teachers" hidden>
@@ -3272,102 +3311,175 @@ export default {
     // actual owner — no point explaining pages a clerk's account can't open.
     if (url.pathname === "/admin/guide" && request.method === "GET") {
       const isOwnerGuide = roleAllowed(staffRole, ["owner"]);
-      const sec = (id, title, bodyHtml) => `<h2 id="${id}" style="font-size:20px;margin:24px 0 10px">${title}</h2>${bodyHtml}`;
-      const toc = [
-        ["s-intake", "🏠 الشاشة الرئيسية"],
-        ["s-newstudent", "🆕 لما طالب جديد ييجي"],
-        ["s-session", "▶️ أثناء الحصة"],
-        ["s-find", "🔎 البحث عن طالب / تسجيل دفعة"],
-        ["s-lost", "❓ لو تهت"],
-        ["s-login", "🔐 لو ظهرلك شاشة تسجيل دخول"],
-        ...(isOwnerGuide ? [["s-owner", "⚙️ إدارة (مدير بس)"]] : [])
+      const sec = (id, bodyHtml) => `<div id="${id}">${bodyHtml}</div>`;
+      const numCircle = (n, x, y) => `<circle cx="${x}" cy="${y}" r="11" fill="#D42027"/><text x="${x}" y="${y + 5}" text-anchor="middle" font-size="13" font-weight="700" fill="#fff">${n}</text>`;
+
+      // Hand-built inline schematic diagrams (not real screenshots — see
+      // memory file harv-attendance-guide-redesign-2026-07-15 for why: vector
+      // prints crisp on the guide's own print button, real screenshots
+      // couldn't be reliably captured to disk this session). Colors match the
+      // real Harv tokens (--red #D42027, --ink #1A2744, --line #E5E7EB)
+      // directly rather than var() — these need to render identically in a
+      // printed page, not just on-screen.
+      const diagPayment = `<svg viewBox="0 0 300 150" role="img" aria-label="شاشة تسجيل الدفعة">
+  <rect x="0" y="0" width="300" height="150" fill="#fff"/>
+  <text x="150" y="26" text-anchor="middle" font-size="14" font-weight="800" fill="#D42027" direction="rtl">المطلوب: 600 · المدفوع: 400 · المتبقي: 200</text>
+  <rect x="30" y="46" width="180" height="34" rx="8" fill="#fff" stroke="#E5E7EB" stroke-width="2"/>
+  <text x="120" y="68" text-anchor="middle" font-size="13" fill="#5A6784" direction="rtl">اكتب المبلغ هنا</text>
+  ${numCircle("①", 224, 63)}
+  <rect x="30" y="96" width="240" height="38" rx="19" fill="#D42027"/>
+  <text x="150" y="120" text-anchor="middle" font-size="14" font-weight="700" fill="#fff" direction="rtl">تسجيل دفعة</text>
+  ${numCircle("②", 284, 115)}
+</svg>`;
+
+      const diagAttendance = `<svg viewBox="0 0 300 110" role="img" aria-label="شاشة تسجيل الحضور">
+  <rect x="0" y="0" width="300" height="110" fill="#fff"/>
+  <rect x="20" y="14" width="260" height="38" rx="19" fill="#D42027"/>
+  <text x="150" y="38" text-anchor="middle" font-size="14" font-weight="700" fill="#fff" direction="rtl">📷 سكانر الاستقبال</text>
+  ${numCircle("①", 284, 33)}
+  <rect x="20" y="62" width="260" height="34" rx="17" fill="#fff" stroke="#E5E7EB" stroke-width="2"/>
+  <text x="150" y="84" text-anchor="middle" font-size="13" font-weight="600" fill="#1A2744" direction="rtl">✅ حضور اليوم</text>
+</svg>`;
+
+      const diagSettlement = `<svg viewBox="0 0 300 150" role="img" aria-label="شاشة تسوية فلوس الأستاذ">
+  <rect x="0" y="0" width="300" height="150" fill="#fff"/>
+  <rect x="30" y="14" width="240" height="30" rx="8" fill="#fff" stroke="#E5E7EB" stroke-width="2"/>
+  <text x="150" y="34" text-anchor="middle" font-size="13" fill="#1A2744" direction="rtl">بالحصة — 25 جنيه</text>
+  <text x="150" y="72" text-anchor="middle" font-size="15" font-weight="800" fill="#D42027" direction="rtl">المستحق: 150.00</text>
+  ${numCircle("①", 264, 67)}
+  <rect x="30" y="92" width="240" height="38" rx="19" fill="#D42027"/>
+  <text x="150" y="116" text-anchor="middle" font-size="14" font-weight="700" fill="#fff" direction="rtl">تسجيل صرف</text>
+  ${numCircle("②", 284, 111)}
+</svg>`;
+
+      const diagAddStaff = `<svg viewBox="0 0 300 170" role="img" aria-label="شاشة إضافة موظف">
+  <rect x="0" y="0" width="300" height="170" fill="#fff"/>
+  <rect x="30" y="12" width="240" height="30" rx="8" fill="#fff" stroke="#E5E7EB" stroke-width="2"/>
+  <text x="150" y="32" text-anchor="middle" font-size="12" fill="#5A6784" direction="rtl">الإيميل</text>
+  <rect x="30" y="50" width="240" height="30" rx="8" fill="#fff" stroke="#E5E7EB" stroke-width="2"/>
+  <text x="150" y="70" text-anchor="middle" font-size="12" fill="#5A6784" direction="rtl">الاسم</text>
+  <rect x="30" y="88" width="240" height="30" rx="8" fill="#fff" stroke="#1A2744" stroke-width="2"/>
+  <text x="150" y="108" text-anchor="middle" font-size="12" font-weight="700" fill="#1A2744" direction="rtl">موظف استقبال ▾</text>
+  ${numCircle("①", 264, 103)}
+  <text x="150" y="146" text-anchor="middle" font-size="12" font-weight="700" fill="#D42027" direction="rtl">⚠️ اختار الصلاحية بعناية</text>
+</svg>`;
+
+      const diagNewStudent = `<svg viewBox="0 0 300 120" role="img" aria-label="شاشة إضافة طالب جديد">
+  <rect x="0" y="0" width="300" height="120" fill="#fff"/>
+  <rect x="30" y="14" width="240" height="34" rx="8" fill="#fff" stroke="#E5E7EB" stroke-width="2"/>
+  <text x="150" y="36" text-anchor="middle" font-size="13" fill="#5A6784" direction="rtl">اسم الطالب</text>
+  ${numCircle("①", 264, 31)}
+  <rect x="30" y="62" width="240" height="38" rx="19" fill="#D42027"/>
+  <text x="150" y="86" text-anchor="middle" font-size="13" font-weight="700" fill="#fff" direction="rtl">إضافة طالب (بيحتاج معالجة)</text>
+</svg>`;
+
+      // Clerk-visible task launcher — Hazem's own example phrases ("عايز
+      // أضيف فلوس" / "أتأكد مين لسه مدفعش") drove the card wording directly.
+      const clerkTasks = [
+        ["#t-newstudent", "🆕", "سجل طالب جديد"],
+        ["#t-pay", "💵", "حصّل فلوس من طالب"],
+        ["#t-owing", "📊", "اتأكد مين لسه مدفعش"],
+        ["#t-attendance", "✅", "سجل حضور"],
+        ["#t-find", "🔎", "دور على بيانات طالب"]
       ];
+      const ownerTasks = [
+        ["#t-teacherpay", "💰", "ادفع للأستاذ"],
+        ["#t-staff", "👥", "ضيف/عدّل موظف"],
+        ["#t-ledger", "📒", "دفتر الحساب"]
+      ];
+      const taskCard = ([href, icon, label]) => `<a class="guide-task" href="${href}"><span class="gt-icon">${icon}</span>${label}</a>`;
+
       const body = `
-<p class="no-print"><button onclick="window.print()">🖨️ اطبع الدليل</button></p>
-<p>الدليل ده يشرح خطوات الشغل اليومي خطوة بخطوة. دوس على أي عنوان تحت تروح له على طول.</p>
-<ul class="no-print" style="line-height:2">
-  ${toc.map(([id, label]) => `<li><a href="#${id}">${label}</a></li>`).join("")}
-</ul>
+<p class="guide-intro">عايز تعمل إيه دلوقتي؟ دوس على الكارت وهيوديك على طول لخطوات الشغل.${isOwnerGuide ? ` <a href="#s-owner">أنت مدير — روح لقسم الإدارة</a>.` : ""}</p>
 
-${sec("s-intake", "🏠 الشاشة الرئيسية", `
-<p>هي أول حاجة بتفتح لك بعد تسجيل الدخول — <a href="/admin/intake">الرئيسية</a>. فيها بس اللي محتاجه دلوقتي:</p>
-<ul style="line-height:2">
-  <li><strong>بانتظار المعالجة</strong> — الطلاب اللي لسه محتاجين تسجيل بياناتهم ودفع الفلوس.</li>
-  <li><strong>الحصص والمجموعات</strong> — روابط لـ <a href="/admin/groups">المجموعات</a>، <a href="/admin/rooms">القاعات</a>، <a href="/admin/estamarat">الاستمارات</a> (كل الطلاب المسجلين وفلوسهم)، و<a href="/admin/promotions">العروض</a>.</li>
-  <li>زرار كبير فوق "أثناء الحصة" — دوس عليه لما الطلاب يبقوا جوه الحصة (شوف قسم <a href="#s-session">أثناء الحصة</a>).</li>
-</ul>`)}
+<div class="guide-tasks">${clerkTasks.map(taskCard).join("")}</div>
 
-${sec("s-newstudent", "🆕 لما طالب جديد ييجي", `
-<ol style="line-height:2">
+${isOwnerGuide ? `<div class="guide-owner-zone" id="s-owner">
+  <h2>🔒 لو انت مدير</h2>
+  <p>القسم ده مش ظاهر لموظف الاستقبال العادي. صلاحية "مدير" مش حساب واحد بس متسجل مسبقاً — تقدر تضيف أي عدد من الموظفين كـ"مدير" من <a href="/admin/staff">الموظفين</a>. كل حاجة هنا بتفضل مقفولة على المدير بس — أما شغل الاستقبال اليومي (تسجيل طالب، تسجيل دفعة، معرفة رصيد طالب) فمفتوح لأي موظف، عشان موظف الاستقبال ميتعطلش وهو بيحصّل فلوس.</p>
+  <div class="guide-tasks">${ownerTasks.map(taskCard).join("")}</div>
+</div>` : ""}
+
+${sec("t-newstudent", `
+<h2 style="font-size:20px;margin:24px 0 10px">🆕 سجل طالب جديد</h2>
+<ol class="guide-steps">
   <li>ابعتله رابط التسجيل — <code>/register</code> — يملأه بنفسه من موبايله لو معاه نت.</li>
-  <li>لو مفيش نت معاه، افتح <a href="/admin">صفحة الطلاب</a> واكتب اسمه بس في نموذج "إضافة طالب"، وكمل الباقي بعدين.</li>
-  <li>هتلاقيه في <a href="/admin">صفحة الطلاب</a> تحت "بانتظار المعالجة" باللون الأحمر (ولينك سريع ليها من <a href="/admin/intake">الرئيسية</a>).</li>
-  <li>دوس "معالجة" جنب اسمه.</li>
-  <li>اكتب/راجع بياناته، اختار المواد، وحدد اسم الأستاذ والمعاد والمبلغ لكل مادة (الأستاذ بيتفلتر تلقائي حسب المادة).</li>
-  <li>اختار طريقة الدفع (كاش / إنستاباي / فودافون كاش).</li>
-  <li>دوس زرار "تم الدفع - إصدار QR" — هيظهرلك كود الدخول بتاعه واستمارته كاملة، وتقدر تبعتلها على الواتساب بدوسة واحدة.</li>
-</ol>`)}
+  <li>لو مفيش نت معاه، افتح <a href="/admin/intake">الرئيسية</a> واكتب اسمه بس في نموذج "طالب جديد وصل دلوقتي"، وكمل الباقي بعدين.</li>
+  <li>دوس "معالجة" جنب اسمه، اختار المواد، وحدد اسم الأستاذ والمعاد (من <a href="/admin/groups">المجموعات</a> بتاعته) والمبلغ لكل مادة.</li>
+  <li>اختار طريقة الدفع (كاش / إنستاباي / فودافون كاش) ودوس "تم الدفع - إصدار QR".</li>
+</ol>
+<div class="guide-shot">${diagNewStudent}</div>
+<a class="guide-task-link" href="/admin/intake">الرئيسية</a>
+`)}
 
-${sec("s-session", "▶️ أثناء الحصة", `
-<p>لما الطلاب يوصلوا ويدخلوا الحصة، روح لـ <a href="/admin/session">أثناء الحصة</a> (زرار كبير في الرئيسية). هتلاقي:</p>
-<ul style="line-height:2">
-  <li><strong><a href="/admin/today">حضور اليوم</a></strong> — مين حضر النهاردة.</li>
-  <li><strong><a href="/admin/counter">سكانر الاستقبال</a></strong> — لو معاك جهاز سكانر QR متوصل بالكمبيوتر، افتح الصفحة دي ووجّه السكانر على كود الطالب، هيتسجل حضوره تلقائي من غير ما تدوس أي حاجة.</li>
-  <li><strong><a href="/admin/print">كشف ورقي</a></strong> — احتياطي لو النت وقع، تطبعه وتعلّم عليه بالإيد.</li>
-  <li><strong>بحث عن طالب</strong> — لو طالب محتاج يدفع أو تراجع بياناته وهو جوه الحصة (شوف القسم اللي جاي).</li>
-</ul>`)}
-
-${sec("s-find", "🔎 البحث عن طالب / تسجيل دفعة", `
-<ul style="line-height:2">
-  <li>دوس على اسم أي طالب في أي مكان — <a href="/admin">صفحة الطلاب</a>، <a href="/admin/today">حضور اليوم</a>، أو <a href="/admin/estamarat">الاستمارات</a> — هيفتحلك استمارته كاملة.</li>
-  <li>من صفحة استمارته تقدر: تشوف المطلوب/المدفوع/المتبقي، تسجل دفعة جديدة، تبعتله رابطه على الواتساب تاني، أو تلغي مادة اشترك فيها غلط.</li>
-</ul>
-<p><strong>تسجيل دفعة — إزاي تفهم الأرقام:</strong></p>
-<ul style="line-height:2">
-  <li><strong>المطلوب</strong> = مجموع تمن كل المواد اللي الطالب مسجل فيها (بعد أي خصم).</li>
-  <li><strong>المدفوع</strong> = مجموع كل الدفعات اللي اتسجلت له لحد دلوقتي.</li>
+${sec("t-pay", `
+<h2 style="font-size:20px;margin:24px 0 10px">💵 حصّل فلوس من طالب</h2>
+<p>دوس على اسم الطالب في أي مكان — <a href="/admin/today">حضور اليوم</a> أو <a href="/admin/estamarat">الاستمارات</a> — هيفتحلك استمارته كاملة فيها المطلوب/المدفوع/المتبقي وزرار تسجيل الدفعة.</p>
+<ul class="guide-steps">
   <li><strong>المتبقي</strong> = المطلوب ناقص المدفوع. لو الطالب دفع أكتر من المطلوب، بدل "المتبقي" هيظهرله <strong>"رصيد للطالب"</strong> (يعني له فلوس زيادة عندك، مش عليه).</li>
-  <li>مينفعش تسجل دفعة بمبلغ صفر أو سالب — النظام مش هيقبلها ولا هيسجلها، وهيبينلك رسالة إنها متسجلتش.</li>
   <li>مش لازم الطالب يدفع كل المطلوب مرة واحدة — تقدر تسجل دفعة جزء بس (مثلاً 100 من أصل 300)، والمتبقي هيفضل ظاهر عشان تكمله بعدين.</li>
-  <li><strong>دوس "تسجيل دفعة" مرة واحدة بس.</strong> لو النت بطيء أو الصفحة اتأخرت في الرد، متضغطش تاني — النظام بيتجاهل أي دفعة مكررة بنفس المبلغ خلال نفس اللحظة، بس أحسن إنك متعتمدش على كده وتستنى الصفحة تحمّل.</li>
-</ul>`)}
-
-${sec("s-lost", "❓ لو تهت", `
-<ul style="line-height:2">
-  <li>دوس على شعار هارف فوق في أي وقت، وهيرجعك لـ <a href="/admin/intake">الرئيسية</a> على طول.</li>
-  <li>أو دوس "🏠 الرئيسية" في شريط التنقل فوق.</li>
-</ul>`)}
-
-${sec("s-login", "🔐 لو ظهرلك شاشة تسجيل دخول", `
-<p>ده طبيعي، بيحصل كل شهر تقريبًا. اكتب إيميلك، وهيبعتلك كود من 6 أرقام على نفس الإيميل — افتح الإيميل واكتب الكود.</p>`)}
-
-${isOwnerGuide ? sec("s-owner", "⚙️ إدارة (مدير بس)", `
-<p>القسم ده مش ظاهر لموظف الاستقبال العادي — بيظهر بس للمدير. تلاقيه من <a href="/admin/owner">إدارة</a> في شريط التنقل.</p>
-<p>صلاحية "مدير" مش حساب واحد بس متسجل مسبقاً — تقدر تضيف أي عدد من الموظفين كـ"مدير" من <a href="/admin/staff">الموظفين</a>. كل حاجة تحت "⚙️ إدارة" (إعداد أسعار القاعات والمجموعات، دفتر الحساب، مستحقات الأساتذة، وإدارة الموظفين نفسها) بتفضل مقفولة على المدير بس — أما شغل الاستقبال اليومي (تسجيل طالب، تسجيل دفعة، معرفة رصيد طالب، إلغاء اشتراك) فمفتوح لأي موظف، عشان موظف الاستقبال ميتعطلش وهو بيحصّل فلوس.</p>
-<ul style="line-height:2">
-  <li><strong><a href="/admin/ledger">دفتر الحساب</a></strong> — كل الفلوس الداخلة والخارجة، وتقدر تسجل مصروف (إيجار، مرتبات، فاتورة تليفون...) من هنا.</li>
-  <li><strong><a href="/admin/teachers">الأساتذة</a></strong> — تحدد لكل أستاذ نسبته (بالحصة أو نسبة %)، وتشوف مين محتاج تسوية فلوس دلوقتي في قسم "⚠️ يحتاج متابعة" فوق الصفحة.</li>
-  <li><strong><a href="/admin/staff">الموظفين</a></strong> — تضيف موظف جديد وتحدد صلاحيته (مدير / موظف استقبال / مشاهدة فقط).</li>
+  <li><strong>دوس "تسجيل دفعة" مرة واحدة بس</strong> وسيبها تخلص قبل ما تدوس تاني.</li>
 </ul>
+<div class="guide-shot">${diagPayment}</div>
+`)}
 
-<h3 style="font-size:17px;margin:20px 0 8px">💰 تسوية فلوس الأساتذة</h3>
+${sec("t-owing", `
+<h2 style="font-size:20px;margin:24px 0 10px">📊 اتأكد مين لسه مدفعش</h2>
+<p>افتح <a href="/admin/estamarat">الاستمارات</a> — هتلاقي كل الطلاب وإجمالي فلوسهم في مكان واحد، دوس على أي اسم عشان تشوف تفاصيله وتسجل دفعة لو محتاج.</p>
+`)}
+
+${sec("t-attendance", `
+<h2 style="font-size:20px;margin:24px 0 10px">✅ سجل حضور</h2>
+<ul class="guide-steps">
+  <li><strong><a href="/admin/counter">سكانر الاستقبال</a></strong> — لو معاك جهاز سكانر QR متوصل بالكمبيوتر، افتح الصفحة دي ووجّه السكانر على كود الطالب، هيتسجل حضوره تلقائي من غير ما تدوس أي حاجة.</li>
+  <li><strong><a href="/admin/today">حضور اليوم</a></strong> — مين حضر النهاردة.</li>
+  <li><strong><a href="/admin/print">كشف ورقي</a></strong> — احتياطي لو النت وقع، تطبعه وتعلّم عليه بالإيد.</li>
+</ul>
+<div class="guide-shot">${diagAttendance}</div>
+`)}
+
+${sec("t-find", `
+<h2 style="font-size:20px;margin:24px 0 10px">🔎 دور على بيانات طالب</h2>
+<p>دوس على اسم أي طالب في أي مكان — <a href="/admin">صفحة الطلاب</a>، <a href="/admin/today">حضور اليوم</a>، أو <a href="/admin/estamarat">الاستمارات</a> — هيفتحلك استمارته كاملة (بياناته، المواد، الفلوس)، وتقدر تبعتله رابطه على الواتساب تاني من هناك.</p>
+`)}
+
+${isOwnerGuide ? sec("t-teacherpay", `
+<h2 style="font-size:20px;margin:24px 0 10px">💰 ادفع للأستاذ</h2>
 <p>كل أستاذ ليه طريقة حساب واحدة بس، بتحددها من <a href="/admin/teachers">صفحة الأساتذة</a>:</p>
-<ul style="line-height:2">
-  <li><strong>بالحصة</strong> — مبلغ ثابت عن كل حصة فعلاً اتعملت (مش عن كل طالب حضر — لو 10 طلبة حضروا نفس الحصة، دي حصة واحدة بس).</li>
-  <li><strong>نسبة %</strong> — نسبة من الفلوس اللي <em>اتحصّلت فعلاً</em> من الطلاب المسجلين في مجموعاته (مش من إجمالي المطلوب — لو طالب لسه مدفعش، الأستاذ مش بياخد نسبة منه لحد ما يدفع).</li>
+<ul class="guide-steps">
+  <li><strong>بالحصة</strong> — مبلغ ثابت عن كل حصة فعلاً اتعملت (مش عن كل طالب حضر).</li>
+  <li><strong>نسبة %</strong> — نسبة من الفلوس اللي اتحصّلت فعلاً من طلابه (لو طالب لسه مدفعش، الأستاذ مش بياخد نسبة منه لحد ما يدفع).</li>
+  <li>لو دفعتله <strong>أقل</strong> من المستحق، الفترة بتفضل مفتوحة والباقي بيتراكم — الأستاذ مش بيضيع حقه.</li>
+  <li><strong>دوس "تسجيل صرف" مرة واحدة بس</strong> وسيبها تخلص قبل ما تدوس تاني.</li>
 </ul>
-<p>لما تدخل صفحة تسوية أستاذ معين، هتلاقي "المستحق" محسوب من آخر مرة اتسوت له فلوس (أو من الأول لو أول مرة). لو دفعتله <strong>أقل</strong> من المستحق، الفترة بتفضل مفتوحة والباقي بيتراكم للمرة الجاية — الأستاذ مش بيضيع حقه. لو دفعتله المستحق كامل (أو أكتر)، الفترة بتتقفل والحساب بيبدأ من تاني من النهاردة.</p>
-<p><strong>زي تسجيل الدفعة بالظبط — دوس "تسجيل صرف" مرة واحدة بس</strong> وسيبه يخلص قبل ما تدوس تاني، عشان تتجنب أي تسجيل مكرر لنفس المبلغ.</p>
+<div class="guide-shot">${diagSettlement}</div>
+<a class="guide-task-link" href="/admin/teachers">الأساتذة</a>
+`) : ""}
 
-<h3 style="font-size:17px;margin:20px 0 8px">👥 صلاحيات الموظفين</h3>
+${isOwnerGuide ? sec("t-staff", `
+<h2 style="font-size:20px;margin:24px 0 10px">👥 ضيف/عدّل موظف</h2>
+<h3 style="font-size:17px;margin:16px 0 8px">صلاحيات الموظفين</h3>
 <p>من <a href="/admin/staff">صفحة الموظفين</a> تقدر تضيف أي موظف بإيميله، وتحدد صلاحيته من 3:</p>
-<ul style="line-height:2">
-  <li><strong>مدير</strong> — يشوف ويعمل كل حاجة، بما فيها الصفحات اللي تحت "⚙️ إدارة" ده.</li>
-  <li><strong>موظف استقبال</strong> — الصلاحية الافتراضية. يقدر يسجل طلاب جدد، يسجل حضور ودفعات، ويشوف بيانات الطلاب — بس مش هيقدر يفتح دفتر الحساب أو الأساتذة أو الموظفين.</li>
-  <li><strong>مشاهدة فقط</strong> — يقدر يشوف الصفحات بس، مش هيقدر يسجل أو يعدل أي حاجة خالص (لا طالب جديد، لا دفعة، ولا حتى تسجيل حضور).</li>
+<ul class="guide-steps">
+  <li><strong>مدير</strong> — يشوف ويعمل كل حاجة، بما فيها قسم "لو انت مدير" ده.</li>
+  <li><strong>موظف استقبال</strong> — الصلاحية الافتراضية. يقدر يسجل طلاب جدد، يسجل حضور ودفعات — بس مش هيقدر يفتح دفتر الحساب أو الأساتذة أو الموظفين.</li>
+  <li><strong>مشاهدة فقط</strong> — يقدر يشوف الصفحات بس، مش هيقدر يسجل أو يعدل أي حاجة خالص.</li>
 </ul>
-<p>لو دوست "إيقاف" جنب اسم موظف، ده بيقفل عليه <strong>كل حاجة</strong> في النظام على طول — مش بس صفحات الإدارة، حتى شغل الاستقبال العادي. يعني الموظف اللي وقفته مش هيقدر يسجل حضور ولا يفتح أي صفحة تاني.</p>
-<p>النظام مش هيسيبك توقف أو "تنزّل" (تغيّر صلاحية) آخر مدير شغال في القائمة — لازم يفضل مدير واحد على الأقل شغال طول الوقت، عشان محدش يقفل على نفسه بالغلط.</p>`) : ""}`;
+<p>لو دوست "إيقاف" جنب اسم موظف، ده بيقفل عليه <strong>كل حاجة</strong> في النظام على طول. والنظام مش هيسيبك توقف أو تنزّل آخر مدير شغال — لازم يفضل مدير واحد على الأقل شغال طول الوقت.</p>
+<div class="guide-shot">${diagAddStaff}</div>
+<a class="guide-task-link" href="/admin/staff">الموظفين</a>
+`) : ""}
+
+${isOwnerGuide ? sec("t-ledger", `
+<h2 style="font-size:20px;margin:24px 0 10px">📒 دفتر الحساب</h2>
+<p><a href="/admin/ledger">دفتر الحساب</a> فيه كل الفلوس الداخلة والخارجة، وتقدر تسجل مصروف (إيجار، مرتبات، فاتورة تليفون...) من هنا. تقدر كمان تشوف مين محتاج تسوية فلوس دلوقتي من قسم "⚠️ يحتاج متابعة" فوق <a href="/admin/teachers">صفحة الأساتذة</a>. وتلاقي روابط لـ <a href="/admin/groups">المجموعات</a>، <a href="/admin/rooms">القاعات</a>، و<a href="/admin/promotions">العروض</a> من هناك برضه.</p>
+`) : ""}
+
+<div class="guide-faq">
+  <p>❓ <strong>لو تهت:</strong> دوس على شعار هارف فوق في أي وقت، وهيرجعك لـ<a href="/admin/intake">الرئيسية</a> على طول.</p>
+  <p>🔐 <strong>لو ظهرلك شاشة تسجيل دخول:</strong> ده طبيعي، بيحصل كل شهر تقريبًا. اكتب إيميلك، وهيبعتلك كود من 6 أرقام على نفس الإيميل — افتح الإيميل واكتب الكود.</p>
+  <p class="no-print"><a class="guide-print-link" href="javascript:window.print()">🖨️ اطبع الدليل</a></p>
+</div>`;
       return new Response(page("دليل الموظفين", body, { isOwner: isOwnerGuide }), { headers: { "content-type": "text/html;charset=utf-8" } });
     }
 
