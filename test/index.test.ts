@@ -2842,6 +2842,22 @@ describe("POST /admin/teachers/:id/rename (Phase 4 — rename is its own dedicat
     const res = await adminFetch("https://example.com/admin/teachers/does-not-exist/rename", { method: "POST", body: form });
     expect(res.status).toBe(404);
   });
+
+  it("does not steal a different teacher's legacy group when two teachers currently share the same name (claude-review, PR #19)", async () => {
+    // teachers.name has no uniqueness constraint -- A and B legitimately
+    // share a display name here. Renaming A must not touch B's legacy
+    // (teacher_id IS NULL) group, which only matches by name text.
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('rename-test-collision-a', 'أ. اسم مشترك', 'math')").run();
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('rename-test-collision-b', 'أ. اسم مشترك', 'physics')").run();
+    await env.DB.prepare("INSERT INTO groups (teacher_id, teacher_name, subject) VALUES (NULL, 'أ. اسم مشترك', 'physics')").run();
+    const form = new FormData();
+    form.set("name", "أ. بعد التغيير");
+    await adminFetch("https://example.com/admin/teachers/rename-test-collision-a/rename", { method: "POST", body: form });
+    const group = await env.DB.prepare("SELECT teacher_name FROM groups WHERE teacher_id IS NULL AND teacher_name = 'أ. اسم مشترك'").first();
+    expect(group).toBeTruthy(); // B's legacy group still shows the shared name, not silently reassigned to A's new name
+    const bRow = await env.DB.prepare("SELECT name FROM teachers WHERE id = 'rename-test-collision-b'").first() as any;
+    expect(bRow.name).toBe("أ. اسم مشترك"); // B's own row is untouched too
+  });
 });
 
 // scripts/import-teachers.js generates and this test applies the same

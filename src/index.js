@@ -2972,7 +2972,20 @@ export default {
       // legacy-matched (by old name text) rows so owed math and the
       // schedule display don't silently go stale after a rename.
       for (const id of siblingIds) stmts.push(env.DB.prepare("UPDATE groups SET teacher_name = ? WHERE teacher_id = ?").bind(newName, id));
-      stmts.push(env.DB.prepare("UPDATE groups SET teacher_name = ? WHERE teacher_id IS NULL AND teacher_name = ?").bind(newName, oldName));
+      // claude-review (PR #19): teachers.name has no uniqueness constraint,
+      // so a free-text legacy-group update keyed only on oldName could
+      // silently steal a DIFFERENT teacher's legacy groups if that teacher
+      // currently happens to share the same name -- corrupting their
+      // computeTeacherOwed() legacy fallback. Only touch legacy groups when
+      // oldName is actually unique to this person right now; otherwise skip
+      // it (the FK-linked update above still ran, which is the safe path --
+      // legacy groups just keep their stale name until re-linked by id).
+      const collision = await env.DB.prepare(
+        `SELECT COUNT(*) AS n FROM teachers WHERE name = ? AND id NOT IN (${siblingIds.map(() => "?").join(",")})`
+      ).bind(oldName, ...siblingIds).first();
+      if (collision.n === 0) {
+        stmts.push(env.DB.prepare("UPDATE groups SET teacher_name = ? WHERE teacher_id IS NULL AND teacher_name = ?").bind(newName, oldName));
+      }
       await env.DB.batch(stmts);
       return Response.redirect(url.origin + `/admin/teachers${langQs}`, 303);
     }
@@ -3608,6 +3621,12 @@ export default {
       if (window.jsQR || barcodeDetector) { then(); return; }
       var s = document.createElement("script");
       s.src = "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js";
+      // claude-review (PR #19): this loads into the owner-authenticated admin
+      // page, so a compromised CDN/package would get that session's access.
+      // SRI hash computed directly from the fetched jsqr@1.4.0 file (a
+      // pinned npm version on jsDelivr is immutable, so this hash is stable).
+      s.integrity = "sha384-b5Ya4Bq3qCyz39m2ISh+4DxjAIljdeFwK/BsXLuj9gugaNwAcj/ia15fxNZL9Nlx";
+      s.crossOrigin = "anonymous";
       s.onload = then;
       s.onerror = function(){ setStatus("warn", null, "معرفناش نحمّل أداة قراءة الكود — استخدم سكانر الجهاز"); switchMode("device"); };
       document.head.appendChild(s);
