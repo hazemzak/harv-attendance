@@ -112,7 +112,8 @@ CREATE TABLE groups (
   room_id INTEGER REFERENCES rooms(id),
   capacity INTEGER,
   price REAL,
-  active INTEGER NOT NULL DEFAULT 1
+  active INTEGER NOT NULL DEFAULT 1,
+  series_key TEXT
 );
 
 CREATE INDEX idx_groups_active ON groups(active);
