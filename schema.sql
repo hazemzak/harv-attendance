@@ -60,6 +60,18 @@ CREATE TABLE teachers (
   photo_blob_type TEXT
 );
 
+-- Up to 3 day+time-range slots per teacher, replacing free-text
+-- teachers.schedule as the source of truth (that column is left in place,
+-- deprecated/unread). day_of_week matches groups.day's short slugs.
+CREATE TABLE teacher_availability (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  teacher_id TEXT NOT NULL REFERENCES teachers(id) ON DELETE CASCADE,
+  day_of_week TEXT NOT NULL,
+  start_time TEXT NOT NULL,
+  end_time TEXT NOT NULL
+);
+CREATE INDEX idx_teacher_availability_teacher ON teacher_availability(teacher_id);
+
 -- Staff roles, keyed by the Cloudflare Access-authenticated email (no separate
 -- password system — Access already authenticates every /admin* request).
 CREATE TABLE staff (

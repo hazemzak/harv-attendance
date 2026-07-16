@@ -806,15 +806,14 @@ describe("/register: subject → teacher live panel (added 2026-07-13, most stud
     expect(html).toContain("أ. أحمد");
   });
 
-  it("teacherCard() escapes schedule and mode, not just name/phase (claude-review, this session -- t.name/phase were escaped in an earlier fix on this branch, but t.schedule/t.mode in the same function were missed)", async () => {
+  it("teacherCard() escapes mode, not just name/phase (claude-review, this session -- t.name/phase were escaped in an earlier fix on this branch, but t.mode in the same function was missed; schedule is no longer free text -- see the teacher_availability tests -- so it has no injection vector left to test here)", async () => {
     await env.DB.prepare(
-      "INSERT INTO teachers (id, name, subject, phase, mode, schedule, track) VALUES ('t-xss', 'أ. تست', 'math', NULL, '<script>alert(1)</script>', '<img src=x onerror=alert(2)>', NULL)"
+      "INSERT INTO teachers (id, name, subject, phase, mode, track) VALUES ('t-xss', 'أ. تست', 'math', NULL, '<script>alert(1)</script>', NULL)"
     ).run();
 
     const res = await SELF.fetch("https://example.com/register");
     const html = await res.text();
     expect(html).not.toContain("<script>alert(1)</script>");
-    expect(html).not.toContain("<img src=x onerror=alert(2)>");
   });
 
   it("keeps a dual-track subject's Arabic and English-cousin teacher lists separate", async () => {
@@ -842,16 +841,19 @@ describe("/register: subject → teacher live panel (added 2026-07-13, most stud
 });
 
 describe("/register: teacher picker (added 2026-07-13, students can now select a teacher, not just view them)", () => {
-  it("renders a selectable radio per teacher with the pick_<slug> name and a data-teacher-schedule attribute", async () => {
+  it("renders a selectable radio per teacher with the pick_<slug> name and a data-teacher-schedule attribute generated from teacher_availability", async () => {
     await env.DB.prepare(
-      "INSERT INTO teachers (id, name, subject, phase, mode, schedule, track, photo) VALUES ('t-pick-1', 'أ. جمال', 'math', NULL, 'سنتر', 'الجمعة 4PM', NULL, '/designs/teachers/gamal.jpg')"
+      "INSERT INTO teachers (id, name, subject, phase, mode, track, photo) VALUES ('t-pick-1', 'أ. جمال', 'math', NULL, 'سنتر', NULL, '/designs/teachers/gamal.jpg')"
+    ).run();
+    await env.DB.prepare(
+      "INSERT INTO teacher_availability (teacher_id, day_of_week, start_time, end_time) VALUES ('t-pick-1', 'fri', '16:00', '18:00')"
     ).run();
 
     const res = await SELF.fetch("https://example.com/register");
     const html = await res.text();
     expect(html).toContain('name="pick_math"');
     expect(html).toContain('value="t-pick-1"');
-    expect(html).toContain('data-teacher-schedule="الجمعة 4PM"');
+    expect(html).toContain('data-teacher-schedule="الجمعة 16:00–18:00"');
     expect(html).toContain('src="https://harvcentereg.com/designs/teachers/gamal.jpg"');
   });
 
@@ -876,7 +878,10 @@ describe("/register: teacher picker (added 2026-07-13, students can now select a
 
   it("seeds a booking row (amount 0) from a pick_<slug> selection on submit", async () => {
     await env.DB.prepare(
-      "INSERT INTO teachers (id, name, subject, phase, mode, schedule, track) VALUES ('t-pick-2', 'أ. سامي', 'physics', NULL, 'سنتر', 'الأحد 6PM', NULL)"
+      "INSERT INTO teachers (id, name, subject, phase, mode, track) VALUES ('t-pick-2', 'أ. سامي', 'physics', NULL, 'سنتر', NULL)"
+    ).run();
+    await env.DB.prepare(
+      "INSERT INTO teacher_availability (teacher_id, day_of_week, start_time, end_time) VALUES ('t-pick-2', 'sun', '18:00', '20:00')"
     ).run();
     const form = new FormData();
     form.set("name", "Picker Test Student");
@@ -891,7 +896,7 @@ describe("/register: teacher picker (added 2026-07-13, students can now select a
     const { results: students } = await env.DB.prepare("SELECT id FROM students WHERE name = ?").bind("Picker Test Student").all();
     const studentId = (students[0] as any).id;
     const { results: bookings } = await env.DB.prepare("SELECT subject, teacher_name, schedule, amount FROM bookings WHERE student_id = ?").bind(studentId).all();
-    expect(bookings).toEqual([{ subject: "physics", teacher_name: "أ. سامي", schedule: "الأحد 6PM", amount: 0 }]);
+    expect(bookings).toEqual([{ subject: "physics", teacher_name: "أ. سامي", schedule: "الأحد 18:00–20:00", amount: 0 }]);
   });
 
   it("does not insert a booking when no teacher was picked for a subject", async () => {
@@ -2208,11 +2213,15 @@ describe("/admin/teachers/new + /admin/teachers (add): teacher-editor screen (ad
     form.set("phase", "bac2");
     form.set("mode", "سنتر");
     form.set("track", "arabic");
-    form.set("schedule", "الاثنين ٥-٧");
+    form.set("avail_day_1", "mon");
+    form.set("avail_from_1", "17:00");
+    form.set("avail_to_1", "19:00");
     const res = await adminFetch("https://example.com/admin/teachers", { method: "POST", body: form, redirect: "manual" });
     expect(res.status).toBe(303);
-    const row = await env.DB.prepare("SELECT * FROM teachers WHERE name = 'أ. تيست جديد'").first();
-    expect(row).toMatchObject({ subject: "math", subject_label: "رياضيات", phase: "bac2", mode: "سنتر", track: "arabic", schedule: "الاثنين ٥-٧" });
+    const row = await env.DB.prepare("SELECT * FROM teachers WHERE name = 'أ. تيست جديد'").first() as any;
+    expect(row).toMatchObject({ subject: "math", subject_label: "رياضيات", phase: "bac2", mode: "سنتر", track: "arabic" });
+    const avail = await env.DB.prepare("SELECT day_of_week, start_time, end_time FROM teacher_availability WHERE teacher_id = ?").bind(row.id).all();
+    expect(avail.results).toEqual([{ day_of_week: "mon", start_time: "17:00", end_time: "19:00" }]);
   });
 
   it("rejects an unknown/crafted subject value instead of storing it raw", async () => {
@@ -2278,6 +2287,96 @@ describe("/admin/teachers/:id/edit + /admin/teachers/:id (update): editing an ex
     await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('edit-test-3', 'أ. محمي', 'math')").run();
     expect((await clerkFetch("https://example.com/admin/teachers/edit-test-3/edit")).status).toBe(403);
     expect((await clerkFetch("https://example.com/admin/teachers/edit-test-3", { method: "POST", body: new FormData() })).status).toBe(403);
+  });
+});
+
+describe("teacher_availability: structured schedule picker, up to 3 day+time rows (added 2026-07-16)", () => {
+  it("silently skips a row with an unknown/crafted day value instead of erroring", async () => {
+    const form = new FormData();
+    form.set("name", "أ. يوم مزور");
+    form.set("subject", "math");
+    form.set("avail_day_1", "notaday");
+    form.set("avail_from_1", "17:00");
+    form.set("avail_to_1", "19:00");
+    const res = await adminFetch("https://example.com/admin/teachers", { method: "POST", body: form, redirect: "manual" });
+    expect(res.status).toBe(303);
+    const row = await env.DB.prepare("SELECT id FROM teachers WHERE name = 'أ. يوم مزور'").first() as any;
+    const avail = await env.DB.prepare("SELECT * FROM teacher_availability WHERE teacher_id = ?").bind(row.id).all();
+    expect(avail.results.length).toBe(0);
+  });
+
+  it("rejects a row with a day but a malformed/missing time, and creates no teacher", async () => {
+    const form = new FormData();
+    form.set("name", "أ. وقت مكسور");
+    form.set("subject", "math");
+    form.set("avail_day_1", "mon");
+    form.set("avail_from_1", "25:99");
+    form.set("avail_to_1", "19:00");
+    const res = await adminFetch("https://example.com/admin/teachers", { method: "POST", body: form });
+    expect(res.status).toBe(400);
+    const row = await env.DB.prepare("SELECT id FROM teachers WHERE name = 'أ. وقت مكسور'").first();
+    expect(row).toBeNull();
+  });
+
+  it("rejects a row where end <= start, and creates no teacher", async () => {
+    const form = new FormData();
+    form.set("name", "أ. وقت معكوس");
+    form.set("subject", "math");
+    form.set("avail_day_1", "mon");
+    form.set("avail_from_1", "19:00");
+    form.set("avail_to_1", "17:00");
+    const res = await adminFetch("https://example.com/admin/teachers", { method: "POST", body: form });
+    expect(res.status).toBe(400);
+    const row = await env.DB.prepare("SELECT id FROM teachers WHERE name = 'أ. وقت معكوس'").first();
+    expect(row).toBeNull();
+  });
+
+  it("editing with fewer rows replaces rather than accumulates duplicates", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('avail-edit-1', 'أ. مواعيد', 'math')").run();
+    await env.DB.prepare(
+      "INSERT INTO teacher_availability (teacher_id, day_of_week, start_time, end_time) VALUES ('avail-edit-1', 'sat', '10:00', '12:00'), ('avail-edit-1', 'mon', '10:00', '12:00')"
+    ).run();
+    const form = new FormData();
+    form.set("name", "أ. مواعيد");
+    form.set("subject", "math");
+    form.set("avail_day_1", "wed");
+    form.set("avail_from_1", "16:00");
+    form.set("avail_to_1", "18:00");
+    await adminFetch("https://example.com/admin/teachers/avail-edit-1", { method: "POST", body: form });
+    const avail = await env.DB.prepare("SELECT day_of_week, start_time, end_time FROM teacher_availability WHERE teacher_id = 'avail-edit-1'").all();
+    expect(avail.results).toEqual([{ day_of_week: "wed", start_time: "16:00", end_time: "18:00" }]);
+  });
+
+  it("edit-form GET pre-fills the existing day selections and time values", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('avail-edit-2', 'أ. عرض المواعيد', 'math')").run();
+    await env.DB.prepare(
+      "INSERT INTO teacher_availability (teacher_id, day_of_week, start_time, end_time) VALUES ('avail-edit-2', 'thu', '14:00', '16:00')"
+    ).run();
+    const res = await adminFetch("https://example.com/admin/teachers/avail-edit-2/edit");
+    const html = await res.text();
+    expect(html).toContain('<option value="thu" selected>');
+    expect(html).toContain('value="14:00"');
+    expect(html).toContain('value="16:00"');
+  });
+
+  it("generates a display string joining multiple slots with '، ' wherever a teacher's schedule renders", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('avail-multi', 'أ. متعدد', 'math')").run();
+    await env.DB.prepare(
+      "INSERT INTO teacher_availability (teacher_id, day_of_week, start_time, end_time) VALUES ('avail-multi', 'sat', '10:00', '12:00'), ('avail-multi', 'wed', '16:00', '18:00')"
+    ).run();
+    const res = await SELF.fetch("https://example.com/register");
+    const html = await res.text();
+    expect(html).toContain("data-teacher-schedule=\"السبت 10:00–12:00، الأربعاء 16:00–18:00\"");
+  });
+
+  it("/public/roster's schedule value is the generated string, not the deprecated raw column", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('avail-roster', 'أ. جدول عام', 'math')").run();
+    await env.DB.prepare(
+      "INSERT INTO teacher_availability (teacher_id, day_of_week, start_time, end_time) VALUES ('avail-roster', 'sun', '18:00', '20:00')"
+    ).run();
+    const body = await (await SELF.fetch("https://example.com/public/roster")).json() as any;
+    const t = body.teachers.find((x: any) => x.id === "avail-roster");
+    expect(t.schedule).toBe("الأحد 18:00–20:00");
   });
 });
 

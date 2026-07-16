@@ -101,6 +101,10 @@ select{
 .card.stripe-a{background:#F3F4F6}
 .card.stripe-b{background:#E2E4E9}
 .subjects-grid{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px}
+.avail-grid{margin-bottom:16px}
+.avail-row{display:flex;gap:8px;margin-bottom:8px}
+.avail-row select{flex:1.4;margin-bottom:0}
+.avail-row input[type="time"]{flex:1;margin-bottom:0}
 .subject-chip{display:flex;align-items:center;gap:6px;background:#fff;border:2px solid var(--line);border-radius:999px;padding:8px 14px;font-size:15px;cursor:pointer}
 .subject-chip input{width:auto;margin:0}
 .pay-options{display:flex;flex-direction:column;gap:10px;margin-bottom:16px}
@@ -316,6 +320,23 @@ function sanitizeMode(v) {
   return MODES.some(m => m.v === v) ? v : "";
 }
 
+// Egyptian week order. Slugs match groups.day's existing free-text values so a
+// future drag-drop scheduling grid can join teacher availability onto class
+// sessions. Same {v,ar,en}+sanitizeX pattern as TRACKS/PHASES/MODES above.
+const DAYS_OF_WEEK = [
+  { v: "sat", ar: "السبت", en: "Saturday" },
+  { v: "sun", ar: "الأحد", en: "Sunday" },
+  { v: "mon", ar: "الاثنين", en: "Monday" },
+  { v: "tue", ar: "الثلاثاء", en: "Tuesday" },
+  { v: "wed", ar: "الأربعاء", en: "Wednesday" },
+  { v: "thu", ar: "الخميس", en: "Thursday" },
+  { v: "fri", ar: "الجمعة", en: "Friday" }
+];
+function sanitizeDayOfWeek(v) {
+  return DAYS_OF_WEEK.some(d => d.v === v) ? v : "";
+}
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/; // 24h "HH:MM", matches <input type="time">
+
 const PAYMENT_METHODS = {
   cash: { ar: "كاش", en: "Cash" },
   instapay: { ar: "إنستاباي", en: "InstaPay" },
@@ -364,13 +385,14 @@ function baseSubject(slug) {
   return slug.endsWith("-en") ? slug.slice(0, -3) : slug;
 }
 
-async function getTeachersForSubjects(env, subjectsCsv) {
+async function getTeachersForSubjects(env, subjectsCsv, lang) {
   const slugs = [...new Set((subjectsCsv || "").split(",").map(s => baseSubject(s.trim())).filter(Boolean))];
   if (!slugs.length) return {};
   const placeholders = slugs.map(() => "?").join(",");
   const { results } = await env.DB.prepare(
-    `SELECT id, subject, name, phase, mode, schedule, track, photo, photo_blob IS NOT NULL AS hasPhotoBlob FROM teachers WHERE subject IN (${placeholders}) ORDER BY name`
+    `SELECT id, subject, name, phase, mode, track, photo, photo_blob IS NOT NULL AS hasPhotoBlob FROM teachers WHERE subject IN (${placeholders}) ORDER BY name`
   ).bind(...slugs).all();
+  await attachSchedule(env, results, lang);
   const grouped = {};
   for (const r of results) (grouped[r.subject] ||= []).push(r);
   return grouped;
@@ -379,13 +401,48 @@ async function getTeachersForSubjects(env, subjectsCsv) {
 // Unfiltered version of the above for the public /register form, where every
 // subject's teachers are pre-rendered (hidden) up front and toggled client-side
 // as the student checks boxes — no server round-trip per checkbox.
-async function getAllTeachersGrouped(env) {
+async function getAllTeachersGrouped(env, lang) {
   const { results } = await env.DB.prepare(
-    `SELECT id, subject, name, phase, mode, schedule, track, photo, photo_blob IS NOT NULL AS hasPhotoBlob FROM teachers ORDER BY name`
+    `SELECT id, subject, name, phase, mode, track, photo, photo_blob IS NOT NULL AS hasPhotoBlob FROM teachers ORDER BY name`
   ).all();
+  await attachSchedule(env, results, lang);
   const grouped = {};
   for (const r of results) (grouped[r.subject] ||= []).push(r);
   return grouped;
+}
+
+// Batch-loads availability for many teachers in one query, grouped in JS —
+// Map<teacher_id, [{day_of_week,start_time,end_time}, ...]>.
+async function getTeacherAvailability(env, ids) {
+  const list = [...new Set(ids)].filter(Boolean);
+  if (!list.length) return new Map();
+  const placeholders = list.map(() => "?").join(",");
+  const { results } = await env.DB.prepare(
+    `SELECT teacher_id, day_of_week, start_time, end_time
+       FROM teacher_availability WHERE teacher_id IN (${placeholders}) ORDER BY id`
+  ).bind(...list).all();
+  const m = new Map();
+  for (const r of results) {
+    if (!m.has(r.teacher_id)) m.set(r.teacher_id, []);
+    m.get(r.teacher_id).push(r);
+  }
+  return m;
+}
+
+// Generated replacement for the old free-text teachers.schedule. "" when a
+// teacher has no slots (teacherCard()'s existing empty-fallback then fires).
+function scheduleDisplay(lang, rows) {
+  if (!rows || !rows.length) return "";
+  const dayLabel = d => (DAYS_OF_WEEK.find(x => x.v === d) || {})[lang === "en" ? "en" : "ar"] || d;
+  return rows.map(r => `${dayLabel(r.day_of_week)} ${r.start_time}–${r.end_time}`).join(lang === "en" ? ", " : "، ");
+}
+
+// Overwrites each row's .schedule with the generated string, so every existing
+// consumer that reads t.schedule (teacherCard, roster, register-copy) needs no
+// changes of its own.
+async function attachSchedule(env, rows, lang) {
+  const avail = await getTeacherAvailability(env, rows.map(r => r.id));
+  for (const r of rows) r.schedule = scheduleDisplay(lang, avail.get(r.id));
 }
 
 // Shared by /scan (phone camera, full HTML page) and /admin/scan-mark (JSON,
@@ -1269,7 +1326,7 @@ export default {
         const hint = key === "instapay" ? INSTAPAY_NUMBER : key === "vodafone_cash" ? VF_CASH_NUMBER : "";
         return `<label class="pay-option"><input type="radio" name="payment_method" value="${key}" required> ${lang === "en" ? label.en : label.ar}${hint ? `<span class="pay-hint">${hint}</span>` : ""}</label>`;
       }).join("");
-      const teachersBySubject = await getTeachersForSubjects(env, student.subjects);
+      const teachersBySubject = await getTeachersForSubjects(env, student.subjects, lang);
       const promos = await getActivePromotions(env, student.subjects);
       const bookings = await getBookings(env, student.id);
       const activeGroups = await getGroupsWithSeats(env, { activeOnly: true });
@@ -1737,7 +1794,7 @@ export default {
       const lang = langOf(url);
       const t = GROUPS_I18N[lang];
       const langQs = lang === "en" ? "?lang=en" : "";
-      const [groups, rooms, teachersBySubject] = await Promise.all([getGroupsWithSeats(env), getRooms(env), getAllTeachersGrouped(env)]);
+      const [groups, rooms, teachersBySubject] = await Promise.all([getGroupsWithSeats(env), getRooms(env), getAllTeachersGrouped(env, lang)]);
       const rows = groups.map(g => {
         const seatsLabel = Number.isFinite(g.capacity) ? `${g.enrolled}/${g.capacity}` : `${g.enrolled}`;
         const isFull = Number.isFinite(g.capacity) && g.enrolled >= g.capacity;
@@ -2189,13 +2246,15 @@ export default {
       ar: {
         addTitle: "أستاذ جديد", editTitle: "تعديل بيانات الأستاذ", name: "الاسم", namePh: "اسم الأستاذ",
         subject: "المادة", phase: "المرحلة", mode: "طريقة الحضور", track: "المسار", trackNone: "—",
-        schedule: "الجدول", schedulePh: "مثلاً: الأربعاء ٥–٧ مساءً", photo: "الصورة", save: "حفظ",
+        availability: "المواعيد", availDay: "اليوم", availFrom: "من", availTo: "إلى", availNone: "—",
+        photo: "الصورة", save: "حفظ",
         confirm: "متأكد إنك عايز تحفظ التغييرات دي؟"
       },
       en: {
         addTitle: "New teacher", editTitle: "Edit teacher", name: "Name", namePh: "Teacher's name",
         subject: "Subject", phase: "Phase", mode: "Attendance mode", track: "Track", trackNone: "—",
-        schedule: "Schedule", schedulePh: "e.g. Wednesday 5-7pm", photo: "Photo", save: "Save",
+        availability: "Availability", availDay: "Day", availFrom: "From", availTo: "To", availNone: "—",
+        photo: "Photo", save: "Save",
         confirm: "Are you sure you want to save these changes?"
       }
     };
@@ -2208,6 +2267,18 @@ export default {
       const existingPhoto = teacher?.hasPhotoBlob
         ? `<img src="/public/teachers/${teacher.id}/photo" alt="" style="width:96px;height:96px;object-fit:cover;border-radius:12px;margin-bottom:12px;display:block">`
         : "";
+      const av = teacher?.availability || [];
+      const dayOpts = selected => `<option value="">${t.availNone}</option>` +
+        DAYS_OF_WEEK.map(d => `<option value="${d.v}" ${selected === d.v ? "selected" : ""}>${lang === "en" ? d.en : d.ar}</option>`).join("");
+      const availRows = [0, 1, 2].map(i => {
+        const row = av[i] || {};
+        const n = i + 1;
+        return `<div class="avail-row">
+          <select name="avail_day_${n}">${dayOpts(row.day_of_week || "")}</select>
+          <input type="time" name="avail_from_${n}" value="${escapeHtml(row.start_time || "")}">
+          <input type="time" name="avail_to_${n}" value="${escapeHtml(row.end_time || "")}">
+        </div>`;
+      }).join("");
       return `<form method="POST" action="${action}" enctype="multipart/form-data" onsubmit="return confirm(${JSON.stringify(t.confirm)})">
         <label>${t.name}</label>
         <input name="name" placeholder="${t.namePh}" value="${escapeHtml(teacher?.name || "")}" required>
@@ -2219,8 +2290,8 @@ export default {
         <select name="mode">${modeOpts}</select>
         <label>${t.track}</label>
         <div class="subjects-grid">${trackChips}</div>
-        <label>${t.schedule}</label>
-        <input name="schedule" placeholder="${t.schedulePh}" value="${escapeHtml(teacher?.schedule || "")}">
+        <label>${t.availability}</label>
+        <div class="avail-grid">${availRows}</div>
         <label>${t.photo}</label>
         ${existingPhoto}
         <img id="teacher-photo-preview" alt="" style="width:96px;height:96px;object-fit:cover;border-radius:12px;margin-bottom:12px;display:none">
@@ -2259,7 +2330,20 @@ export default {
       const phase = sanitizePhase((form.get("phase") || "").toString().trim());
       const mode = sanitizeMode((form.get("mode") || "").toString().trim());
       const track = sanitizeTrack((form.get("track") || "").toString().trim());
-      const schedule = (form.get("schedule") || "").toString().trim();
+      // Up to 3 fixed rows (no add/remove-row JS) — a row with no day picked
+      // is simply skipped, not an error; a row with a day but a bad/missing
+      // time, or end<=start, rejects the whole submission with a 400 (same
+      // rejection style as the percent-share cap elsewhere in this file).
+      const availability = [];
+      let availabilityError = null;
+      for (let n = 1; n <= 3; n++) {
+        const day = sanitizeDayOfWeek((form.get(`avail_day_${n}`) || "").toString().trim());
+        if (!day) continue;
+        const from = (form.get(`avail_from_${n}`) || "").toString().trim();
+        const to = (form.get(`avail_to_${n}`) || "").toString().trim();
+        if (!TIME_RE.test(from) || !TIME_RE.test(to) || to <= from) { availabilityError = "bad_time"; break; }
+        availability.push({ day_of_week: day, start_time: from, end_time: to });
+      }
       const photoFile = form.get("photo");
       let photoBuf = null, photoType = null;
       if (photoFile && typeof photoFile === "object" && photoFile.size > 0) {
@@ -2267,22 +2351,27 @@ export default {
         const ALLOWED_PHOTO_TYPES = ["image/jpeg", "image/png", "image/webp"];
         photoType = ALLOWED_PHOTO_TYPES.includes(photoFile.type) ? photoFile.type : "image/jpeg";
       }
-      return { name, subject, phase, mode, track, schedule, photoBuf, photoType };
+      return { name, subject, phase, mode, track, availability, availabilityError, photoBuf, photoType };
     }
 
     if (url.pathname === "/admin/teachers" && request.method === "POST") {
       if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
       const lang = langOf(url);
       const langQs = lang === "en" ? "?lang=en" : "";
-      const { name, subject, phase, mode, track, schedule, photoBuf, photoType } = await readTeacherForm(request);
-      if (!name || !subject) {
-        return new Response(page(TEACHER_FORM_I18N[lang].addTitle, teacherFormHtml(lang, `/admin/teachers${langQs}`, null), { lang, isOwner: true }), { status: 400, headers: { "content-type": "text/html;charset=utf-8" } });
+      const { name, subject, phase, mode, track, availability, availabilityError, photoBuf, photoType } = await readTeacherForm(request);
+      if (!name || !subject || availabilityError) {
+        const teacher = { name, subject, phase, mode, track, availability };
+        return new Response(page(TEACHER_FORM_I18N[lang].addTitle, teacherFormHtml(lang, `/admin/teachers${langQs}`, teacher), { lang, isOwner: true }), { status: 400, headers: { "content-type": "text/html;charset=utf-8" } });
       }
       const id = newTeacherId();
-      await env.DB.prepare(
-        `INSERT INTO teachers (id, name, subject, subject_label, phase, mode, schedule, track, photo_blob, photo_blob_type)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).bind(id, name, subject, subjectLabelFor(subject), phase || null, mode || null, schedule || null, track || null, photoBuf, photoType).run();
+      const stmts = [env.DB.prepare(
+        `INSERT INTO teachers (id, name, subject, subject_label, phase, mode, track, photo_blob, photo_blob_type)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(id, name, subject, subjectLabelFor(subject), phase || null, mode || null, track || null, photoBuf, photoType)];
+      for (const a of availability) stmts.push(env.DB.prepare(
+        "INSERT INTO teacher_availability (teacher_id, day_of_week, start_time, end_time) VALUES (?, ?, ?, ?)"
+      ).bind(id, a.day_of_week, a.start_time, a.end_time));
+      await env.DB.batch(stmts);
       return Response.redirect(url.origin + `/admin/teachers${langQs}`, 303);
     }
 
@@ -2292,8 +2381,9 @@ export default {
       const lang = langOf(url);
       const t = TEACHER_FORM_I18N[lang];
       const langQs = lang === "en" ? "?lang=en" : "";
-      const teacher = await env.DB.prepare("SELECT id, name, subject, phase, mode, schedule, track, photo_blob IS NOT NULL AS hasPhotoBlob FROM teachers WHERE id = ?").bind(teacherEditMatch[1]).first();
+      const teacher = await env.DB.prepare("SELECT id, name, subject, phase, mode, track, photo_blob IS NOT NULL AS hasPhotoBlob FROM teachers WHERE id = ?").bind(teacherEditMatch[1]).first();
       if (!teacher) return new Response("Not found", { status: 404 });
+      teacher.availability = (await getTeacherAvailability(env, [teacher.id])).get(teacher.id) || [];
       return new Response(page(t.editTitle, teacherFormHtml(lang, `/admin/teachers/${teacher.id}${langQs}`, teacher), { lang, toggleHref: toggleHref(url, lang), isOwner: true }), { headers: { "content-type": "text/html;charset=utf-8" } });
     }
 
@@ -2305,20 +2395,26 @@ export default {
       const teacherId = teacherUpdateMatch[1];
       const existing = await env.DB.prepare("SELECT id FROM teachers WHERE id = ?").bind(teacherId).first();
       if (!existing) return new Response("Not found", { status: 404 });
-      const { name, subject, phase, mode, track, schedule, photoBuf, photoType } = await readTeacherForm(request);
-      if (!name || !subject) {
-        const teacher = { id: teacherId, name, subject, phase, mode, track, schedule };
+      const { name, subject, phase, mode, track, availability, availabilityError, photoBuf, photoType } = await readTeacherForm(request);
+      if (!name || !subject || availabilityError) {
+        const teacher = { id: teacherId, name, subject, phase, mode, track, availability };
         return new Response(page(TEACHER_FORM_I18N[lang].editTitle, teacherFormHtml(lang, `/admin/teachers/${teacherId}${langQs}`, teacher), { lang, isOwner: true }), { status: 400, headers: { "content-type": "text/html;charset=utf-8" } });
       }
-      if (photoBuf) {
-        await env.DB.prepare(
-          `UPDATE teachers SET name = ?, subject = ?, subject_label = ?, phase = ?, mode = ?, schedule = ?, track = ?, photo_blob = ?, photo_blob_type = ? WHERE id = ?`
-        ).bind(name, subject, subjectLabelFor(subject), phase || null, mode || null, schedule || null, track || null, photoBuf, photoType, teacherId).run();
-      } else {
-        await env.DB.prepare(
-          `UPDATE teachers SET name = ?, subject = ?, subject_label = ?, phase = ?, mode = ?, schedule = ?, track = ? WHERE id = ?`
-        ).bind(name, subject, subjectLabelFor(subject), phase || null, mode || null, schedule || null, track || null, teacherId).run();
-      }
+      const update = photoBuf
+        ? env.DB.prepare(
+            `UPDATE teachers SET name = ?, subject = ?, subject_label = ?, phase = ?, mode = ?, track = ?, photo_blob = ?, photo_blob_type = ? WHERE id = ?`
+          ).bind(name, subject, subjectLabelFor(subject), phase || null, mode || null, track || null, photoBuf, photoType, teacherId)
+        : env.DB.prepare(
+            `UPDATE teachers SET name = ?, subject = ?, subject_label = ?, phase = ?, mode = ?, track = ? WHERE id = ?`
+          ).bind(name, subject, subjectLabelFor(subject), phase || null, mode || null, track || null, teacherId);
+      // Delete-all-then-reinsert: with only up to 3 slots and no cross-edit
+      // identity/ordering that matters, diffing old vs. new rows would be pure
+      // overhead. Folded into one batch() with the UPDATE for atomicity.
+      const stmts = [update, env.DB.prepare("DELETE FROM teacher_availability WHERE teacher_id = ?").bind(teacherId)];
+      for (const a of availability) stmts.push(env.DB.prepare(
+        "INSERT INTO teacher_availability (teacher_id, day_of_week, start_time, end_time) VALUES (?, ?, ?, ?)"
+      ).bind(teacherId, a.day_of_week, a.start_time, a.end_time));
+      await env.DB.batch(stmts);
       return Response.redirect(url.origin + `/admin/teachers${langQs}`, 303);
     }
 
@@ -2492,7 +2588,7 @@ export default {
       const lang = langOf(url);
       const t = REGISTER_I18N[lang];
       const langQs = lang === "en" ? "?lang=en" : "";
-      const teachersBySubject = await getAllTeachersGrouped(env);
+      const teachersBySubject = await getAllTeachersGrouped(env, lang);
       const teacherHeading = lang === "en" ? "👨‍🏫 Teachers for the subjects you picked" : "👨‍🏫 مدرسين المواد اللي اخترتها";
       const body = `<form method="POST" action="/register${langQs}" enctype="multipart/form-data">
         <label>${t.name}</label>
@@ -2594,9 +2690,10 @@ export default {
       if (pickedIds.length) {
         const placeholders = pickedIds.map(() => "?").join(",");
         const { results: pickedTeachers } = await env.DB.prepare(
-          `SELECT id, name, schedule, subject FROM teachers WHERE id IN (${placeholders})`
+          `SELECT id, name, subject FROM teachers WHERE id IN (${placeholders})`
         ).bind(...pickedIds.map(p => p.id)).all();
         const teacherById = new Map(pickedTeachers.map(row => [row.id, row]));
+        const availByTeacher = await getTeacherAvailability(env, pickedTeachers.map(row => row.id));
         const bookingStmts = pickedIds
           // A picked teacher id is only trusted if it actually teaches the
           // subject it was picked for — same validation pattern already
@@ -2605,7 +2702,7 @@ export default {
           .filter(p => p.row && p.row.subject === baseSubject(p.slug))
           .map(p => env.DB.prepare(
             "INSERT INTO bookings (student_id, subject, teacher_name, schedule, amount) VALUES (?, ?, ?, ?, 0)"
-          ).bind(inserted.meta.last_row_id, p.slug, p.row.name, p.row.schedule || ""));
+          ).bind(inserted.meta.last_row_id, p.slug, p.row.name, scheduleDisplay("ar", availByTeacher.get(p.row.id))));
         if (bookingStmts.length) await env.DB.batch(bookingStmts);
       }
       return new Response(page(t.thanksTitle, `<div class="confirm"><strong>${t.thanks}</strong>${t.thanksBody}</div>`, { nav: false, lang }), { headers: { "content-type": "text/html;charset=utf-8" } });
@@ -3120,13 +3217,17 @@ ${isOwnerGuide ? sec("s-owner", "⚙️ إدارة (مدير بس)", `
       // rendering code reads t.subjectLabel at several call sites, and this
       // keeps the "zero rendering changes needed" claim true.
       const teachers = await env.DB.prepare(
-        "SELECT id, name, subject, subject_label AS subjectLabel, phase, mode, schedule, track, photo, photo_blob IS NOT NULL AS hasPhotoBlob FROM teachers"
+        "SELECT id, name, subject, subject_label AS subjectLabel, phase, mode, track, photo, photo_blob IS NOT NULL AS hasPhotoBlob FROM teachers"
       ).all();
       const sessions = await env.DB.prepare(
         `SELECT g.teacher_name, g.subject, g.stage, g.day, g.time, r.name AS room
          FROM groups g LEFT JOIN rooms r ON r.id = g.room_id
          WHERE g.active = 1`
       ).all();
+      // JSON key stays "schedule" for backward compat with the external
+      // harvcentereg.com consumer — the value is now generated from
+      // teacher_availability instead of the deprecated free-text column.
+      await attachSchedule(env, teachers.results, "ar");
       // Teachers added/edited through /admin/teachers store their photo as an
       // uploaded blob, not a path into the design-system repo's static folder
       // — resolve to the public blob-serving route here so a teacher added
