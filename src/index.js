@@ -539,7 +539,7 @@ async function getTeachersForSubjects(env, subjectsCsv, lang) {
   if (!slugs.length) return {};
   const placeholders = slugs.map(() => "?").join(",");
   const { results } = await env.DB.prepare(
-    `SELECT id, subject, name, phase, mode, track, photo, photo_blob IS NOT NULL AS hasPhotoBlob FROM teachers WHERE subject IN (${placeholders}) ORDER BY name`
+    `SELECT id, subject, name, phase, mode, track, photo, photo_blob IS NOT NULL AS hasPhotoBlob FROM teachers WHERE subject IN (${placeholders}) AND retired_at IS NULL ORDER BY name`
   ).bind(...slugs).all();
   await attachSchedule(env, results, lang);
   const grouped = {};
@@ -552,7 +552,7 @@ async function getTeachersForSubjects(env, subjectsCsv, lang) {
 // as the student checks boxes — no server round-trip per checkbox.
 async function getAllTeachersGrouped(env, lang) {
   const { results } = await env.DB.prepare(
-    `SELECT id, subject, name, phase, mode, track, photo, photo_blob IS NOT NULL AS hasPhotoBlob FROM teachers ORDER BY name`
+    `SELECT id, subject, name, phase, mode, track, photo, photo_blob IS NOT NULL AS hasPhotoBlob FROM teachers WHERE retired_at IS NULL ORDER BY name`
   ).all();
   await attachSchedule(env, results, lang);
   const grouped = {};
@@ -2367,12 +2367,14 @@ export default {
       ar: {
         title: "الأساتذة", noShare: "لسه معملتش تسوية", perSession: "بالحصة", percent: "نسبة %",
         settlement: "التسوية", attentionTitle: "⚠️ يحتاج متابعة", attentionEmpty: "الكل متسوّي، مفيش حد محتاج متابعة دلوقتي.",
-        owed: "مستحق", addNew: "➕ ضيف أستاذ جديد", edit: "✏️ عدّل"
+        owed: "مستحق", addNew: "➕ ضيف أستاذ جديد", edit: "✏️ عدّل",
+        retire: "إيقاف", activateBack: "رجّعه تاني", retiredBadge: "متوقف", confirmRetire: "متأكد إنك عايز توقف الأستاذ ده؟ اسمه هيفضل في القايمة بس مش هيظهر للحجز.", confirmReturn: "متأكد إنك عايز ترجّعه؟"
       },
       en: {
         title: "Teachers", noShare: "No payout share set", perSession: "Per session", percent: "Percent %",
         settlement: "Settlement", attentionTitle: "⚠️ Needs follow-up", attentionEmpty: "Everyone's settled — nobody needs follow-up right now.",
-        owed: "owed", addNew: "➕ Add new teacher", edit: "✏️ Edit"
+        owed: "owed", addNew: "➕ Add new teacher", edit: "✏️ Edit",
+        retire: "Retire", activateBack: "Bring back", retiredBadge: "Retired", confirmRetire: "Retire this teacher? Their name stays on the list but they'll stop showing up for booking.", confirmReturn: "Bring this teacher back?"
       }
     };
 
@@ -2381,7 +2383,7 @@ export default {
       const lang = langOf(url);
       const t = TEACHERS_I18N[lang];
       const langQs = lang === "en" ? "?lang=en" : "";
-      const { results } = await env.DB.prepare("SELECT id, name, subject, share_type, share_value, person_id FROM teachers ORDER BY name").all();
+      const { results } = await env.DB.prepare("SELECT id, name, subject, share_type, share_value, person_id, retired_at FROM teachers ORDER BY name").all();
       const today = new Date().toISOString().slice(0, 10);
       // "Money left" = owed computed since their last recorded payout (or since
       // the beginning, if never paid out) — a naive unbounded-always computation
@@ -2404,12 +2406,22 @@ export default {
       const shareLabel = tch => tch.share_type
         ? `${tch.share_type === "percent" ? t.percent : t.perSession}: ${tch.share_value ?? 0}`
         : t.noShare;
+      // Retire/return shares one toggle route (mirrors the existing
+      // /admin/staff/:email/toggle and /admin/promotions/:id/toggle
+      // pattern already used in this file, rather than two new routes).
+      const retireForm = tch => `<form method="POST" action="/admin/teachers/${tch.id}/retire-toggle${langQs}" onsubmit="return confirm('${(tch.retired_at ? t.confirmReturn : t.confirmRetire).replace(/'/g, "\\'")}')">
+          <button type="submit" class="${tch.retired_at ? "" : "btn-reject"}">${tch.retired_at ? t.activateBack : t.retire}</button>
+        </form>`;
+      const nameDisplay = tch => tch.retired_at
+        ? `<s>${escapeHtml(tch.name)}</s> <span class="badge-pending" style="background:#8A93A6">${t.retiredBadge}</span>`
+        : escapeHtml(tch.name);
       const teacherCard = (tch, i, showSubject = false) => `<div class="card ${i % 2 === 0 ? "stripe-a" : "stripe-b"}"><div>
-        <strong>${escapeHtml(tch.name)}</strong>${showSubject ? ` — ${subjectsDisplay(lang, tch.subject)}` : ""}<br>
+        <strong>${nameDisplay(tch)}</strong>${showSubject ? ` — ${subjectsDisplay(lang, tch.subject)}` : ""}<br>
         <small>${escapeHtml(shareLabel(tch))}${tch.owed > 0 ? ` · ${t.owed}: ${tch.owed.toFixed(2)}` : ""}</small>
         <div class="pending-actions">
           <a href="/admin/teachers/${tch.id}/settlement${langQs}"><button type="button">${t.settlement}</button></a>
           <a href="/admin/teachers/${tch.id}/edit${langQs}"><button type="button">${t.edit}</button></a>
+          ${retireForm(tch)}
         </div>
       </div></div>`;
 
@@ -2439,10 +2451,15 @@ export default {
           <div class="pending-actions">
             <a href="/admin/teachers/${tch.id}/settlement${langQs}"><button type="button">${t.settlement}</button></a>
             <a href="/admin/teachers/${tch.id}/edit${langQs}"><button type="button">${t.edit}</button></a>
+            ${retireForm(tch)}
           </div>
         </div>`;
+      // Strikethrough the shared name only once every row for this person is
+      // retired -- a person still active on at least one subject isn't
+      // shown as retired overall, even though each row's own retire button
+      // still works independently.
       const attentionCard = (entry, i) => `<div class="card ${i % 2 === 0 ? "stripe-a" : "stripe-b"}"><div>
-        <strong>${escapeHtml(entry.name)}</strong>
+        <strong>${nameDisplay({ name: entry.name, retired_at: entry.rows.every(r => r.retired_at) ? entry.rows[0].retired_at : null })}</strong>
         ${entry.rows.map(attentionRow).join("")}
       </div></div>`;
       const attentionSection = `<div class="dash-card">
@@ -2871,6 +2888,23 @@ export default {
         "INSERT INTO teacher_availability (teacher_id, day_of_week, start_time, end_time, room_id) VALUES (?, ?, ?, ?, ?)"
       ).bind(teacherId, a.day_of_week, a.start_time, a.end_time, a.room_id));
       await env.DB.batch(stmts);
+      return Response.redirect(url.origin + `/admin/teachers${langQs}`, 303);
+    }
+
+    const teacherRetireMatch = url.pathname.match(/^\/admin\/teachers\/([^/]+)\/retire-toggle$/);
+    if (teacherRetireMatch && request.method === "POST") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
+      const lang = langOf(url);
+      const langQs = lang === "en" ? "?lang=en" : "";
+      // A retired teacher's row is never deleted -- money/settlement/payout
+      // history keeps reading it (nothing there filters by retired_at).
+      // Only the two shared teacher-picker functions (getTeachersForSubjects/
+      // getAllTeachersGrouped, feeding /register and /admin/groups) exclude
+      // a retired row, so retiring only affects future scheduling, never
+      // past bookings or owed money.
+      await env.DB.prepare(
+        "UPDATE teachers SET retired_at = CASE WHEN retired_at IS NULL THEN datetime('now') ELSE NULL END WHERE id = ?"
+      ).bind(teacherRetireMatch[1]).run();
       return Response.redirect(url.origin + `/admin/teachers${langQs}`, 303);
     }
 
@@ -3843,8 +3877,12 @@ ${isOwnerGuide ? sec("t-ledger", `
       // match the exact contract data/teachers.json already used — the site's
       // rendering code reads t.subjectLabel at several call sites, and this
       // keeps the "zero rendering changes needed" claim true.
+      // retired_at IS NOT NULL means they're not currently teaching --
+      // confirmed with Hazem (teacher-roster-rework plan) that a retired
+      // teacher shouldn't surface on the public site, same as they're
+      // already excluded from the internal booking pickers.
       const teachers = await env.DB.prepare(
-        "SELECT id, name, subject, subject_label AS subjectLabel, phase, mode, track, photo, photo_blob IS NOT NULL AS hasPhotoBlob FROM teachers"
+        "SELECT id, name, subject, subject_label AS subjectLabel, phase, mode, track, photo, photo_blob IS NOT NULL AS hasPhotoBlob FROM teachers WHERE retired_at IS NULL"
       ).all();
       const sessions = await env.DB.prepare(
         `SELECT g.teacher_name, g.subject, g.stage, g.day, g.start_time, g.end_time, r.name AS room
