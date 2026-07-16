@@ -1961,7 +1961,7 @@ export default {
         room: "القاعة", roomNone: "بدون قاعة", capacity: "السعة", capacityPh: "عدد الطلاب",
         price: "السعر", pricePh: "بالجنيه", add: "إضافة مجموعة", save: "حفظ",
         empty: "لا يوجد مجموعات بعد.", deactivate: "إيقاف", activate: "تفعيل", inactive: "متوقفة", full: "مكتملة",
-        pinCounter: "📷 السكانر", attendanceReport: "📋 كشف الحضور",
+        pinCounter: "📷 السكانر", attendanceReport: "📋 كشف الحضور", edit: "✏️ تعديل",
         addTitle: "مجموعة جديدة", editTitle: "تعديل المجموعة",
         conflictWarning: "⚠️ تضارب في الميعاد مع:"
       },
@@ -1971,7 +1971,7 @@ export default {
         room: "Room", roomNone: "No room", capacity: "Capacity", capacityPh: "number of students",
         price: "Price", pricePh: "in EGP", add: "Add group", save: "Save",
         empty: "No groups yet.", deactivate: "Deactivate", activate: "Activate", inactive: "inactive", full: "Full",
-        pinCounter: "📷 Counter", attendanceReport: "📋 Attendance",
+        pinCounter: "📷 Counter", attendanceReport: "📋 Attendance", edit: "✏️ Edit",
         addTitle: "New group", editTitle: "Edit group",
         conflictWarning: "⚠️ Time conflict with:"
       }
@@ -2080,7 +2080,7 @@ export default {
           <strong>${g.teacher_name} — ${raw(subjectsDisplay(lang, g.subject))}</strong><br>
           <small>${scheduleLabel} · ${raw(seatsLabel)} · ${g.price ?? 0}</small>
           <div class="pending-actions">
-            <a href="/admin/groups/${String(g.id)}/edit${raw(langQs)}"><button type="button">✏️</button></a>
+            <a href="/admin/groups/${String(g.id)}/edit${raw(langQs)}"><button type="button">${t.edit}</button></a>
             <a href="/admin/counter?group=${String(g.id)}"><button type="button">${t.pinCounter}</button></a>
             <a href="/admin/attendance?group=${String(g.id)}${raw(langQs.replace("?", "&"))}"><button type="button">${t.attendanceReport}</button></a>
             <form method="POST" action="/admin/groups/${String(g.id)}/toggle${raw(langQs)}"><button type="submit" class="${raw(g.active ? "btn-reject" : "")}">${g.active ? t.deactivate : t.activate}</button></form>

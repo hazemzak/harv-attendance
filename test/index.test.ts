@@ -1405,6 +1405,12 @@ describe("/admin/groups + /admin/rooms (added 2026-07-13, extracted from the ret
     const body = await res.text();
     expect(body).toContain("أ. أحمد");
     expect(body).toContain("0/2"); // no bookings attached yet
+    // Real finding (full-app reassessment, 2026-07-16): the edit link used to
+    // be a bare "✏️" button with no text -- an icon-only action, inconsistent
+    // with every sibling action on the same row (all icon+text). Fixed to
+    // "✏️ تعديل"/"✏️ Edit".
+    expect(body).not.toContain(">✏️</button>");
+    expect(body).toContain("✏️ تعديل");
 
     const row = await env.DB.prepare("SELECT teacher_id, teacher_name FROM groups WHERE teacher_name = 'أ. أحمد'").first();
     expect(row?.teacher_id).toBe("t-groups-ahmed"); // real FK populated, not just the name snapshot
