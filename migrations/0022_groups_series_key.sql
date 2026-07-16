@@ -1,0 +1,12 @@
+-- Additive: series_key links multiple `groups` rows that are really the same
+-- weekly class meeting more than once a week (e.g. Monday + Wednesday), the
+-- same way `teachers.person_id` (0020) links rows that are really the same
+-- person. NULL for every normal single-session group (the vast majority).
+--
+-- Deliberately NOT a full group_sessions child-table rewrite: the roster/
+-- capacity/price/enrollment stay independently tracked per row -- this only
+-- gives the schedule grid a signal to show a "meets twice a week" badge so
+-- staff don't mistake two linked rows for two unrelated classes. A real
+-- unified one-roster multi-session model is a bigger future project if ever
+-- needed (see HARV_ATTENDANCE_SUPPORT_PLAYBOOK.md's 2026-07-17 row).
+ALTER TABLE groups ADD COLUMN series_key TEXT;

@@ -1959,7 +1959,10 @@ export default {
         title: "المجموعات", subject: "المادة", teacher: "الأستاذ", teacherPh: "اسم الأستاذ", stage: "الصف",
         day: "اليوم", dayNone: "—", startTime: "من", endTime: "إلى",
         room: "القاعة", roomNone: "بدون قاعة", capacity: "السعة", capacityPh: "عدد الطلاب",
-        price: "السعر", pricePh: "بالجنيه", add: "إضافة مجموعة", save: "حفظ",
+        price: "السعر", pricePh: "بالجنيه",
+        seriesKey: "نفس المجموعة مرتين في الأسبوع؟", seriesKeyPh: "اكتب نفس الكلمة في المجموعة التانية",
+        seriesKeyHint: "اختياري — يربط بين مجموعتين هما في الحقيقة نفس الفصل بس بيتقابل مرتين أسبوعيًا (مش هيربط الحضور أو الأسعار، بس هيظهر شارة \"×٢ أسبوعيًا\" على الجدول)",
+        add: "إضافة مجموعة", save: "حفظ",
         empty: "لا يوجد مجموعات بعد.", deactivate: "إيقاف", activate: "تفعيل", inactive: "متوقفة", full: "مكتملة",
         pinCounter: "📷 السكانر", attendanceReport: "📋 كشف الحضور", edit: "✏️ تعديل",
         addTitle: "مجموعة جديدة", editTitle: "تعديل المجموعة",
@@ -1969,7 +1972,10 @@ export default {
         title: "Groups", subject: "Subject", teacher: "Teacher", teacherPh: "Teacher's name", stage: "Grade",
         day: "Day", dayNone: "—", startTime: "From", endTime: "To",
         room: "Room", roomNone: "No room", capacity: "Capacity", capacityPh: "number of students",
-        price: "Price", pricePh: "in EGP", add: "Add group", save: "Save",
+        price: "Price", pricePh: "in EGP",
+        seriesKey: "Same class, twice a week?", seriesKeyPh: "type the same word on the other group",
+        seriesKeyHint: "Optional — links two groups that are really the same class meeting twice weekly (doesn't merge attendance or price, just shows a \"×2 weekly\" badge on the schedule)",
+        add: "Add group", save: "Save",
         empty: "No groups yet.", deactivate: "Deactivate", activate: "Activate", inactive: "inactive", full: "Full",
         pinCounter: "📷 Counter", attendanceReport: "📋 Attendance", edit: "✏️ Edit",
         addTitle: "New group", editTitle: "Edit group",
@@ -1982,7 +1988,7 @@ export default {
     async function getGroupsWithSeats(env, { activeOnly = false } = {}) {
       const { results } = await env.DB.prepare(
         `SELECT g.id, g.teacher_id, g.teacher_name, g.subject, g.stage, g.day, g.start_time, g.end_time, g.price, g.active,
-                g.room_id, r.name AS room_name, g.capacity,
+                g.room_id, r.name AS room_name, g.capacity, g.series_key,
                 (SELECT COUNT(*) FROM bookings b WHERE b.group_id = g.id AND b.status = 'active') AS enrolled
          FROM groups g LEFT JOIN rooms r ON r.id = g.room_id
          ${activeOnly ? "WHERE g.active = 1" : ""}
@@ -2034,6 +2040,8 @@ export default {
         <label>${t.room}</label><select name="room_id"><option value="">${t.roomNone}</option>${raw(roomOptions)}</select>
         <label>${t.capacity}</label><input name="capacity" type="number" min="1" placeholder="${t.capacityPh}" value="${group?.capacity ?? ""}">
         <label>${t.price}</label><input name="price" type="number" step="0.01" min="0" placeholder="${t.pricePh}" value="${group?.price ?? ""}">
+        <label>${t.seriesKey}</label><input name="series_key" placeholder="${t.seriesKeyPh}" value="${group?.series_key ?? ""}">
+        <p class="empty" style="margin:-8px 0 16px">${t.seriesKeyHint}</p>
         <button type="submit">${group ? t.save : t.add}</button>
       </form>
       <script>
@@ -2114,9 +2122,10 @@ export default {
       const roomId = parseInt((form.get("room_id") || "").toString(), 10);
       const capacity = parseInt((form.get("capacity") || "").toString(), 10);
       const price = parseFloat((form.get("price") || "").toString());
+      const seriesKey = (form.get("series_key") || "").toString().trim() || null;
       if (timeError) {
         const [rooms, teachersBySubject] = await Promise.all([getRooms(env), getAllTeachersGrouped(env, lang)]);
-        const group = { subject, stage, day: (form.get("day") || "").toString(), start_time: (form.get("start_time") || "").toString(), end_time: (form.get("end_time") || "").toString(), teacher_id: teacherId, capacity, price };
+        const group = { subject, stage, day: (form.get("day") || "").toString(), start_time: (form.get("start_time") || "").toString(), end_time: (form.get("end_time") || "").toString(), teacher_id: teacherId, capacity, price, series_key: seriesKey };
         return new Response(page(GROUPS_I18N[lang].addTitle, groupFormHtml(lang, { action: `/admin/groups${langQs}`, group, rooms, teachersBySubject }), { lang, isOwner: true }), { status: 400, headers: { "content-type": "text/html;charset=utf-8" } });
       }
       // teacher_id is a real FK now (picked from the subject-filtered <select>,
@@ -2129,13 +2138,14 @@ export default {
       const room = Number.isFinite(roomId) ? await env.DB.prepare("SELECT id FROM rooms WHERE id = ?").bind(roomId).first() : null;
       if (teacher && KNOWN_SUBJECT_SLUGS.has(subject)) {
         await env.DB.prepare(
-          `INSERT INTO groups (teacher_id, teacher_name, subject, stage, day, start_time, end_time, room_id, capacity, price)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO groups (teacher_id, teacher_name, subject, stage, day, start_time, end_time, room_id, capacity, price, series_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).bind(
           teacher.id, teacher.name, subject, stage || null, day, start_time, end_time,
           room ? room.id : null,
           Number.isFinite(capacity) && capacity > 0 ? capacity : null,
-          Number.isFinite(price) ? price : null
+          Number.isFinite(price) ? price : null,
+          seriesKey
         ).run();
       }
       return Response.redirect(url.origin + "/admin/groups" + langQs, 303);
@@ -2175,20 +2185,22 @@ export default {
       const roomId = parseInt((form.get("room_id") || "").toString(), 10);
       const capacity = parseInt((form.get("capacity") || "").toString(), 10);
       const price = parseFloat((form.get("price") || "").toString());
+      const seriesKey = (form.get("series_key") || "").toString().trim() || null;
       const teacher = teacherId ? await env.DB.prepare("SELECT id, name FROM teachers WHERE id = ?").bind(teacherId).first() : null;
       const room = Number.isFinite(roomId) ? await env.DB.prepare("SELECT id FROM rooms WHERE id = ?").bind(roomId).first() : null;
       if (timeError || !teacher || !KNOWN_SUBJECT_SLUGS.has(subject)) {
         const [rooms, teachersBySubject] = await Promise.all([getRooms(env), getAllTeachersGrouped(env, lang)]);
-        const group = { id: groupId, subject, stage, day: (form.get("day") || "").toString(), start_time: (form.get("start_time") || "").toString(), end_time: (form.get("end_time") || "").toString(), teacher_id: teacherId, room_id: room ? room.id : null, capacity, price };
+        const group = { id: groupId, subject, stage, day: (form.get("day") || "").toString(), start_time: (form.get("start_time") || "").toString(), end_time: (form.get("end_time") || "").toString(), teacher_id: teacherId, room_id: room ? room.id : null, capacity, price, series_key: seriesKey };
         return new Response(page(GROUPS_I18N[lang].editTitle, groupFormHtml(lang, { action: `/admin/groups/${groupId}/edit${langQs}`, group, rooms, teachersBySubject }), { lang, isOwner: true }), { status: 400, headers: { "content-type": "text/html;charset=utf-8" } });
       }
       await env.DB.prepare(
-        `UPDATE groups SET teacher_id = ?, teacher_name = ?, subject = ?, stage = ?, day = ?, start_time = ?, end_time = ?, room_id = ?, capacity = ?, price = ? WHERE id = ?`
+        `UPDATE groups SET teacher_id = ?, teacher_name = ?, subject = ?, stage = ?, day = ?, start_time = ?, end_time = ?, room_id = ?, capacity = ?, price = ?, series_key = ? WHERE id = ?`
       ).bind(
         teacher.id, teacher.name, subject, stage || null, day, start_time, end_time,
         room ? room.id : null,
         Number.isFinite(capacity) && capacity > 0 ? capacity : null,
         Number.isFinite(price) ? price : null,
+        seriesKey,
         groupId
       ).run();
       const scheduleQs = room ? `?hall=${room.id}${lang === "en" ? "&lang=en" : ""}` : langQs;
@@ -2204,8 +2216,8 @@ export default {
     }
 
     const SCHEDULE_I18N = {
-      ar: { title: "الجدول", noRooms: "لسه معملتش أي قاعة. ابدأ من صفحة القاعات.", unassignedTitle: "مجموعات بدون قاعة أو ميعاد", conflict: "⚠️ تضارب" },
-      en: { title: "Schedule", noRooms: "No halls yet — add one from the Rooms page first.", unassignedTitle: "Groups with no hall or time", conflict: "⚠️ Conflict" }
+      ar: { title: "الجدول", noRooms: "لسه معملتش أي قاعة. ابدأ من صفحة القاعات.", unassignedTitle: "مجموعات بدون ميعاد", conflict: "⚠️ تضارب", generalTab: "العام", noHallBadge: "⚠️ محتاج قاعة", weeklyBadge: "×٢ أسبوعيًا" },
+      en: { title: "Schedule", noRooms: "No halls yet — add one from the Rooms page first.", unassignedTitle: "Groups with no time set", conflict: "⚠️ Conflict", generalTab: "General", noHallBadge: "⚠️ Needs a hall", weeklyBadge: "×2 weekly" }
     };
 
     // Business hours are hourly rows (07:00-23:00, 17 rows); a group's time is
@@ -2228,35 +2240,70 @@ export default {
       if (!rooms.length) {
         return new Response(page(t.title, `<p class="empty">${t.noRooms}</p>`, { lang, toggleHref: toggleHref(url, lang), isOwner: true }), { headers: { "content-type": "text/html;charset=utf-8" } });
       }
-      const hallIdParam = parseInt(url.searchParams.get("hall") || "", 10);
-      const currentHall = rooms.find(r => r.id === hallIdParam) || rooms[0];
+      // "general" is a virtual tab spanning every hall at once, plus groups
+      // with no hall yet -- distinguished from a real numeric room id before
+      // any parseInt() happens, so it can never accidentally collide with one.
+      const hallParam = url.searchParams.get("hall") || "";
+      const isGeneral = hallParam === "general";
+      const hallIdParam = parseInt(hallParam, 10);
+      const currentHall = isGeneral ? null : (rooms.find(r => r.id === hallIdParam) || rooms[0]);
       const groups = await getGroupsWithSeats(env, { activeOnly: true });
       const conflicts = computeGroupConflicts(groups);
       const scheduled = g => g.day && g.start_time && g.end_time;
-      const hallGroups = groups.filter(g => g.room_id === currentHall.id && scheduled(g));
-      const unassigned = groups.filter(g => !g.room_id || !scheduled(g));
+      // Real per-hall tiles unchanged. General shows every scheduled group
+      // regardless of room (including hall-less ones, flagged) -- that's the
+      // whole point of the tab, so it drops the room_id condition entirely.
+      const hallGroups = isGeneral ? groups.filter(scheduled) : groups.filter(g => g.room_id === currentHall.id && scheduled(g));
+      // Narrowed to "no day/time at all" now that a hall-less-but-scheduled
+      // group has a real home (the General grid, flagged there) instead of
+      // only ever surfacing in this flat list on every single tab.
+      const unassigned = groups.filter(g => !scheduled(g));
+      // series_key: a group tile gets the "×2 weekly" badge whenever another
+      // *currently displayed* group shares its key (Phase-style link, mirrors
+      // teachers.person_id) -- computed once against the full active list so
+      // it's correct regardless of which tab is open.
+      const seriesKeyCounts = new Map();
+      for (const g of groups) if (g.series_key) seriesKeyCounts.set(g.series_key, (seriesKeyCounts.get(g.series_key) || 0) + 1);
 
-      const tabs = rooms.map(r => `<a class="sched-tab${r.id === currentHall.id ? " active" : ""}" href="/admin/schedule?hall=${r.id}${langQs.replace("?", "&")}">${escapeHtml(r.name)}</a>`).join("");
+      const tabs = [
+        `<a class="sched-tab${isGeneral ? " active" : ""}" href="/admin/schedule?hall=general${langQs.replace("?", "&")}">${t.generalTab}</a>`,
+        ...rooms.map(r => `<a class="sched-tab${!isGeneral && r.id === currentHall.id ? " active" : ""}" href="/admin/schedule?hall=${r.id}${langQs.replace("?", "&")}">${escapeHtml(r.name)}</a>`)
+      ].join("");
 
       const dayHeaders = DAYS_OF_WEEK.map((d, i) => `<div class="sched-daylabel" style="grid-column:${i + 2}">${lang === "en" ? d.en : d.ar}</div>`).join("");
       const hourLabels = Array.from({ length: 17 }, (_, i) => `<div class="sched-hourlabel" style="grid-row:${i + 2}">${String(i + 7).padStart(2, "0")}:00</div>`).join("");
+      // General is read-only (confirmed with Hazem: assigning a hall still
+      // happens via the group edit form or a real hall tab) -- there's no
+      // single hall to pre-fill a "+" create link with here, so it renders none.
       const cells = [];
-      for (let i = 0; i < 17; i++) {
-        const hh = `${String(i + 7).padStart(2, "0")}:00`;
-        for (let d = 0; d < DAYS_OF_WEEK.length; d++) {
-          cells.push(`<a class="sched-cell" style="grid-column:${d + 2};grid-row:${i + 2}" href="/admin/groups/new?hall=${currentHall.id}&day=${DAYS_OF_WEEK[d].v}&start=${hh}${langQs.replace("?", "&")}">+</a>`);
+      if (!isGeneral) {
+        for (let i = 0; i < 17; i++) {
+          const hh = `${String(i + 7).padStart(2, "0")}:00`;
+          for (let d = 0; d < DAYS_OF_WEEK.length; d++) {
+            cells.push(`<a class="sched-cell" style="grid-column:${d + 2};grid-row:${i + 2}" href="/admin/groups/new?hall=${currentHall.id}&day=${DAYS_OF_WEEK[d].v}&start=${hh}${langQs.replace("?", "&")}">+</a>`);
+          }
         }
       }
+      // General mode can stack up to (every hall + one "no hall" lane) tiles
+      // in the same day/hour cell -- narrow each tile to its own lane via
+      // width+offset instead of restructuring the grid's own columns.
+      const lanes = rooms.length + 1; // + the "no hall" lane
+      const laneWidth = 100 / lanes;
       const tiles = hallGroups.map(g => {
         const dIdx = DAYS_OF_WEEK.findIndex(d => d.v === g.day);
         if (dIdx === -1) return "";
         const startRow = schedRowFor(g.start_time, false);
         const endRow = schedRowFor(g.end_time, true);
         const hasConflict = conflicts.has(g.id);
+        const hasWeeklyBadge = g.series_key && seriesKeyCounts.get(g.series_key) > 1;
         const seatsLabel = Number.isFinite(g.capacity) ? `${g.enrolled}/${g.capacity}` : `${g.enrolled}`;
-        return `<a class="sched-tile${hasConflict ? " sched-tile--conflict" : ""}" style="grid-column:${dIdx + 2};grid-row:${startRow}/${endRow}" href="/admin/groups/${g.id}/edit${langQs}">
+        const laneIdx = isGeneral ? (g.room_id ? rooms.findIndex(r => r.id === g.room_id) : rooms.length) : -1;
+        const laneStyle = isGeneral ? `width:${laneWidth}%;margin-inline-start:${laneIdx * laneWidth}%;` : "";
+        return `<a class="sched-tile${hasConflict ? " sched-tile--conflict" : ""}" style="grid-column:${dIdx + 2};grid-row:${startRow}/${endRow};${laneStyle}" href="/admin/groups/${g.id}/edit${langQs}">
           ${hasConflict ? `<span class="sched-conflict-badge">${t.conflict}</span>` : ""}
-          <strong>${escapeHtml(g.teacher_name)}</strong><br>${subjectsDisplay(lang, g.subject)}<br>
+          ${!g.room_id ? `<span class="sched-nohall-badge">${t.noHallBadge}</span>` : ""}
+          ${hasWeeklyBadge ? `<span class="sched-weekly-badge">${t.weeklyBadge}</span>` : ""}
+          <strong>${escapeHtml(g.teacher_name)}</strong>${g.stage ? `<br><span class="sched-stage">${escapeHtml(g.stage)}</span>` : ""}<br>${isGeneral && g.room_name ? `🚪 ${escapeHtml(g.room_name)}<br>` : ""}${subjectsDisplay(lang, g.subject)}<br>
           <small>${g.start_time}–${g.end_time} · ${escapeHtml(seatsLabel)}</small>
         </a>`;
       }).join("");
@@ -2271,14 +2318,17 @@ export default {
         .sched-tabs{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
         .sched-tab{padding:10px 16px;border-radius:999px;background:var(--surface);border:2px solid var(--line);color:var(--ink);text-decoration:none;font-weight:600}
         .sched-tab.active{border-color:var(--red);background:#FFF5F5;color:var(--red)}
-        .sched-grid{display:grid;grid-template-columns:56px repeat(7,minmax(90px,1fr));grid-template-rows:auto repeat(17,44px);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:auto;margin-bottom:24px}
+        .sched-grid{display:grid;grid-template-columns:56px repeat(7,minmax(${isGeneral ? 220 : 90}px,1fr));grid-template-rows:auto repeat(17,44px);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:auto;margin-bottom:24px}
         .sched-daylabel{grid-row:1;background:var(--surface);padding:8px 4px;text-align:center;font-weight:700;font-size:13px;position:sticky;top:0}
         .sched-hourlabel{grid-column:1;background:var(--surface);padding:4px;text-align:center;font-size:12px;color:#5A6784}
         .sched-cell{background:var(--paper);color:var(--line);text-decoration:none;display:flex;align-items:center;justify-content:center;font-size:14px}
         .sched-cell:hover{background:var(--line-soft);color:var(--red)}
-        .sched-tile{background:var(--surface);border:2px solid var(--ink);border-radius:6px;padding:4px 6px;font-size:12px;line-height:1.3;color:var(--ink);text-decoration:none;overflow:hidden;z-index:1}
+        .sched-tile{background:var(--surface);border:2px solid var(--ink);border-radius:6px;padding:4px 6px;font-size:12px;line-height:1.3;color:var(--ink);text-decoration:none;overflow:hidden;z-index:1;position:relative}
         .sched-tile--conflict{border-color:var(--red);box-shadow:0 0 0 2px var(--red) inset}
-        .sched-conflict-badge{color:var(--red);font-weight:700}
+        .sched-conflict-badge{color:var(--red);font-weight:700;display:block}
+        .sched-nohall-badge{color:var(--red);font-weight:700;display:block}
+        .sched-weekly-badge{color:#5A6784;font-weight:700;display:block}
+        .sched-stage{color:#5A6784;font-size:11px}
       </style>`;
 
       const body = `${gridStyle}<div class="sched-tabs">${tabs}</div>
