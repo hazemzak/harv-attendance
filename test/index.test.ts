@@ -1394,6 +1394,91 @@ describe("/admin/groups: structured day/start_time/end_time + edit route (added 
   });
 });
 
+describe("/admin/schedule: weekly grid across halls (added 2026-07-16)", () => {
+  it("blocks unauthenticated and clerk access", async () => {
+    expect((await SELF.fetch("https://example.com/admin/schedule")).status).toBe(403);
+    expect((await clerkFetch("https://example.com/admin/schedule")).status).toBe(403);
+  });
+
+  it("renders 7 day headers, 17 hour labels, and a tab per real hall", async () => {
+    const html = await (await adminFetch("https://example.com/admin/schedule")).text();
+    for (const d of ["السبت", "الأحد", "الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة"]) expect(html).toContain(d);
+    expect(html).toContain("07:00");
+    expect(html).toContain("23:00");
+    expect(html).toContain('class="sched-tab');
+  });
+
+  it("shows a group's tile under its own hall and not under a different hall", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-1', 'أ. جدول', 'math')").run();
+    const rooms = (await env.DB.prepare("SELECT id FROM rooms ORDER BY id").all()).results as any[];
+    const [hallA, hallB] = rooms;
+    await env.DB.prepare(
+      "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES ('t-sched-1', 'أ. جدول', 'math', 'sat', '17:00', '19:00', ?, 1)"
+    ).bind(hallA.id).run();
+    const htmlA = await (await adminFetch(`https://example.com/admin/schedule?hall=${hallA.id}`)).text();
+    expect(htmlA).toContain("أ. جدول");
+    const htmlB = await (await adminFetch(`https://example.com/admin/schedule?hall=${hallB.id}`)).text();
+    expect(htmlB).not.toContain("أ. جدول");
+  });
+
+  it("an empty cell's link carries the correct hall/day/start query params", async () => {
+    const room = (await env.DB.prepare("SELECT id FROM rooms ORDER BY id LIMIT 1").first()) as any;
+    const html = await (await adminFetch(`https://example.com/admin/schedule?hall=${room.id}`)).text();
+    expect(html).toContain(`/admin/groups/new?hall=${room.id}&day=sat&start=07:00`);
+  });
+
+  it("/admin/groups/new pre-fills the form from day/start/hall query params", async () => {
+    const room = (await env.DB.prepare("SELECT id FROM rooms ORDER BY id LIMIT 1").first()) as any;
+    const html = await (await adminFetch(`https://example.com/admin/groups/new?day=tue&start=15:00&hall=${room.id}`)).text();
+    expect(html).toContain('<option value="tue" selected>');
+    expect(html).toContain('value="15:00"');
+    expect(html).toContain(`<option value="${room.id}" selected>`);
+  });
+
+  it("marks two active groups sharing a teacher, same day, overlapping time as conflicting on the grid — without removing either", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-conflict', 'أ. تضارب جدول', 'math')").run();
+    const room = (await env.DB.prepare("SELECT id FROM rooms ORDER BY id LIMIT 1").first()) as any;
+    await env.DB.prepare(
+      "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES ('t-sched-conflict', 'أ. تضارب جدول', 'math', 'sun', '17:00', '19:00', ?, 1)"
+    ).bind(room.id).run();
+    await env.DB.prepare(
+      "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES ('t-sched-conflict', 'أ. تضارب جدول', 'math', 'sun', '18:00', '20:00', ?, 1)"
+    ).bind(room.id).run();
+    const html = await (await adminFetch(`https://example.com/admin/schedule?hall=${room.id}`)).text();
+    expect(html).toContain("sched-tile--conflict");
+    const { results: rows } = await env.DB.prepare("SELECT id FROM groups WHERE teacher_id = 't-sched-conflict'").all();
+    expect(rows.length).toBe(2);
+  });
+
+  it("does not flag a conflict for the same teacher on a different day", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-noconflict', 'أ. بدون تضارب', 'math')").run();
+    const room = (await env.DB.prepare("SELECT id FROM rooms ORDER BY id LIMIT 1").first()) as any;
+    await env.DB.prepare(
+      "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES ('t-sched-noconflict', 'أ. بدون تضارب', 'math', 'mon', '17:00', '19:00', ?, 1)"
+    ).bind(room.id).run();
+    await env.DB.prepare(
+      "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES ('t-sched-noconflict', 'أ. بدون تضارب', 'math', 'tue', '17:00', '19:00', ?, 1)"
+    ).bind(room.id).run();
+    const html = await (await adminFetch(`https://example.com/admin/schedule?hall=${room.id}`)).text();
+    // Extract each tile as its own discrete <a>...</a> block first, THEN
+    // filter to this teacher's own tiles -- other tests in this shared-state
+    // suite may leave real conflicting rows in the same hall, and a single
+    // regex spanning "class + eventually the name" would wrongly cross tile
+    // boundaries and pair an unrelated tile's class with this teacher's name.
+    const allTiles = [...html.matchAll(/<a class="(sched-tile[^"]*)"[^>]*>([\s\S]*?)<\/a>/g)];
+    const ownTiles = allTiles.filter(m => m[2].includes("أ. بدون تضارب"));
+    expect(ownTiles.length).toBe(2);
+    for (const m of ownTiles) expect(m[1]).not.toContain("sched-tile--conflict");
+  });
+
+  it("lists a group with no hall or no time in the unassigned section instead of hiding it", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-unassigned', 'أ. غير محدد', 'math')").run();
+    await env.DB.prepare("INSERT INTO groups (teacher_id, teacher_name, subject, active) VALUES ('t-sched-unassigned', 'أ. غير محدد', 'math', 1)").run();
+    const html = await (await adminFetch("https://example.com/admin/schedule")).text();
+    expect(html).toContain("أ. غير محدد");
+  });
+});
+
 describe("bookings: group_id linkage + drop/transfer lifecycle (added 2026-07-13)", () => {
   async function processForm(id: number, extra: Record<string, string>) {
     const form = new FormData();

@@ -1073,7 +1073,7 @@ export default {
       ar: {
         title: "الرئيسية", pendingTitle: "بانتظار المعالجة", pendingLink: "عرض كل الطلاب / بحث",
         pendingNone: "مفيش حد بانتظار المعالجة دلوقتي.",
-        comingTitle: "الحصص والمجموعات", groupsLink: "🗂️ المجموعات", roomsLink: "🚪 القاعات",
+        comingTitle: "الحصص والمجموعات", scheduleLink: "🗓️ الجدول", groupsLink: "🗂️ المجموعات", roomsLink: "🚪 القاعات",
         estamaratLink: "📋 الاستمارات", promosLink: "📢 العروض",
         sessionCta: "▶️ أثناء الحصة", counterCta: "📷 السكانر",
         walkInTitle: "🆕 طالب جديد وصل دلوقتي", walkInName: "الاسم", walkInNamePh: "اسم الطالب",
@@ -1083,7 +1083,7 @@ export default {
       en: {
         title: "Home", pendingTitle: "Pending processing", pendingLink: "View all students / search",
         pendingNone: "Nobody's waiting on processing right now.",
-        comingTitle: "Classes & groups", groupsLink: "🗂️ Groups", roomsLink: "🚪 Rooms",
+        comingTitle: "Classes & groups", scheduleLink: "🗓️ Schedule", groupsLink: "🗂️ Groups", roomsLink: "🚪 Rooms",
         estamaratLink: "📋 Applications", promosLink: "📢 Promotions",
         sessionCta: "▶️ In Session", counterCta: "📷 Scanner",
         walkInTitle: "🆕 A student just walked in", walkInName: "Name", walkInNamePh: "Student's name",
@@ -1238,6 +1238,7 @@ export default {
       <details class="dash-card">
         <summary>${t.comingTitle}</summary>
         <div class="dash-links">
+          <a href="/admin/schedule${langQs}">${t.scheduleLink}</a>
           <a href="/admin/groups${langQs}">${t.groupsLink}</a>
           <a href="/admin/rooms${langQs}">${t.roomsLink}</a>
           <a href="/admin/estamarat${langQs}">${t.estamaratLink}</a>
@@ -2043,6 +2044,96 @@ export default {
       const lang = langOf(url);
       await env.DB.prepare("UPDATE groups SET active = 1 - active WHERE id = ?").bind(groupToggleMatch[1]).run();
       return Response.redirect(url.origin + "/admin/groups" + (lang === "en" ? "?lang=en" : ""), 303);
+    }
+
+    const SCHEDULE_I18N = {
+      ar: { title: "الجدول", noRooms: "لسه معملتش أي قاعة. ابدأ من صفحة القاعات.", unassignedTitle: "مجموعات بدون قاعة أو ميعاد", conflict: "⚠️ تضارب" },
+      en: { title: "Schedule", noRooms: "No halls yet — add one from the Rooms page first.", unassignedTitle: "Groups with no hall or time", conflict: "⚠️ Conflict" }
+    };
+
+    // Business hours are hourly rows (07:00-23:00, 17 rows); a group's time is
+    // floored/ceiled to the nearest hour for row-spanning, the exact HH:MM is
+    // still shown as text on the tile itself. Row 1 is the day-header row, so
+    // hour H occupies grid-row H-5 (07:00 -> row 2).
+    function schedRowFor(hhmm, roundUp) {
+      const h = parseInt(hhmm.slice(0, 2), 10);
+      const m = parseInt(hhmm.slice(3, 5), 10);
+      const hour = roundUp && m > 0 ? h + 1 : h;
+      return Math.min(Math.max(hour - 5, 2), 19);
+    }
+
+    if (url.pathname === "/admin/schedule" && request.method === "GET") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
+      const lang = langOf(url);
+      const t = SCHEDULE_I18N[lang];
+      const langQs = lang === "en" ? "?lang=en" : "";
+      const rooms = await getRooms(env);
+      if (!rooms.length) {
+        return new Response(page(t.title, `<p class="empty">${t.noRooms}</p>`, { lang, toggleHref: toggleHref(url, lang), isOwner: true }), { headers: { "content-type": "text/html;charset=utf-8" } });
+      }
+      const hallIdParam = parseInt(url.searchParams.get("hall") || "", 10);
+      const currentHall = rooms.find(r => r.id === hallIdParam) || rooms[0];
+      const groups = await getGroupsWithSeats(env, { activeOnly: true });
+      const conflicts = computeGroupConflicts(groups);
+      const scheduled = g => g.day && g.start_time && g.end_time;
+      const hallGroups = groups.filter(g => g.room_id === currentHall.id && scheduled(g));
+      const unassigned = groups.filter(g => !g.room_id || !scheduled(g));
+
+      const tabs = rooms.map(r => `<a class="sched-tab${r.id === currentHall.id ? " active" : ""}" href="/admin/schedule?hall=${r.id}${langQs.replace("?", "&")}">${escapeHtml(r.name)}</a>`).join("");
+
+      const dayHeaders = DAYS_OF_WEEK.map((d, i) => `<div class="sched-daylabel" style="grid-column:${i + 2}">${lang === "en" ? d.en : d.ar}</div>`).join("");
+      const hourLabels = Array.from({ length: 17 }, (_, i) => `<div class="sched-hourlabel" style="grid-row:${i + 2}">${String(i + 7).padStart(2, "0")}:00</div>`).join("");
+      const cells = [];
+      for (let i = 0; i < 17; i++) {
+        const hh = `${String(i + 7).padStart(2, "0")}:00`;
+        for (let d = 0; d < DAYS_OF_WEEK.length; d++) {
+          cells.push(`<a class="sched-cell" style="grid-column:${d + 2};grid-row:${i + 2}" href="/admin/groups/new?hall=${currentHall.id}&day=${DAYS_OF_WEEK[d].v}&start=${hh}${langQs.replace("?", "&")}">+</a>`);
+        }
+      }
+      const tiles = hallGroups.map(g => {
+        const dIdx = DAYS_OF_WEEK.findIndex(d => d.v === g.day);
+        if (dIdx === -1) return "";
+        const startRow = schedRowFor(g.start_time, false);
+        const endRow = schedRowFor(g.end_time, true);
+        const hasConflict = conflicts.has(g.id);
+        const seatsLabel = Number.isFinite(g.capacity) ? `${g.enrolled}/${g.capacity}` : `${g.enrolled}`;
+        return `<a class="sched-tile${hasConflict ? " sched-tile--conflict" : ""}" style="grid-column:${dIdx + 2};grid-row:${startRow}/${endRow}" href="/admin/groups/${g.id}/edit${langQs}">
+          ${hasConflict ? `<span class="sched-conflict-badge">${t.conflict}</span>` : ""}
+          <strong>${escapeHtml(g.teacher_name)}</strong><br>${subjectsDisplay(lang, g.subject)}<br>
+          <small>${g.start_time}–${g.end_time} · ${escapeHtml(seatsLabel)}</small>
+        </a>`;
+      }).join("");
+
+      const unassignedHtml = unassigned.length
+        ? `<h2 style="font-size:15px;color:var(--muted)">${t.unassignedTitle}</h2>` + unassigned.map(g =>
+            `<a class="card" href="/admin/groups/${g.id}/edit${langQs}"><div><strong>${escapeHtml(g.teacher_name)} — ${subjectsDisplay(lang, g.subject)}</strong></div></a>`
+          ).join("")
+        : "";
+
+      const gridStyle = `<style>
+        .sched-tabs{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
+        .sched-tab{padding:10px 16px;border-radius:999px;background:var(--surface);border:2px solid var(--line);color:var(--ink);text-decoration:none;font-weight:600}
+        .sched-tab.active{border-color:var(--red);background:#FFF5F5;color:var(--red)}
+        .sched-grid{display:grid;grid-template-columns:56px repeat(7,minmax(90px,1fr));grid-template-rows:auto repeat(17,44px);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:auto;margin-bottom:24px}
+        .sched-daylabel{grid-row:1;background:var(--surface);padding:8px 4px;text-align:center;font-weight:700;font-size:13px;position:sticky;top:0}
+        .sched-hourlabel{grid-column:1;background:var(--surface);padding:4px;text-align:center;font-size:12px;color:#5A6784}
+        .sched-cell{background:var(--paper);color:var(--line);text-decoration:none;display:flex;align-items:center;justify-content:center;font-size:14px}
+        .sched-cell:hover{background:var(--line-soft);color:var(--red)}
+        .sched-tile{background:var(--surface);border:2px solid var(--ink);border-radius:6px;padding:4px 6px;font-size:12px;line-height:1.3;color:var(--ink);text-decoration:none;overflow:hidden;z-index:1}
+        .sched-tile--conflict{border-color:var(--red);box-shadow:0 0 0 2px var(--red) inset}
+        .sched-conflict-badge{color:var(--red);font-weight:700}
+      </style>`;
+
+      const body = `${gridStyle}<div class="sched-tabs">${tabs}</div>
+        <div class="sched-grid">
+          <div style="grid-column:1;grid-row:1;background:var(--surface)"></div>
+          ${dayHeaders}
+          ${hourLabels}
+          ${cells.join("")}
+          ${tiles}
+        </div>
+        ${unassignedHtml}`;
+      return new Response(page(t.title, body, { lang, toggleHref: toggleHref(url, lang), isOwner: true }), { headers: { "content-type": "text/html;charset=utf-8" } });
     }
 
     const LEDGER_I18N = {
