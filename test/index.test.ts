@@ -1804,6 +1804,33 @@ describe("/admin/schedule: weekly grid across halls (added 2026-07-16)", () => {
       expect(tile?.[2]).not.toContain("sched-weekly-badge");
     });
   });
+
+  describe("stage (year) shown on the tile itself (added 2026-07-17)", () => {
+    it("shows the group's stage on its tile, on a real hall tab and on General", async () => {
+      await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-stage', 'أ. مرحلة', 'math')").run();
+      const room = (await env.DB.prepare("SELECT id FROM rooms ORDER BY id LIMIT 1").first()) as any;
+      await env.DB.prepare(
+        "INSERT INTO groups (teacher_id, teacher_name, subject, stage, day, start_time, end_time, room_id, active) VALUES ('t-sched-stage', 'أ. مرحلة', 'math', 'تالتة ثانوي', 'mon', '17:00', '19:00', ?, 1)"
+      ).bind(room.id).run();
+      const hallHtml = await (await adminFetch(`https://example.com/admin/schedule?hall=${room.id}`)).text();
+      const hallTile = [...hallHtml.matchAll(/<a class="(sched-tile[^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].find(m => m[2].includes("أ. مرحلة"));
+      expect(hallTile?.[2]).toContain("تالتة ثانوي");
+      const generalHtml = await (await adminFetch("https://example.com/admin/schedule?hall=general")).text();
+      const generalTile = [...generalHtml.matchAll(/<a class="(sched-tile[^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].find(m => m[2].includes("أ. مرحلة"));
+      expect(generalTile?.[2]).toContain("تالتة ثانوي");
+    });
+
+    it("renders no stage line when a group's stage is unset", async () => {
+      await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-nostage', 'أ. بدون مرحلة', 'math')").run();
+      const room = (await env.DB.prepare("SELECT id FROM rooms ORDER BY id LIMIT 1").first()) as any;
+      await env.DB.prepare(
+        "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES ('t-sched-nostage', 'أ. بدون مرحلة', 'math', 'tue', '17:00', '19:00', ?, 1)"
+      ).bind(room.id).run();
+      const html = await (await adminFetch(`https://example.com/admin/schedule?hall=${room.id}`)).text();
+      const tile = [...html.matchAll(/<a class="(sched-tile[^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].find(m => m[2].includes("أ. بدون مرحلة"));
+      expect(tile?.[2]).not.toContain("sched-stage");
+    });
+  });
 });
 
 describe("bookings: group_id linkage + drop/transfer lifecycle (added 2026-07-13)", () => {

@@ -2303,7 +2303,7 @@ export default {
           ${hasConflict ? `<span class="sched-conflict-badge">${t.conflict}</span>` : ""}
           ${!g.room_id ? `<span class="sched-nohall-badge">${t.noHallBadge}</span>` : ""}
           ${hasWeeklyBadge ? `<span class="sched-weekly-badge">${t.weeklyBadge}</span>` : ""}
-          <strong>${escapeHtml(g.teacher_name)}</strong><br>${isGeneral && g.room_name ? `🚪 ${escapeHtml(g.room_name)}<br>` : ""}${subjectsDisplay(lang, g.subject)}<br>
+          <strong>${escapeHtml(g.teacher_name)}</strong>${g.stage ? `<br><span class="sched-stage">${escapeHtml(g.stage)}</span>` : ""}<br>${isGeneral && g.room_name ? `🚪 ${escapeHtml(g.room_name)}<br>` : ""}${subjectsDisplay(lang, g.subject)}<br>
           <small>${g.start_time}–${g.end_time} · ${escapeHtml(seatsLabel)}</small>
         </a>`;
       }).join("");
@@ -2328,6 +2328,7 @@ export default {
         .sched-conflict-badge{color:var(--red);font-weight:700;display:block}
         .sched-nohall-badge{color:var(--red);font-weight:700;display:block}
         .sched-weekly-badge{color:#5A6784;font-weight:700;display:block}
+        .sched-stage{color:#5A6784;font-size:11px}
       </style>`;
 
       const body = `${gridStyle}<div class="sched-tabs">${tabs}</div>

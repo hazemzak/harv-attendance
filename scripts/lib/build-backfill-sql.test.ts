@@ -6,10 +6,24 @@ describe("buildBackfillSql", () => {
     const { sql, report } = buildBackfillSql([
       { id: "t1", name: "أ. واحد", subject: "math", schedule: "الأربعاء 5–7 مساءً" }
     ]);
-    expect(sql).toContain("SELECT 't1' AS teacher_id, 'أ. واحد' AS teacher_name, 'math' AS subject, 'wed' AS day, '17:00' AS start_time, '19:00' AS end_time, NULL AS room_id, 1 AS active, NULL AS series_key");
+    expect(sql).toContain("SELECT 't1' AS teacher_id, 'أ. واحد' AS teacher_name, 'math' AS subject, NULL AS stage, 'wed' AS day, '17:00' AS start_time, '19:00' AS end_time, NULL AS room_id, 1 AS active, NULL AS series_key");
     expect(sql).toContain("WHERE NOT EXISTS (SELECT 1 FROM groups WHERE teacher_id = 't1')");
-    expect(report.inserted).toEqual([{ id: "t1", name: "أ. واحد", schedule: "الأربعاء 5–7 مساءً", slots: [{ day_of_week: "wed", start_time: "17:00", end_time: "19:00" }], seriesKey: null }]);
+    expect(report.inserted).toEqual([{ id: "t1", name: "أ. واحد", schedule: "الأربعاء 5–7 مساءً", slots: [{ day_of_week: "wed", start_time: "17:00", end_time: "19:00" }], seriesKey: null, stage: null }]);
     expect(report.skipped).toEqual([]);
+  });
+
+  it("derives stage from the teacher's phase (bac2/bac3), NULL when phase is unset -- never guessed", () => {
+    const withPhase = buildBackfillSql([
+      { id: "t6", name: "أ. ستة", subject: "physics", schedule: "السبت 4–6 مساءً", phase: "bac2" }
+    ]);
+    expect(withPhase.sql).toContain("'تانية ثانوي' AS stage");
+    expect(withPhase.report.inserted[0].stage).toBe("تانية ثانوي");
+
+    const noPhase = buildBackfillSql([
+      { id: "t7", name: "أ. سبعة", subject: "physics", schedule: "السبت 4–6 مساءً" }
+    ]);
+    expect(noPhase.sql).toContain("NULL AS stage");
+    expect(noPhase.report.inserted[0].stage).toBeNull();
   });
 
   it("regression: a twice-weekly teacher's two slots go into ONE INSERT statement (UNION ALL), not two separate ones -- two separate INSERTs would have the first slot's own row satisfy (falsify) the second slot's own NOT EXISTS check and silently drop it", () => {

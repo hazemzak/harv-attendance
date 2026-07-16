@@ -11,6 +11,12 @@ function esc(v) {
   return `'${String(v).replace(/'/g, "''")}'`;
 }
 
+// Mirrors src/index.js's STAGE_TO_PHASE, inverted -- teachers.json's `phase`
+// (bac2/bac3) is the only year signal these legacy rows have, so a group
+// only gets a stage when the teacher's phase is set. Left NULL otherwise
+// (e.g. shared-subject teachers with no single phase) rather than guessing.
+const PHASE_TO_STAGE = { bac2: "تانية ثانوي", bac3: "تالتة ثانوي" };
+
 // One statement PER TEACHER (not per slot) -- all of a teacher's slots are
 // UNIONed into a single INSERT...SELECT so the WHERE NOT EXISTS guard is
 // checked exactly once against the pre-insert state. This matters for the 3
@@ -31,15 +37,16 @@ export function buildBackfillSql(teachers) {
       continue;
     }
     const seriesKey = result.slots.length > 1 ? `${t.id}-series` : null;
+    const stage = PHASE_TO_STAGE[t.phase] || null;
     const selects = result.slots.map(slot =>
-      `SELECT ${esc(t.id)} AS teacher_id, ${esc(t.name)} AS teacher_name, ${esc(t.subject)} AS subject, ${esc(slot.day_of_week)} AS day, ${esc(slot.start_time)} AS start_time, ${esc(slot.end_time)} AS end_time, NULL AS room_id, 1 AS active, ${esc(seriesKey)} AS series_key`
+      `SELECT ${esc(t.id)} AS teacher_id, ${esc(t.name)} AS teacher_name, ${esc(t.subject)} AS subject, ${esc(stage)} AS stage, ${esc(slot.day_of_week)} AS day, ${esc(slot.start_time)} AS start_time, ${esc(slot.end_time)} AS end_time, NULL AS room_id, 1 AS active, ${esc(seriesKey)} AS series_key`
     ).join("\n    UNION ALL\n    ");
     lines.push(
-      `INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active, series_key)\n` +
+      `INSERT INTO groups (teacher_id, teacher_name, subject, stage, day, start_time, end_time, room_id, active, series_key)\n` +
       `SELECT * FROM (\n    ${selects}\n)\n` +
       `WHERE NOT EXISTS (SELECT 1 FROM groups WHERE teacher_id = ${esc(t.id)});`
     );
-    report.inserted.push({ id: t.id, name: t.name, schedule: t.schedule, slots: result.slots, seriesKey });
+    report.inserted.push({ id: t.id, name: t.name, schedule: t.schedule, slots: result.slots, seriesKey, stage });
   }
   return { sql: lines.join("\n\n") + "\n", report };
 }
