@@ -57,7 +57,8 @@ CREATE TABLE teachers (
   share_type TEXT CHECK (share_type IN ('percent', 'per_session')),
   share_value REAL,
   photo_blob BLOB,
-  photo_blob_type TEXT
+  photo_blob_type TEXT,
+  person_id TEXT
 );
 
 -- Up to 3 day+time-range slots per teacher, replacing free-text

@@ -2381,7 +2381,7 @@ export default {
       const lang = langOf(url);
       const t = TEACHERS_I18N[lang];
       const langQs = lang === "en" ? "?lang=en" : "";
-      const { results } = await env.DB.prepare("SELECT id, name, subject, share_type, share_value FROM teachers ORDER BY name").all();
+      const { results } = await env.DB.prepare("SELECT id, name, subject, share_type, share_value, person_id FROM teachers ORDER BY name").all();
       const today = new Date().toISOString().slice(0, 10);
       // "Money left" = owed computed since their last recorded payout (or since
       // the beginning, if never paid out) — a naive unbounded-always computation
@@ -2416,24 +2416,55 @@ export default {
       const addNewLink = `<a href="/admin/teachers/new${langQs}"><button type="button">${t.addNew}</button></a>`;
 
       const needingAttention = withStatus.filter(tch => tch.needsAttention);
+      // Merge rows sharing a person_id (the same real teacher across
+      // multiple subjects, e.g. Thanaweya math + Bakaloreya statistics)
+      // into one card here — this flat list is where that showed up as
+      // what looked like a duplicate teacher entry. The by-subject
+      // sections below stay one-row-per-subject on purpose (a person who
+      // teaches two subjects is correctly listed once in each of their
+      // two subject sections, not a duplicate in context).
+      const personGroups = new Map();
+      const mergedAttention = [];
+      for (const tch of needingAttention) {
+        if (tch.person_id && personGroups.has(tch.person_id)) {
+          personGroups.get(tch.person_id).rows.push(tch);
+          continue;
+        }
+        const entry = { name: tch.name, rows: [tch] };
+        if (tch.person_id) personGroups.set(tch.person_id, entry);
+        mergedAttention.push(entry);
+      }
+      const attentionRow = tch => `<div>
+          <small>${subjectsDisplay(lang, tch.subject)} — ${escapeHtml(shareLabel(tch))}${tch.owed > 0 ? ` · ${t.owed}: ${tch.owed.toFixed(2)}` : ""}</small>
+          <div class="pending-actions">
+            <a href="/admin/teachers/${tch.id}/settlement${langQs}"><button type="button">${t.settlement}</button></a>
+            <a href="/admin/teachers/${tch.id}/edit${langQs}"><button type="button">${t.edit}</button></a>
+          </div>
+        </div>`;
+      const attentionCard = (entry, i) => `<div class="card ${i % 2 === 0 ? "stripe-a" : "stripe-b"}"><div>
+        <strong>${escapeHtml(entry.name)}</strong>
+        ${entry.rows.map(attentionRow).join("")}
+      </div></div>`;
       const attentionSection = `<div class="dash-card">
         <h2>${t.attentionTitle}</h2>
-        ${needingAttention.length
-          ? needingAttention.map((tch, i) => teacherCard(tch, i, true)).join("")
+        ${mergedAttention.length
+          ? mergedAttention.map(attentionCard).join("")
           : `<p class="empty">${t.attentionEmpty}</p>`}
       </div>`;
 
       // Grouped by subject in the site's canonical SUBJECTS order (not raw
       // alphabetical DB order) so the section order matches every other
       // subject list in the app (registration form, promotions, etc.).
+      // Collapsible (native <details>, rung-4 — no JS needed) now that a
+      // full 18-subject roster page is long to scroll.
       const bySubject = {};
       for (const tch of withStatus) (bySubject[tch.subject] ||= []).push(tch);
       const subjectSections = SUBJECTS
         .filter(s => bySubject[s.v]?.length)
-        .map(s => `<div class="dash-card">
-          <h2>${lang === "en" ? s.en : s.ar}</h2>
+        .map(s => `<details class="dash-card" open>
+          <summary>${lang === "en" ? s.en : s.ar}</summary>
           ${bySubject[s.v].map(teacherCard).join("")}
-        </div>`).join("");
+        </details>`).join("");
 
       return new Response(page(t.title, addNewLink + attentionSection + subjectSections, { lang, toggleHref: toggleHref(url, lang), isOwner: roleAllowed(staffRole, ["owner"]) }), { headers: { "content-type": "text/html;charset=utf-8" } });
     }

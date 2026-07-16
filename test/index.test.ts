@@ -2595,6 +2595,26 @@ describe("/public/roster: column-scoped public endpoint for harvcentereg.com (ad
   });
 });
 
+describe("/admin/teachers: person_id merge in the needs-attention list (added 2026-07-16)", () => {
+  it("merges two rows sharing a person_id into one card with both subjects, not two cards", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject, person_id) VALUES ('merge-test-math', 'أ. مدمج', 'math', 'merge-test-person')").run();
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject, person_id) VALUES ('merge-test-stats', 'أ. مدمج', 'statistics', 'merge-test-person')").run();
+    const html = await (await adminFetch("https://example.com/admin/teachers")).text();
+    const attentionSection = html.slice(0, html.indexOf("<details")); // needs-attention list renders before the by-subject <details> sections
+    expect(attentionSection.match(/أ\. مدمج/g)?.length).toBe(1); // the name renders once there, not twice
+    expect(attentionSection).toContain("merge-test-math/settlement");
+    expect(attentionSection).toContain("merge-test-stats/settlement"); // but both settlement links are still present
+  });
+
+  it("leaves two different teachers with no shared person_id as two separate cards", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('nomerge-test-1', 'أ. منفصل واحد', 'math')").run();
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('nomerge-test-2', 'أ. منفصل اتنين', 'physics')").run();
+    const html = await (await adminFetch("https://example.com/admin/teachers")).text();
+    expect(html).toContain("أ. منفصل واحد");
+    expect(html).toContain("أ. منفصل اتنين");
+  });
+});
+
 describe("/admin/teachers/new + /admin/teachers (add): teacher-editor screen (added 2026-07-15)", () => {
   it("creates a new teacher with a whitelisted subject/phase/mode/track", async () => {
     const form = new FormData();
