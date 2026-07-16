@@ -3094,7 +3094,11 @@ export default {
         return new Response(page("المجموعة دي مش متاحة", `<div class="confirm"><strong>${escapeHtml(r.name)}</strong>المجموعة دي مش متاحة للمسح دلوقتي — روح للاستقبال.</div>`, { nav: false }), { status: 403, headers: { "content-type": "text/html;charset=utf-8" } });
       }
       const body = r.result === "marked"
-        ? `<div class="confirm"><strong>${escapeHtml(r.name)}</strong>تم تسجيل الحضور الساعة ${new Date().toLocaleTimeString("ar-EG")}</div>`
+        // cairoNow().hhmm, not new Date().toLocaleTimeString() -- this renders
+        // server-side in the Worker, which runs in UTC; the student reading
+        // this on their phone is in Cairo (UTC+3), so an unadjusted server
+        // clock would show a time 3 hours off from what they'd expect.
+        ? `<div class="confirm"><strong>${escapeHtml(r.name)}</strong>تم تسجيل الحضور الساعة ${cairoNow().hhmm}</div>`
         : `<div class="confirm"><strong>${escapeHtml(r.name)}</strong>تم تسجيل حضورك بالفعل اليوم</div>`;
       return new Response(page("تم تسجيل الحضور", body, { nav: false }), { headers: { "content-type": "text/html;charset=utf-8" } });
     }
