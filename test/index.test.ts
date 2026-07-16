@@ -41,6 +41,21 @@ function scanMarkFetch(student: number | string, group?: number | string) {
 // clerkFetch() is defined further down this file (used by the rooms/groups/
 // bookings work) — reused here instead of a second near-identical definition.
 
+// Mirrors src/index.js's cairoNow()/JS_DAY_TO_SLUG (not exported — internal
+// to the fetch handler, same as markAttendance/computeGroupConflicts) so
+// tests can construct a group whose day/time is guaranteed to be "expected
+// right now" regardless of when the test suite actually runs.
+const JS_DAY_TO_SLUG = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+function currentCairoDayAndWindow(): [string, string, string] {
+  const d = new Date(Date.now() + 3 * 60 * 60 * 1000);
+  const day = JS_DAY_TO_SLUG[d.getUTCDay()];
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const clampToDay = (mins: number) => Math.max(0, Math.min(1439, mins));
+  const nowMins = d.getUTCHours() * 60 + d.getUTCMinutes();
+  const toHHMM = (mins: number) => `${pad(Math.floor(mins / 60))}:${pad(mins % 60)}`;
+  return [day, toHHMM(clampToDay(nowMins - 5)), toHHMM(clampToDay(nowMins + 5))];
+}
+
 async function insertStudent(fields: Record<string, string | null>) {
   const cols = Object.keys(fields);
   const placeholders = cols.map(() => "?").join(",");
@@ -620,12 +635,135 @@ describe("/admin/scan-mark: JSON endpoint backing the /admin/counter hardware-sc
   it("marks attendance on first scan, then reports already on a second scan same day (and includes a live running count, added 2026-07-14)", async () => {
     const id = await insertStudent({ name: "Counter Marked Test", status: "approved" });
     const first = await scanMarkFetch(id);
-    // count is the global (ungrouped) today-total, which earlier tests in this
-    // shared-state file also contribute to — check it's a real number, not an
-    // exact value tied to file-execution order.
-    expect(await first.json()).toEqual({ result: "marked", name: "Counter Marked Test", stage: "", photoUrl: null, count: expect.any(Number) });
+    // No explicit group/general posted -> auto-categorization (feature #1,
+    // 2026-07-16) runs; this student has no active bookings, so it resolves
+    // "none" and falls back to the same plain ungrouped mark as before, just
+    // now flagged notExpected. count is the auto-mode global today-total,
+    // which earlier tests in this shared-state file also contribute to —
+    // check it's a real number, not an exact value tied to execution order.
+    expect(await first.json()).toEqual({ result: "marked", name: "Counter Marked Test", stage: "", photoUrl: null, notExpected: true, count: expect.any(Number) });
     const second = await scanMarkFetch(id);
-    expect(await second.json()).toEqual({ result: "already", name: "Counter Marked Test", stage: "", photoUrl: null, count: expect.any(Number) });
+    expect(await second.json()).toEqual({ result: "already", name: "Counter Marked Test", stage: "", photoUrl: null, notExpected: true, count: expect.any(Number) });
+  });
+
+  describe("scanner auto-categorization (feature #1, 2026-07-16)", () => {
+    it("auto-resolves to the one group the student is expected in right now", async () => {
+      const [day, start, end] = currentCairoDayAndWindow();
+      const { meta } = await env.DB.prepare(
+        "INSERT INTO groups (teacher_name, subject, active, day, start_time, end_time) VALUES ('أ. تلقائي', 'math', 1, ?, ?, ?)"
+      ).bind(day, start, end).run();
+      const groupId = meta.last_row_id;
+      const id = await insertStudent({ name: "Auto Match Test", status: "approved" });
+      await env.DB.prepare(
+        "INSERT INTO bookings (student_id, subject, teacher_name, amount, group_id, status) VALUES (?, 'math', 'أ. تلقائي', 0, ?, 'active')"
+      ).bind(id, groupId).run();
+      const res = await scanMarkFetch(id); // no explicit group/general -> auto-detect
+      const body = await res.json() as any;
+      expect(body.result).toBe("marked");
+      expect(body.notExpected).toBeUndefined();
+      const row = await env.DB.prepare("SELECT group_id FROM attendance WHERE student_id = ?").bind(id).first();
+      expect(row?.group_id).toBe(groupId);
+    });
+
+    it("two active bookings pointing at the same group don't falsely trigger ambiguous (claude-review, PR #15 finding #1)", async () => {
+      const [day, start, end] = currentCairoDayAndWindow();
+      const { meta } = await env.DB.prepare(
+        "INSERT INTO groups (teacher_name, subject, active, day, start_time, end_time) VALUES ('أ. مكرر', 'math', 1, ?, ?, ?)"
+      ).bind(day, start, end).run();
+      const groupId = meta.last_row_id;
+      const id = await insertStudent({ name: "Duplicate Booking Test", status: "approved" });
+      // Two active bookings, same student, same group -- e.g. a re-processed
+      // estamara that left a stale row instead of replacing it.
+      await env.DB.prepare(
+        "INSERT INTO bookings (student_id, subject, teacher_name, amount, group_id, status) VALUES (?, 'math', 'أ. مكرر', 0, ?, 'active')"
+      ).bind(id, groupId).run();
+      await env.DB.prepare(
+        "INSERT INTO bookings (student_id, subject, teacher_name, amount, group_id, status) VALUES (?, 'math', 'أ. مكرر', 0, ?, 'active')"
+      ).bind(id, groupId).run();
+      const body = await (await scanMarkFetch(id)).json() as any;
+      expect(body.result).toBe("marked");
+      expect(body.notExpected).toBeUndefined(); // must resolve "auto", not "ambiguous"
+      const row = await env.DB.prepare("SELECT group_id FROM attendance WHERE student_id = ?").bind(id).first();
+      expect(row?.group_id).toBe(groupId);
+    });
+
+    it("returns ambiguous with real candidates when 2+ concurrent groups match, and does not mark attendance until a candidate is picked", async () => {
+      const [day, start, end] = currentCairoDayAndWindow();
+      const g1 = (await env.DB.prepare(
+        "INSERT INTO groups (teacher_name, subject, active, day, start_time, end_time) VALUES ('أ. أول', 'math', 1, ?, ?, ?)"
+      ).bind(day, start, end).run()).meta.last_row_id;
+      const g2 = (await env.DB.prepare(
+        "INSERT INTO groups (teacher_name, subject, active, day, start_time, end_time) VALUES ('أ. تاني', 'physics', 1, ?, ?, ?)"
+      ).bind(day, start, end).run()).meta.last_row_id;
+      const id = await insertStudent({ name: "Ambiguous Test", status: "approved" });
+      await env.DB.prepare(
+        "INSERT INTO bookings (student_id, subject, teacher_name, amount, group_id, status) VALUES (?, 'math', 'أ. أول', 0, ?, 'active')"
+      ).bind(id, g1).run();
+      await env.DB.prepare(
+        "INSERT INTO bookings (student_id, subject, teacher_name, amount, group_id, status) VALUES (?, 'physics', 'أ. تاني', 0, ?, 'active')"
+      ).bind(id, g2).run();
+      const res = await scanMarkFetch(id);
+      const body = await res.json() as any;
+      expect(body.result).toBe("ambiguous");
+      expect(body.candidates.map((c: any) => c.id).sort()).toEqual([g1, g2].sort());
+      const before = await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE student_id = ?").bind(id).first();
+      expect(before?.n).toBe(0); // real ambiguity never auto-marks either candidate
+      // Resolving the ambiguity: re-submit with an explicit candidate group id
+      // (the counter's own inline-picker re-POST), same shape as a normal pin.
+      const resolved = await (await scanMarkFetch(id, g1)).json() as any;
+      expect(resolved.result).toBe("marked");
+      const after = await env.DB.prepare("SELECT group_id FROM attendance WHERE student_id = ?").bind(id).first();
+      expect(after?.group_id).toBe(g1);
+    });
+
+    it("falls back to a plain ungrouped mark, flagged notExpected, when no group matches the current window", async () => {
+      const id = await insertStudent({ name: "None Match Test", status: "approved" });
+      // A group exists but scheduled for a day/time nowhere near now, so it
+      // can't accidentally match regardless of when the suite runs.
+      const [day] = currentCairoDayAndWindow();
+      const farDay = day === "sat" ? "sun" : "sat";
+      const { meta } = await env.DB.prepare(
+        "INSERT INTO groups (teacher_name, subject, active, day, start_time, end_time) VALUES ('أ. بعيد', 'math', 1, ?, '08:00', '09:00')"
+      ).bind(farDay).run();
+      await env.DB.prepare(
+        "INSERT INTO bookings (student_id, subject, teacher_name, amount, group_id, status) VALUES (?, 'math', 'أ. بعيد', 0, ?, 'active')"
+      ).bind(id, meta.last_row_id).run();
+      const res = await scanMarkFetch(id);
+      const body = await res.json() as any;
+      expect(body.result).toBe("marked");
+      expect(body.notExpected).toBe(true);
+      const row = await env.DB.prepare("SELECT group_id FROM attendance WHERE student_id = ?").bind(id).first();
+      expect(row?.group_id).toBeNull();
+    });
+
+    it("an inactive group is never offered as a candidate even if its schedule matches", async () => {
+      const [day, start, end] = currentCairoDayAndWindow();
+      const { meta } = await env.DB.prepare(
+        "INSERT INTO groups (teacher_name, subject, active, day, start_time, end_time) VALUES ('أ. متوقف', 'math', 0, ?, ?, ?)"
+      ).bind(day, start, end).run();
+      const id = await insertStudent({ name: "Inactive Group Test", status: "approved" });
+      await env.DB.prepare(
+        "INSERT INTO bookings (student_id, subject, teacher_name, amount, group_id, status) VALUES (?, 'math', 'أ. متوقف', 0, ?, 'active')"
+      ).bind(id, meta.last_row_id).run();
+      const body = await (await scanMarkFetch(id)).json() as any;
+      expect(body.notExpected).toBe(true); // treated as "none", not auto-matched to the inactive group
+    });
+
+    it("an explicit pinned group still bypasses auto-detection entirely, same as before this feature", async () => {
+      const { meta } = await env.DB.prepare("INSERT INTO groups (teacher_name, subject, active) VALUES ('أ. مثبت', 'math', 1)").run();
+      const id = await insertStudent({ name: "Explicit Pin Test", status: "approved" });
+      const body = await (await scanMarkFetch(id, meta.last_row_id)).json() as any;
+      expect(body.result).toBe("marked");
+      expect(body.notExpected).toBeUndefined();
+    });
+
+    it("the public phone-camera /scan flow is unaffected by auto-categorization", async () => {
+      const id = await insertStudent({ name: "Public Scan Test", status: "approved" });
+      const res = await SELF.fetch(`https://example.com/scan?student=${id}`);
+      expect(res.status).toBe(200);
+      const row = await env.DB.prepare("SELECT group_id FROM attendance WHERE student_id = ?").bind(id).first();
+      expect(row?.group_id).toBeNull(); // /scan never auto-detects, always ungrouped unless ?group= is passed explicitly
+    });
   });
 
   it("scopes the live count to the pinned group, isolated from other groups/ungrouped scans", async () => {
@@ -758,12 +896,22 @@ describe("/admin/counter: hardware-scanner kiosk page (added 2026-07-13)", () =>
   // mode — it shows a group picker first, per Hazem's "make sure whoever's
   // scanning knows what's going on where." The scan UI now needs either a
   // real ?group=ID or an explicit ?general=1 opt-in.
-  it("shows a group picker (not the scan input) on a bare hit with no group chosen yet", async () => {
+  it("shows the always-focused scan input immediately on a bare hit — auto-categorization replaces the old pick-first flow (2026-07-16)", async () => {
     const res = await adminFetch("https://example.com/admin/counter");
     expect(res.status).toBe(200);
     const html = await res.text();
-    expect(html).not.toContain('id="counter-input"');
-    expect(html).toContain("امسح عام من غير مجموعة"); // the explicit general-mode opt-out link
+    expect(html).toContain('id="counter-input"');
+    expect(html).toContain('data-group=""'); // no pin -> server auto-detects per scan
+    expect(html).toContain("امسح عام من غير ربط بمجموعة"); // the explicit general-mode opt-out link, kept as an escape hatch
+  });
+
+  it("lists lessons expected right now (informational) on a bare hit, each as a pin shortcut", async () => {
+    const { meta } = await env.DB.prepare(
+      "INSERT INTO groups (teacher_name, subject, active, day, start_time, end_time) VALUES ('أ. متوقع', 'math', 1, ?, ?, ?)"
+    ).bind(...currentCairoDayAndWindow()).run();
+    const html = await (await adminFetch("https://example.com/admin/counter")).text();
+    expect(html).toContain("أ. متوقع");
+    expect(html).toContain(`href="/admin/counter?group=${meta.last_row_id}"`);
   });
 
   it("renders the always-focused scan input once a group is picked", async () => {
