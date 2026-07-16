@@ -1,0 +1,115 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-16T00:00:00Z",
+  "title": "Design System: harv-attendance",
+  "extensions": {
+    "colorMeta": {
+      "brand-red": { "role": "primary", "displayName": "Harv Red", "canonical": "#D42027", "tonalRamp": ["#200506", "#530D0F", "#871419", "#BA1C22", "#D93B41", "#E47176", "#EEA7AA", "#F9DEDF"] },
+      "ink-navy": { "role": "secondary", "displayName": "Ink Navy", "canonical": "#1A2744", "tonalRamp": ["#04060A", "#0A0F1B", "#11192B", "#17223C", "#36415B", "#6D7688", "#A5AAB6", "#DDDFE3"] },
+      "paper": { "role": "neutral", "displayName": "Paper", "canonical": "#FAFAF8", "tonalRamp": ["#262625", "#626261", "#9F9F9E", "#DCDCDA", "#FBFBF9", "#FCFCFB", "#FDFDFC", "#FEFEFE"] },
+      "success": { "role": "functional", "displayName": "Confirmation Green", "canonical": "#1F9D6B", "tonalRamp": ["#051810", "#0C3E2A", "#146444", "#1B8A5E", "#3AA97D", "#71C1A1", "#A7D9C5", "#DDF0E9"] }
+    },
+    "typographyMeta": {
+      "body": { "displayName": "Body", "purpose": "Default text size floor across the whole app — 18px, never smaller for anything a user must read to act." },
+      "h1": { "displayName": "Page Title", "purpose": "One per screen, first thing read." },
+      "label": { "displayName": "Field Label", "purpose": "Always visible above every input; never placeholder-only." }
+    },
+    "shadows": [
+      { "name": "floating-action", "value": "0 4px 14px rgba(0,0,0,.25)", "purpose": "The persistent help FAB — signals it floats above the page." },
+      { "name": "ambient-card-lift", "value": "0 10px 34px rgba(26,39,68,.10)", "purpose": "Student ID/estamara printable card — reads as a physical object, not a UI panel." }
+    ],
+    "motion": [],
+    "breakpoints": []
+  },
+  "components": [
+    {
+      "name": "Primary Button (speed surface)",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Full-width red pill button, the single primary action on scanning/attendance screens.",
+      "html": "<button class=\"ds-btn-primary\">تسجيل حضور</button>",
+      "css": ".ds-btn-primary { width: 100%; font-size: 19px; font-weight: 700; padding: 16px; background: #D42027; color: #fff; border: none; border-radius: 999px; cursor: pointer; font-family: 'Cairo', sans-serif; transition: background 0.15s; } .ds-btn-primary:active { background: #B91C1C; } .ds-btn-primary:focus-visible { outline: 3px solid #1A2744; outline-offset: 2px; }"
+    },
+    {
+      "name": "Secondary Button (reject/negative)",
+      "kind": "button",
+      "refersTo": "button-secondary-reject",
+      "description": "White/red-outline counterpart to the primary button — never a second solid red.",
+      "html": "<button class=\"ds-btn-reject\">رفض</button>",
+      "css": ".ds-btn-reject { width: auto; padding: 10px 18px; font-size: 15px; font-weight: 700; background: #fff; color: #D42027; border: 2px solid #D42027; border-radius: 999px; cursor: pointer; font-family: 'Cairo', sans-serif; }"
+    },
+    {
+      "name": "Nav Pill",
+      "kind": "nav",
+      "refersTo": "nav-pill",
+      "description": "Always-visible navigation link, no dropdowns or hidden menus.",
+      "html": "<a href=\"#\" class=\"ds-nav-pill\">الرئيسية</a>",
+      "css": ".ds-nav-pill { display: inline-block; padding: 14px 20px; border-radius: 999px; background: #FFFFFF; border: 2px solid #E5E7EB; color: #1A2744; text-decoration: none; font-weight: 600; font-size: 16px; font-family: 'Cairo', sans-serif; transition: border-color 0.15s; } .ds-nav-pill:hover, .ds-nav-pill:focus-visible { border-color: #D42027; }"
+    },
+    {
+      "name": "Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "Base content card — white surface on paper background, flat with a thin border, no shadow.",
+      "html": "<div class=\"ds-card\"><strong>اسم الطالب</strong><small>الصف الثالث الثانوي</small></div>",
+      "css": ".ds-card { background: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 14px; padding: 16px; display: flex; flex-direction: column; gap: 4px; font-family: 'Cairo', sans-serif; } .ds-card strong { font-size: 19px; color: #1A2744; } .ds-card small { color: #5A6784; font-size: 14px; }"
+    },
+    {
+      "name": "Text Input",
+      "kind": "input",
+      "refersTo": "input-field",
+      "description": "Full-width, large-target text field with an always-visible label above it.",
+      "html": "<label class=\"ds-label\">اسم الطالب</label><input class=\"ds-input\" type=\"text\" placeholder=\"اكتب الاسم هنا\">",
+      "css": ".ds-label { display: block; font-weight: 600; margin-bottom: 8px; font-size: 16px; color: #1A2744; font-family: 'Cairo', sans-serif; } .ds-input { width: 100%; font-size: 18px; padding: 14px 16px; border: 2px solid #E5E7EB; border-radius: 10px; font-family: 'Cairo', sans-serif; color: #1A2744; } .ds-input:focus { outline: none; border-color: #D42027; }"
+    },
+    {
+      "name": "Teacher Pick Card (chip)",
+      "kind": "chip",
+      "refersTo": "teacher-card--pick",
+      "description": "Whole-card tap target for picking a teacher — large unambiguous selected state, not a small checkbox.",
+      "html": "<label class=\"ds-pick-card\"><input type=\"radio\" name=\"pick\" checked><div class=\"ds-t-photo\"></div><div><div class=\"ds-t-name\">أحمد سيد</div><div class=\"ds-t-schedule\">السبت 4:00</div></div></label>",
+      "css": ".ds-pick-card { position: relative; cursor: pointer; background: #FFF5F5; border: 2px solid #D42027; border-radius: 14px; padding: 14px 16px; display: flex; align-items: center; gap: 12px; box-shadow: 0 0 0 2px #D42027 inset; font-family: 'Cairo', sans-serif; } .ds-pick-card input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; } .ds-t-photo { width: 52px; height: 52px; border-radius: 999px; background: #F3F4F6; flex: none; } .ds-t-name { font-size: 17px; font-weight: 700; color: #1A2744; } .ds-t-schedule { font-size: 17px; font-weight: 800; color: #D42027; margin-top: 4px; }"
+    },
+    {
+      "name": "Help FAB",
+      "kind": "custom",
+      "description": "Persistent fixed-position circular help button, present on every authenticated page, always in the same spot.",
+      "html": "<a href=\"/admin/guide\" class=\"ds-help-fab\">❓</a>",
+      "css": ".ds-help-fab { position: fixed; bottom: 20px; inset-inline-end: 20px; z-index: 50; width: 52px; height: 52px; border-radius: 999px; background: #D42027; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 24px; text-decoration: none; box-shadow: 0 4px 14px rgba(0,0,0,.25); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Front-Desk Counter",
+    "overview": "Flat white cards laid out on a warm paper-white background, one big red action button per screen, oversized pill navigation you can hit without aiming carefully. The metaphor is a physical intake counter at a real clinic or government office: everything is out in the open, nothing is hidden behind a menu, and there is always exactly one thing in front of you to sign, tap, or hand over. This is the back-office counterpart to Harv's outward marketing brand — same red/navy/Cairo identity, but stripped of persuasion. Nobody here needs to be sold on anything; they need to finish the task in front of them and get back to the person waiting. The system explicitly rejects SaaS-dashboard visual language, landing-page persuasion, and cleverness that has to be learned. Two speeds, by task, not by screen family: speed-critical surfaces (scanning, attendance, the counter kiosk) get the loudest, biggest, most unmissable version of every component; deliberate surfaces (scheduling, teacher editing, the ledger) use a calmer, tactile-and-confident register — same tokens, less shouting.",
+    "keyCharacteristics": [
+      "Flat surfaces, soft shadows only where physically necessary",
+      "One saturated color (red) reserved for the single primary action per screen",
+      "Pill shape as the universal tappable signal",
+      "RTL Arabic-first, plain-sentence labels, never icon-only",
+      "Big-by-default form controls — no compact/dense mode anywhere"
+    ],
+    "rules": [
+      { "name": "The One Red Rule", "body": "Exactly one primary red button per screen. A second action gets a white/outlined-red secondary treatment, never a second solid red.", "section": "colors" },
+      { "name": "No Decorative Gray", "body": "Gray text is structural (borders, secondary metadata) or it doesn't exist. Never gray for anything the user must read to act.", "section": "colors" },
+      { "name": "The No-Placeholder-Only-Label Rule", "body": "A field's purpose is never conveyed by placeholder text alone — every input has a real, always-visible label.", "section": "typography" },
+      { "name": "The Flat-By-Default Rule", "body": "Surfaces are flat at rest. A shadow appears only when an element must feel physically separate from the page (floating, printed) — never as generic card decoration.", "section": "elevation" },
+      { "name": "The Two-Speed Rule", "body": "Speed-critical surfaces (scanning, attendance, counter) get the loudest/biggest component treatment; deliberate surfaces (scheduling, teacher/staff management, ledger) use a calmer tactile-and-confident register. Same colors and shapes throughout — only visual weight and size shift. Never the reverse.", "section": "components" }
+    ],
+    "dos": [
+      "Do keep exactly one solid-red primary action per screen",
+      "Do use the full pill shape for anything tappable",
+      "Do set body text at 18px minimum and labels always-visible",
+      "Do make speed-critical surfaces louder/bigger than deliberate surfaces, per The Two-Speed Rule",
+      "Do keep every navigation destination visible at all times; role-gate by omission, not disabling"
+    ],
+    "donts": [
+      "Don't build a SaaS-style dashboard: no gradient stat tiles, no chart-heavy insights framing, no hero-metric template",
+      "Don't use landing-page/marketing patterns: no hero sections, no persuasive copy, no promotional tone",
+      "Don't ship icon-only actions, swipe gestures, or hidden menus",
+      "Don't use a dense data-grid or keyboard-shortcut-first pattern anywhere",
+      "Don't use gray text for anything the user must read to complete a task",
+      "Don't add a second solid-red element to a screen that already has a primary action",
+      "Don't add decorative shadows to ordinary cards"
+    ]
+  }
+}
