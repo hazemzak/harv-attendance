@@ -2678,6 +2678,12 @@ describe("/admin/teachers/:id/edit + /admin/teachers/:id (update): editing an ex
     expect((await clerkFetch("https://example.com/admin/teachers/edit-test-3/edit")).status).toBe(403);
     expect((await clerkFetch("https://example.com/admin/teachers/edit-test-3", { method: "POST", body: new FormData() })).status).toBe(403);
   });
+
+  it("previews a legacy path-based photo on the edit form, not just uploaded blobs", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject, photo) VALUES ('edit-test-4', 'أ. صورة قديمة على الموقع', 'math', '/designs/teachers/legacy.jpg')").run();
+    const html = await (await adminFetch("https://example.com/admin/teachers/edit-test-4/edit")).text();
+    expect(html).toContain("https://harvcentereg.com/designs/teachers/legacy.jpg");
+  });
 });
 
 describe("teacher_availability: hall assignment + business hours (added 2026-07-16)", () => {
