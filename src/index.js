@@ -2418,13 +2418,15 @@ export default {
         title: "الأساتذة", noShare: "لسه معملتش تسوية", perSession: "بالحصة", percent: "نسبة %",
         settlement: "التسوية", attentionTitle: "⚠️ يحتاج متابعة", attentionEmpty: "الكل متسوّي، مفيش حد محتاج متابعة دلوقتي.",
         owed: "مستحق", addNew: "➕ ضيف أستاذ جديد", edit: "✏️ عدّل",
-        retire: "إيقاف", activateBack: "رجّعه تاني", retiredBadge: "متوقف", confirmRetire: "متأكد إنك عايز توقف الأستاذ ده؟ اسمه هيفضل في القايمة بس مش هيظهر للحجز.", confirmReturn: "متأكد إنك عايز ترجّعه؟"
+        retire: "إيقاف", activateBack: "رجّعه تاني", retiredBadge: "متوقف", confirmRetire: "متأكد إنك عايز توقف الأستاذ ده؟ اسمه هيفضل في القايمة بس مش هيظهر للحجز.", confirmReturn: "متأكد إنك عايز ترجّعه؟",
+        rename: "✏️ غيّر الاسم", renamePrompt: "اكتب الاسم الجديد:"
       },
       en: {
         title: "Teachers", noShare: "No payout share set", perSession: "Per session", percent: "Percent %",
         settlement: "Settlement", attentionTitle: "⚠️ Needs follow-up", attentionEmpty: "Everyone's settled — nobody needs follow-up right now.",
         owed: "owed", addNew: "➕ Add new teacher", edit: "✏️ Edit",
-        retire: "Retire", activateBack: "Bring back", retiredBadge: "Retired", confirmRetire: "Retire this teacher? Their name stays on the list but they'll stop showing up for booking.", confirmReturn: "Bring this teacher back?"
+        retire: "Retire", activateBack: "Bring back", retiredBadge: "Retired", confirmRetire: "Retire this teacher? Their name stays on the list but they'll stop showing up for booking.", confirmReturn: "Bring this teacher back?",
+        rename: "✏️ Rename", renamePrompt: "Enter the new name:"
       }
     };
 
@@ -2462,6 +2464,16 @@ export default {
       const retireForm = tch => `<form method="POST" action="/admin/teachers/${tch.id}/retire-toggle${langQs}" onsubmit="return confirm('${(tch.retired_at ? t.confirmReturn : t.confirmRetire).replace(/'/g, "\\'")}')">
           <button type="submit" class="${tch.retired_at ? "" : "btn-reject"}">${tch.retired_at ? t.activateBack : t.retire}</button>
         </form>`;
+      // Phase 4: rename is deliberately a prompt()-driven single button, not a
+      // form field on the edit screen (see teacherFormHtml) -- the hidden
+      // input carries the new name to the dedicated /rename route. No
+      // pre-filled current name in the prompt (deliberate, not an oversight):
+      // embedding it would put the name in the markup twice, which is exactly
+      // the "same person shown twice" bug class Phase 2's merge fixed.
+      const renameForm = tch => `<form method="POST" action="/admin/teachers/${tch.id}/rename${langQs}" onsubmit="var n=prompt('${t.renamePrompt.replace(/'/g, "\\'")}'); if(!n||!n.trim())return false; this.elements['name'].value=n.trim(); return true;">
+          <input type="hidden" name="name">
+          <button type="submit" class="btn-reject">${t.rename}</button>
+        </form>`;
       const nameDisplay = tch => tch.retired_at
         ? `<s>${escapeHtml(tch.name)}</s> <span class="badge-pending" style="background:#8A93A6">${t.retiredBadge}</span>`
         : escapeHtml(tch.name);
@@ -2471,6 +2483,7 @@ export default {
         <div class="pending-actions">
           <a href="/admin/teachers/${tch.id}/settlement${langQs}"><button type="button">${t.settlement}</button></a>
           <a href="/admin/teachers/${tch.id}/edit${langQs}"><button type="button">${t.edit}</button></a>
+          ${renameForm(tch)}
           ${retireForm(tch)}
         </div>
       </div></div>`;
@@ -2508,8 +2521,14 @@ export default {
       // retired -- a person still active on at least one subject isn't
       // shown as retired overall, even though each row's own retire button
       // still works independently.
+      // Rename lives once at the person level here (not per-row, unlike
+      // settlement/edit/retire which are legitimately per-subject) -- the
+      // /rename route already renames every row sharing a person_id, so
+      // triggering it from any one sibling id (rows[0]) renames the whole
+      // merged person.
       const attentionCard = (entry, i) => `<div class="card ${i % 2 === 0 ? "stripe-a" : "stripe-b"}"><div>
         <strong>${nameDisplay({ name: entry.name, retired_at: entry.rows.every(r => r.retired_at) ? entry.rows[0].retired_at : null })}</strong>
+        ${renameForm({ id: entry.rows[0].id, name: entry.name })}
         ${entry.rows.map(attentionRow).join("")}
       </div></div>`;
       const attentionSection = `<div class="dash-card">
@@ -2795,9 +2814,17 @@ export default {
           </div>
         </div>`;
       }).join("");
+      // Name is only editable on the add path. An existing teacher (teacher.id
+      // set) shows name read-only here -- renaming is its own dedicated,
+      // owner-confirmed action (POST .../rename), not a field on the routine
+      // edit form, so a rename can never happen by accident mid-edit.
+      const nameField = teacher?.id
+        ? `<label>${t.name}</label>
+        <div style="padding:12px 14px;border:2px solid var(--line);border-radius:10px;background:var(--line-soft);color:var(--ink)">${escapeHtml(teacher.name || "")}</div>`
+        : `<label>${t.name}</label>
+        <input name="name" placeholder="${t.namePh}" value="${escapeHtml(teacher?.name || "")}" autocomplete="name" required>`;
       return `<form method="POST" action="${action}" enctype="multipart/form-data" onsubmit="return confirm(${JSON.stringify(t.confirm)})">
-        <label>${t.name}</label>
-        <input name="name" placeholder="${t.namePh}" value="${escapeHtml(teacher?.name || "")}" autocomplete="name" required>
+        ${nameField}
         <label>${t.subject}</label>
         <select name="subject" required>${subjectOptions(lang, teacher?.subject || "")}</select>
         <label>${t.phase}</label>
@@ -2916,20 +2943,26 @@ export default {
       const lang = langOf(url);
       const langQs = lang === "en" ? "?lang=en" : "";
       const teacherId = teacherUpdateMatch[1];
-      const existing = await env.DB.prepare("SELECT id FROM teachers WHERE id = ?").bind(teacherId).first();
+      // Only "name" is fetched beyond id/existence: the routine edit form no
+      // longer submits a name field (Phase 4 -- see teacherFormHtml), so on a
+      // validation-error re-render we need the real current name to display,
+      // not an empty submitted value.
+      const existing = await env.DB.prepare("SELECT id, name FROM teachers WHERE id = ?").bind(teacherId).first();
       if (!existing) return new Response("Not found", { status: 404 });
-      const { name, subject, phase, mode, track, availability, availabilityError, photoBuf, photoType } = await readTeacherForm(request);
-      if (!name || !subject || availabilityError) {
-        const teacher = { id: teacherId, name, subject, phase, mode, track, availability };
+      const { subject, phase, mode, track, availability, availabilityError, photoBuf, photoType } = await readTeacherForm(request);
+      if (!subject || availabilityError) {
+        const teacher = { id: teacherId, name: existing.name, subject, phase, mode, track, availability };
         return new Response(page(TEACHER_FORM_I18N[lang].editTitle, teacherFormHtml(lang, `/admin/teachers/${teacherId}${langQs}`, teacher, await getRooms(env)), { lang, isOwner: true }), { status: 400, headers: { "content-type": "text/html;charset=utf-8" } });
       }
+      // name is deliberately absent from this UPDATE -- see teacherFormHtml's
+      // comment: renaming only happens via the dedicated rename route below.
       const update = photoBuf
         ? env.DB.prepare(
-            `UPDATE teachers SET name = ?, subject = ?, subject_label = ?, phase = ?, mode = ?, track = ?, photo_blob = ?, photo_blob_type = ? WHERE id = ?`
-          ).bind(name, subject, subjectLabelFor(subject), phase || null, mode || null, track || null, photoBuf, photoType, teacherId)
+            `UPDATE teachers SET subject = ?, subject_label = ?, phase = ?, mode = ?, track = ?, photo_blob = ?, photo_blob_type = ? WHERE id = ?`
+          ).bind(subject, subjectLabelFor(subject), phase || null, mode || null, track || null, photoBuf, photoType, teacherId)
         : env.DB.prepare(
-            `UPDATE teachers SET name = ?, subject = ?, subject_label = ?, phase = ?, mode = ?, track = ? WHERE id = ?`
-          ).bind(name, subject, subjectLabelFor(subject), phase || null, mode || null, track || null, teacherId);
+            `UPDATE teachers SET subject = ?, subject_label = ?, phase = ?, mode = ?, track = ? WHERE id = ?`
+          ).bind(subject, subjectLabelFor(subject), phase || null, mode || null, track || null, teacherId);
       // Delete-all-then-reinsert: with only up to 3 slots and no cross-edit
       // identity/ordering that matters, diffing old vs. new rows would be pure
       // overhead. Folded into one batch() with the UPDATE for atomicity.
@@ -2955,6 +2988,55 @@ export default {
       await env.DB.prepare(
         "UPDATE teachers SET retired_at = CASE WHEN retired_at IS NULL THEN datetime('now') ELSE NULL END WHERE id = ?"
       ).bind(teacherRetireMatch[1]).run();
+      return Response.redirect(url.origin + `/admin/teachers${langQs}`, 303);
+    }
+
+    // Phase 4: renaming is its own dedicated owner-only action, deliberately
+    // separate from the routine edit form (see teacherFormHtml's comment).
+    const teacherRenameMatch = url.pathname.match(/^\/admin\/teachers\/([^/]+)\/rename$/);
+    if (teacherRenameMatch && request.method === "POST") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
+      const lang = langOf(url);
+      const langQs = lang === "en" ? "?lang=en" : "";
+      const teacherId = teacherRenameMatch[1];
+      const teacher = await env.DB.prepare("SELECT id, name, person_id FROM teachers WHERE id = ?").bind(teacherId).first();
+      if (!teacher) return new Response("Not found", { status: 404 });
+      const form = await request.formData();
+      const newName = (form.get("name") || "").toString().trim();
+      if (!newName) return new Response("Bad request", { status: 400 });
+      const oldName = teacher.name;
+      // A merged person (Phase 2's person_id) has one teachers row per
+      // subject -- rename every row sharing it so the same real person can't
+      // end up with two different displayed names.
+      const siblingIds = teacher.person_id
+        ? (await env.DB.prepare("SELECT id FROM teachers WHERE person_id = ?").bind(teacher.person_id).all()).results.map(r => r.id)
+        : [teacherId];
+      const stmts = [
+        teacher.person_id
+          ? env.DB.prepare("UPDATE teachers SET name = ? WHERE person_id = ?").bind(newName, teacher.person_id)
+          : env.DB.prepare("UPDATE teachers SET name = ? WHERE id = ?").bind(newName, teacherId)
+      ];
+      // groups.teacher_name is a denormalized snapshot computeTeacherOwed()
+      // falls back to matching directly for legacy groups with no teacher_id
+      // -- refresh both FK-linked (by id, for every sibling subject row) and
+      // legacy-matched (by old name text) rows so owed math and the
+      // schedule display don't silently go stale after a rename.
+      for (const id of siblingIds) stmts.push(env.DB.prepare("UPDATE groups SET teacher_name = ? WHERE teacher_id = ?").bind(newName, id));
+      // claude-review (PR #19): teachers.name has no uniqueness constraint,
+      // so a free-text legacy-group update keyed only on oldName could
+      // silently steal a DIFFERENT teacher's legacy groups if that teacher
+      // currently happens to share the same name -- corrupting their
+      // computeTeacherOwed() legacy fallback. Only touch legacy groups when
+      // oldName is actually unique to this person right now; otherwise skip
+      // it (the FK-linked update above still ran, which is the safe path --
+      // legacy groups just keep their stale name until re-linked by id).
+      const collision = await env.DB.prepare(
+        `SELECT COUNT(*) AS n FROM teachers WHERE name = ? AND id NOT IN (${siblingIds.map(() => "?").join(",")})`
+      ).bind(oldName, ...siblingIds).first();
+      if (collision.n === 0) {
+        stmts.push(env.DB.prepare("UPDATE groups SET teacher_name = ? WHERE teacher_id IS NULL AND teacher_name = ?").bind(newName, oldName));
+      }
+      await env.DB.batch(stmts);
       return Response.redirect(url.origin + `/admin/teachers${langQs}`, 303);
     }
 
@@ -3421,10 +3503,27 @@ export default {
 .counter-recent th,.counter-recent td{border-bottom:1px solid var(--line);padding:8px 6px;text-align:start}
 .counter-recent th{color:var(--muted);font-weight:600}
 .counter-pick{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:14px}
+.scan-mode-switch{display:flex;gap:8px;justify-content:center;margin-bottom:16px}
+.mode-btn{width:auto;padding:10px 18px;font-size:15px;background:#fff;color:var(--ink);border:2px solid var(--line);border-radius:999px}
+.mode-btn-active{background:var(--red);color:#fff;border-color:var(--red)}
+.camera-wrap{position:relative;max-width:360px;margin:0 auto 16px;border-radius:16px;overflow:hidden;background:#000}
+.camera-wrap video{width:100%;display:block}
+.camera-reticle{position:absolute;top:44%;left:50%;transform:translate(-50%,-50%);width:68%;aspect-ratio:1;border:4px solid var(--red);border-radius:16px;box-shadow:0 0 0 2000px rgba(0,0,0,.4);pointer-events:none}
+.camera-caption{position:absolute;bottom:10px;inset-inline:0;text-align:center;color:#fff;font-size:14px;font-weight:600;text-shadow:0 1px 3px rgba(0,0,0,.6);margin:0}
 </style>
 <div class="counter-wrap">
   ${pinnedBanner}
-  <p>وجّه سكانر الاستقبال على كود QR بتاع الطالب — الشاشة دي مش محتاجة أي دوسة بينهم.</p>
+  <div class="scan-mode-switch">
+    <button type="button" id="mode-device" class="mode-btn mode-btn-active">📇 امسح من الجهاز</button>
+    <button type="button" id="mode-phone" class="mode-btn">📱 امسح من الموبايل</button>
+  </div>
+  <p id="device-hint">وجّه سكانر الاستقبال على كود QR بتاع الطالب — الشاشة دي مش محتاجة أي دوسة بينهم.</p>
+  <div id="camera-wrap" class="camera-wrap" hidden>
+    <video id="camera-video" autoplay playsinline muted></video>
+    <div class="camera-reticle"></div>
+    <p class="camera-caption">حط كود الطالب جوّه المربع</p>
+    <canvas id="camera-canvas" hidden></canvas>
+  </div>
   <div id="counter-status" class="counter-status"><span>جاهز للمسح</span></div>
   <div id="counter-pick" class="counter-pick" hidden></div>
   <p class="counter-count">عدد اللي حضروا النهاردة${isAutoMode ? " (كل الحصص)" : ""}: <strong id="counter-count">${initialCount.n}</strong></p>
@@ -3444,7 +3543,13 @@ export default {
     var recentEmpty = document.getElementById("counter-recent-empty");
     var isAutoMode = ${isAutoMode ? "true" : "false"};
     var pendingStudentId = null;
-    function focusInput(){ input.focus(); }
+    // Scan mode: "device" is the existing USB/keyboard-wedge flow (needs the
+    // invisible #counter-input focused at all times); "phone" opens the
+    // camera instead. Focus must stay OFF the input in phone mode -- it's a
+    // real <input>, so focusing it on a touch device would pop the on-screen
+    // keyboard up over the camera view.
+    var scanMode = "device";
+    function focusInput(){ if (scanMode === "device") input.focus(); }
     focusInput();
     document.addEventListener("click", focusInput);
     input.addEventListener("blur", function(){ setTimeout(focusInput, 50); });
@@ -3526,6 +3631,16 @@ export default {
         })
         .catch(function(){ setStatus("warn", null, "في مشكلة في الاتصال — جرب تاني"); });
     }
+    // Shared by both scan modes: the QR payload is the same /scan?student=ID
+    // URL either way (device wedge-scanner or phone camera decode), so both
+    // paths pull the id out the same way instead of duplicating the parse.
+    function extractStudentId(raw){
+      var id = null;
+      try { id = new URL(raw).searchParams.get("student"); } catch (err) {}
+      if (!id) { var m = raw.match(/student=(\\d+)/); if (m) id = m[1]; }
+      if (!id && /^\\d+$/.test(raw)) id = raw;
+      return id;
+    }
     input.addEventListener("keydown", function(e){
       if (e.key !== "Enter") return;
       e.preventDefault();
@@ -3533,13 +3648,101 @@ export default {
       input.value = "";
       pickWrap.hidden = true;
       pickWrap.textContent = "";
-      var id = null;
-      try { id = new URL(raw).searchParams.get("student"); } catch (err) {}
-      if (!id) { var m = raw.match(/student=(\\d+)/); if (m) id = m[1]; }
-      if (!id && /^\\d+$/.test(raw)) id = raw;
+      var id = extractStudentId(raw);
       if (!id) { setStatus("warn", null, "كود مش معروف"); return; }
       submitScan(id, null);
     });
+
+    // Phone-camera mode: opens the phone's own camera live inside the app
+    // (instead of relying on whatever native camera app staff happen to
+    // open) and decodes the QR itself, so the framing guide below is drawn
+    // by us, not left to an OS camera app's own UI.
+    var modeDeviceBtn = document.getElementById("mode-device");
+    var modePhoneBtn = document.getElementById("mode-phone");
+    var deviceHint = document.getElementById("device-hint");
+    var cameraWrap = document.getElementById("camera-wrap");
+    var video = document.getElementById("camera-video");
+    var canvas = document.getElementById("camera-canvas");
+    var cameraStream = null;
+    var cameraScanning = false;
+    var barcodeDetector = ("BarcodeDetector" in window) ? new BarcodeDetector({ formats: ["qr_code"] }) : null;
+    var decodeCooldownUntil = 0; // ponytail: fixed 2s debounce is enough for a walk-up scanner; per-code tracking not worth it here
+    function ensureJsQR(then){
+      if (window.jsQR || barcodeDetector) { then(); return; }
+      var s = document.createElement("script");
+      s.src = "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js";
+      // claude-review (PR #19): this loads into the owner-authenticated admin
+      // page, so a compromised CDN/package would get that session's access.
+      // SRI hash computed directly from the fetched jsqr@1.4.0 file (a
+      // pinned npm version on jsDelivr is immutable, so this hash is stable).
+      s.integrity = "sha384-b5Ya4Bq3qCyz39m2ISh+4DxjAIljdeFwK/BsXLuj9gugaNwAcj/ia15fxNZL9Nlx";
+      s.crossOrigin = "anonymous";
+      s.onload = then;
+      s.onerror = function(){ setStatus("warn", null, "معرفناش نحمّل أداة قراءة الكود — استخدم سكانر الجهاز"); switchMode("device"); };
+      document.head.appendChild(s);
+    }
+    function handleDecoded(raw){
+      var now = Date.now();
+      if (now < decodeCooldownUntil) return;
+      var id = extractStudentId(raw);
+      if (!id) return;
+      decodeCooldownUntil = now + 2000;
+      submitScan(id, null);
+    }
+    function scanFrame(){
+      if (!cameraScanning) return;
+      if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        if (barcodeDetector) {
+          barcodeDetector.detect(video).then(function(codes){
+            if (codes.length) handleDecoded(codes[0].rawValue);
+          }).catch(function(){});
+        } else if (window.jsQR) {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          var ctx = canvas.getContext("2d");
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          var frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          var code = window.jsQR(frame.data, frame.width, frame.height);
+          if (code) handleDecoded(code.data);
+        }
+      }
+      requestAnimationFrame(scanFrame);
+    }
+    function stopCamera(){
+      cameraScanning = false;
+      if (cameraStream) { cameraStream.getTracks().forEach(function(t){ t.stop(); }); cameraStream = null; }
+    }
+    function startCamera(){
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } }).then(function(s){
+        cameraStream = s;
+        video.srcObject = s;
+        cameraScanning = true;
+        requestAnimationFrame(scanFrame);
+      }).catch(function(){
+        setStatus("warn", null, "معرفناش نوصل لكاميرا الموبايل — استخدم سكانر الجهاز");
+        switchMode("device");
+      });
+    }
+    function switchMode(mode){
+      scanMode = mode;
+      if (mode === "phone") {
+        modeDeviceBtn.classList.remove("mode-btn-active");
+        modePhoneBtn.classList.add("mode-btn-active");
+        deviceHint.hidden = true;
+        cameraWrap.hidden = false;
+        ensureJsQR(startCamera);
+      } else {
+        modePhoneBtn.classList.remove("mode-btn-active");
+        modeDeviceBtn.classList.add("mode-btn-active");
+        deviceHint.hidden = false;
+        cameraWrap.hidden = true;
+        stopCamera();
+        focusInput();
+      }
+    }
+    modeDeviceBtn.addEventListener("click", function(){ switchMode("device"); });
+    modePhoneBtn.addEventListener("click", function(){ switchMode("phone"); });
+    window.addEventListener("pagehide", stopCamera);
   })();
   </script>
 </div>`;
