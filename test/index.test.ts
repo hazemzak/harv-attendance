@@ -665,6 +665,28 @@ describe("/admin/scan-mark: JSON endpoint backing the /admin/counter hardware-sc
       expect(row?.group_id).toBe(groupId);
     });
 
+    it("two active bookings pointing at the same group don't falsely trigger ambiguous (claude-review, PR #15 finding #1)", async () => {
+      const [day, start, end] = currentCairoDayAndWindow();
+      const { meta } = await env.DB.prepare(
+        "INSERT INTO groups (teacher_name, subject, active, day, start_time, end_time) VALUES ('أ. مكرر', 'math', 1, ?, ?, ?)"
+      ).bind(day, start, end).run();
+      const groupId = meta.last_row_id;
+      const id = await insertStudent({ name: "Duplicate Booking Test", status: "approved" });
+      // Two active bookings, same student, same group -- e.g. a re-processed
+      // estamara that left a stale row instead of replacing it.
+      await env.DB.prepare(
+        "INSERT INTO bookings (student_id, subject, teacher_name, amount, group_id, status) VALUES (?, 'math', 'أ. مكرر', 0, ?, 'active')"
+      ).bind(id, groupId).run();
+      await env.DB.prepare(
+        "INSERT INTO bookings (student_id, subject, teacher_name, amount, group_id, status) VALUES (?, 'math', 'أ. مكرر', 0, ?, 'active')"
+      ).bind(id, groupId).run();
+      const body = await (await scanMarkFetch(id)).json() as any;
+      expect(body.result).toBe("marked");
+      expect(body.notExpected).toBeUndefined(); // must resolve "auto", not "ambiguous"
+      const row = await env.DB.prepare("SELECT group_id FROM attendance WHERE student_id = ?").bind(id).first();
+      expect(row?.group_id).toBe(groupId);
+    });
+
     it("returns ambiguous with real candidates when 2+ concurrent groups match, and does not mark attendance until a candidate is picked", async () => {
       const [day, start, end] = currentCairoDayAndWindow();
       const g1 = (await env.DB.prepare(

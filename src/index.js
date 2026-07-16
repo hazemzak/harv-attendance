@@ -423,8 +423,13 @@ function isExpectedNow(startTime, endTime, hhmm) {
 // matches — caller falls back to markAttendance's existing ungrouped path).
 async function resolveExpectedGroup(env, studentId) {
   const { day, hhmm } = cairoNow();
+  // DISTINCT (claude-review, PR #15 finding #1): bookings has no constraint
+  // stopping two active rows from the same student pointing at the same
+  // group_id (e.g. a re-processed estamara), which would otherwise join the
+  // same group in twice and falsely report a real single lesson as
+  // "ambiguous" instead of "auto".
   const { results } = await env.DB.prepare(
-    `SELECT g.id, g.teacher_name, g.subject, g.start_time, g.end_time, r.name AS room_name
+    `SELECT DISTINCT g.id, g.teacher_name, g.subject, g.start_time, g.end_time, r.name AS room_name
      FROM groups g
      JOIN bookings b ON b.group_id = g.id AND b.status = 'active' AND b.student_id = ?
      LEFT JOIN rooms r ON r.id = g.room_id
