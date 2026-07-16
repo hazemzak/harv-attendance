@@ -2691,10 +2691,21 @@ describe("/admin/teachers/:id/edit + /admin/teachers/:id (update): editing an ex
 // here — it does `require("fs")` at module load, and this test environment
 // has no filesystem access, per vitest.config.mjs). Regression-tests the
 // behavior the script produces, not the script's own source text.
-describe("scripts/import-teachers.js seed SQL: upsert must not clobber app data (fixed 2026-07-16)", () => {
-  it("never overwrites a photo_blob-authored teacher's photo, and never deletes an app-only teacher absent from the import", async () => {
+describe("scripts/import-teachers.js seed SQL: upsert must not clobber app data (fixed 2026-07-16, broadened after claude-review)", () => {
+  const upsert = `INSERT INTO teachers (id, name, subject, subject_label, phase, mode, schedule, track, photo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name=CASE WHEN teachers.photo_blob IS NULL THEN excluded.name ELSE teachers.name END,
+      subject=CASE WHEN teachers.photo_blob IS NULL THEN excluded.subject ELSE teachers.subject END,
+      subject_label=CASE WHEN teachers.photo_blob IS NULL THEN excluded.subject_label ELSE teachers.subject_label END,
+      phase=CASE WHEN teachers.photo_blob IS NULL THEN excluded.phase ELSE teachers.phase END,
+      mode=CASE WHEN teachers.photo_blob IS NULL THEN excluded.mode ELSE teachers.mode END,
+      schedule=excluded.schedule,
+      track=CASE WHEN teachers.photo_blob IS NULL THEN excluded.track ELSE teachers.track END,
+      photo=CASE WHEN teachers.photo_blob IS NULL THEN excluded.photo ELSE teachers.photo END;`;
+
+  it("never overwrites any admin-editable field on a photo_blob-authored (app-touched) teacher, and never deletes an app-only teacher absent from the import", async () => {
     await env.DB.prepare(
-      "INSERT INTO teachers (id, name, subject, photo_blob, photo_blob_type) VALUES ('import-test-reimported', 'أ. معاد استيراده', 'math', ?, 'image/png')"
+      "INSERT INTO teachers (id, name, subject, phase, photo_blob, photo_blob_type) VALUES ('import-test-reimported', 'أ. معاد استيراده', 'math', 'bac2', ?, 'image/png')"
     ).bind(new Uint8Array([1, 2, 3]).buffer).run();
     await env.DB.prepare(
       "INSERT INTO teachers (id, name, subject, photo_blob, photo_blob_type) VALUES ('t_app_only', 'أ. أضيف من التطبيق', 'physics', ?, 'image/png')"
@@ -2703,17 +2714,27 @@ describe("scripts/import-teachers.js seed SQL: upsert must not clobber app data 
     // Simulates a re-import that only knows about "import-test-reimported"
     // (as teachers.json would) — 't_app_only' is absent from this source,
     // same as any teacher created directly in the app.
-    await env.DB.exec(
-      `INSERT INTO teachers (id, name, subject, subject_label, phase, mode, schedule, track, photo) VALUES ('import-test-reimported', 'أ. معاد استيراده (محدث)', 'math', 'الرياضيات', NULL, NULL, NULL, NULL, '/designs/teachers/reimported.jpg') ON CONFLICT(id) DO UPDATE SET name=excluded.name, subject=excluded.subject, subject_label=excluded.subject_label, phase=excluded.phase, mode=excluded.mode, schedule=excluded.schedule, track=excluded.track, photo=CASE WHEN teachers.photo_blob IS NULL THEN excluded.photo ELSE teachers.photo END;`
-    );
+    await env.DB.prepare(upsert).bind(
+      "import-test-reimported", "أ. معاد استيراده (محدث)", "physics", "الرياضيات", "bac3", "اونلاين", null, "لغات", "/designs/teachers/reimported.jpg"
+    ).run();
 
-    const reimported = await env.DB.prepare("SELECT name, photo, photo_blob FROM teachers WHERE id = 'import-test-reimported'").first() as any;
-    expect(reimported.name).toBe("أ. معاد استيراده (محدث)"); // descriptive fields still sync
-    expect(reimported.photo).toBeNull(); // photo_blob present -> guard kept photo untouched, not overwritten to the disk path
+    const reimported = await env.DB.prepare("SELECT name, subject, subject_label, phase, mode, track, photo, photo_blob FROM teachers WHERE id = 'import-test-reimported'").first() as any;
+    expect(reimported).toMatchObject({ name: "أ. معاد استيراده", subject: "math", phase: "bac2", mode: null, track: null, photo: null }); // every guarded field held, none reverted to the re-import's values
     expect(new Uint8Array(reimported.photo_blob)).toEqual(new Uint8Array([1, 2, 3])); // blob itself untouched
 
     const appOnly = await env.DB.prepare("SELECT id FROM teachers WHERE id = 't_app_only'").first();
     expect(appOnly).toBeTruthy(); // survived — no DELETE FROM teachers in the fixed script
+  });
+
+  it("still syncs a legacy teacher the app has never touched (no photo_blob)", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject, phase) VALUES ('import-test-untouched', 'أ. لسه من الموقع', 'math', 'bac2')").run();
+
+    await env.DB.prepare(upsert).bind(
+      "import-test-untouched", "أ. اسم محدّث من المصدر", "physics", "الفيزياء", "bac3", "اونلاين", null, "لغات", "/designs/teachers/updated.jpg"
+    ).run();
+
+    const row = await env.DB.prepare("SELECT name, subject, subject_label, phase, mode, track, photo FROM teachers WHERE id = 'import-test-untouched'").first() as any;
+    expect(row).toMatchObject({ name: "أ. اسم محدّث من المصدر", subject: "physics", subject_label: "الفيزياء", phase: "bac3", mode: "اونلاين", track: "لغات", photo: "/designs/teachers/updated.jpg" });
   });
 });
 
