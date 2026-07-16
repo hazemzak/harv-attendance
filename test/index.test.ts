@@ -1200,8 +1200,9 @@ describe("/admin/groups + /admin/rooms (added 2026-07-13, extracted from the ret
     form.set("teacher_id", "t-groups-ahmed");
     form.set("subject", "math");
     form.set("stage", "أولى ثانوي");
-    form.set("day", "السبت");
-    form.set("time", "5PM");
+    form.set("day", "sat");
+    form.set("start_time", "17:00");
+    form.set("end_time", "19:00");
     form.set("room_id", String((room as any).id));
     form.set("capacity", "2");
     form.set("price", "300");
@@ -1288,6 +1289,111 @@ describe("/admin/groups + /admin/rooms (added 2026-07-13, extracted from the ret
   });
 });
 
+describe("/admin/groups: structured day/start_time/end_time + edit route (added 2026-07-16)", () => {
+  it("creates a group with valid slug day + HH:MM start/end and persists the structured fields", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-groups-time-1', 'أ. وقت صحيح', 'math')").run();
+    const form = new FormData();
+    form.set("teacher_id", "t-groups-time-1");
+    form.set("subject", "math");
+    form.set("day", "wed");
+    form.set("start_time", "16:00");
+    form.set("end_time", "18:00");
+    const res = await adminFetch("https://example.com/admin/groups", { method: "POST", body: form, redirect: "manual" });
+    expect(res.status).toBe(303);
+    const row = await env.DB.prepare("SELECT day, start_time, end_time FROM groups WHERE teacher_name = 'أ. وقت صحيح'").first();
+    expect(row).toEqual({ day: "wed", start_time: "16:00", end_time: "18:00" });
+  });
+
+  it("rejects a non-slug day (old free-text style) instead of storing it raw", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-groups-time-2', 'أ. يوم حر', 'math')").run();
+    const form = new FormData();
+    form.set("teacher_id", "t-groups-time-2");
+    form.set("subject", "math");
+    form.set("day", "السبت");
+    form.set("start_time", "16:00");
+    form.set("end_time", "18:00");
+    const res = await adminFetch("https://example.com/admin/groups", { method: "POST", body: form });
+    expect(res.status).toBe(400);
+    const row = await env.DB.prepare("SELECT id FROM groups WHERE teacher_name = 'أ. يوم حر'").first();
+    expect(row).toBeFalsy();
+  });
+
+  it("rejects end <= start", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-groups-time-3', 'أ. جروب وقت معكوس', 'math')").run();
+    const form = new FormData();
+    form.set("teacher_id", "t-groups-time-3");
+    form.set("subject", "math");
+    form.set("day", "wed");
+    form.set("start_time", "18:00");
+    form.set("end_time", "16:00");
+    const res = await adminFetch("https://example.com/admin/groups", { method: "POST", body: form });
+    expect(res.status).toBe(400);
+    const row = await env.DB.prepare("SELECT id FROM groups WHERE teacher_name = 'أ. جروب وقت معكوس'").first();
+    expect(row).toBeFalsy();
+  });
+
+  it("rejects a time outside business hours", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-groups-time-4', 'أ. بدري', 'math')").run();
+    const form = new FormData();
+    form.set("teacher_id", "t-groups-time-4");
+    form.set("subject", "math");
+    form.set("day", "wed");
+    form.set("start_time", "06:00");
+    form.set("end_time", "08:00");
+    const res = await adminFetch("https://example.com/admin/groups", { method: "POST", body: form });
+    expect(res.status).toBe(400);
+    const row = await env.DB.prepare("SELECT id FROM groups WHERE teacher_name = 'أ. بدري'").first();
+    expect(row).toBeFalsy();
+  });
+
+  it("accepts an all-empty day/start/end as an intentionally-unscheduled group", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-groups-time-5', 'أ. مجهول الميعاد', 'math')").run();
+    const form = new FormData();
+    form.set("teacher_id", "t-groups-time-5");
+    form.set("subject", "math");
+    const res = await adminFetch("https://example.com/admin/groups", { method: "POST", body: form, redirect: "manual" });
+    expect(res.status).toBe(303);
+    const row = await env.DB.prepare("SELECT day, start_time, end_time FROM groups WHERE teacher_name = 'أ. مجهول الميعاد'").first();
+    expect(row).toEqual({ day: null, start_time: null, end_time: null });
+  });
+
+  it("GET /admin/groups/:id/edit renders the form pre-filled with the current values", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-groups-edit-1', 'أ. تعديل', 'math')").run();
+    const { meta } = await env.DB.prepare(
+      "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time) VALUES ('t-groups-edit-1', 'أ. تعديل', 'math', 'thu', '14:00', '16:00')"
+    ).run();
+    const html = await (await adminFetch(`https://example.com/admin/groups/${meta.last_row_id}/edit`)).text();
+    expect(html).toContain('<option value="thu" selected>');
+    expect(html).toContain('value="14:00"');
+    expect(html).toContain('value="16:00"');
+  });
+
+  it("POST /admin/groups/:id/edit persists a changed day/time/hall/teacher", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-groups-edit-2a', 'أ. قديم', 'math')").run();
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-groups-edit-2b', 'أ. جديد', 'math')").run();
+    const room = await env.DB.prepare("INSERT INTO rooms (name) VALUES ('قاعة تعديل تيست') RETURNING id").first() as any;
+    const { meta } = await env.DB.prepare(
+      "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time) VALUES ('t-groups-edit-2a', 'أ. قديم', 'math', 'sat', '10:00', '12:00')"
+    ).run();
+    const form = new FormData();
+    form.set("teacher_id", "t-groups-edit-2b");
+    form.set("subject", "math");
+    form.set("day", "tue");
+    form.set("start_time", "15:00");
+    form.set("end_time", "17:00");
+    form.set("room_id", String(room.id));
+    await adminFetch(`https://example.com/admin/groups/${meta.last_row_id}/edit`, { method: "POST", body: form });
+    const row = await env.DB.prepare("SELECT teacher_name, day, start_time, end_time, room_id FROM groups WHERE id = ?").bind(meta.last_row_id).first();
+    expect(row).toEqual({ teacher_name: "أ. جديد", day: "tue", start_time: "15:00", end_time: "17:00", room_id: room.id });
+  });
+
+  it("blocks a clerk from both the edit form and the update route", async () => {
+    const { meta } = await env.DB.prepare("INSERT INTO groups (teacher_name, subject, active) VALUES ('أ. محمي', 'math', 1)").run();
+    expect((await clerkFetch(`https://example.com/admin/groups/${meta.last_row_id}/edit`)).status).toBe(403);
+    expect((await clerkFetch(`https://example.com/admin/groups/${meta.last_row_id}/edit`, { method: "POST", body: new FormData() })).status).toBe(403);
+  });
+});
+
 describe("bookings: group_id linkage + drop/transfer lifecycle (added 2026-07-13)", () => {
   async function processForm(id: number, extra: Record<string, string>) {
     const form = new FormData();
@@ -1303,7 +1409,7 @@ describe("bookings: group_id linkage + drop/transfer lifecycle (added 2026-07-13
 
   it("attaches a booking to a group via b_group and preserves it", async () => {
     const { meta } = await env.DB.prepare(
-      "INSERT INTO groups (teacher_name, subject, day, time, price, capacity, active) VALUES ('أ. جروب', 'math', 'السبت', '5PM', 300, 10, 1)"
+      "INSERT INTO groups (teacher_name, subject, day, start_time, end_time, price, capacity, active) VALUES ('أ. جروب', 'math', 'sat', '17:00', '19:00', 300, 10, 1)"
     ).run();
     const groupId = meta.last_row_id;
     const id = await insertStudent({ name: "Group Link Test", status: "pending", subjects: "math" });
@@ -2185,10 +2291,10 @@ describe("/public/roster: column-scoped public endpoint for harvcentereg.com (ad
   it("includes active sessions with room name, excludes inactive ones", async () => {
     const { meta: roomMeta } = await env.DB.prepare("INSERT INTO rooms (name) VALUES ('قاعة روستر تيست')").run();
     await env.DB.prepare(
-      "INSERT INTO groups (teacher_name, subject, day, time, room_id, active) VALUES ('أ. نشط روستر', 'math', 'sun', '5pm', ?, 1)"
+      "INSERT INTO groups (teacher_name, subject, day, start_time, end_time, room_id, active) VALUES ('أ. نشط روستر', 'math', 'sun', '17:00', '19:00', ?, 1)"
     ).bind(roomMeta.last_row_id).run();
     await env.DB.prepare(
-      "INSERT INTO groups (teacher_name, subject, day, time, active) VALUES ('أ. متوقف روستر', 'math', 'mon', '6pm', 0)"
+      "INSERT INTO groups (teacher_name, subject, day, start_time, end_time, active) VALUES ('أ. متوقف روستر', 'math', 'mon', '18:00', '20:00', 0)"
     ).run();
     const body = await (await SELF.fetch("https://example.com/public/roster")).json() as any;
     const names = body.sessions.map((s: any) => s.teacher_name);

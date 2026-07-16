@@ -343,6 +343,38 @@ const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/; // 24h "HH:MM", matches <input type
 const BUSINESS_OPEN = "07:00", BUSINESS_CLOSE = "23:59";
 function inBusinessHours(t) { return t >= BUSINESS_OPEN && t <= BUSINESS_CLOSE; }
 
+// Shared day+time-range validation for both teacher_availability slots and
+// group sessions (below) — one place instead of duplicating the same 3 checks.
+// Returns an error slug, or null if valid.
+function validateDayTimeRange(day, from, to) {
+  if (!sanitizeDayOfWeek(day)) return "bad_day";
+  if (!TIME_RE.test(from) || !TIME_RE.test(to) || to <= from) return "bad_time";
+  if (!inBusinessHours(from) || !inBusinessHours(to)) return "outside_hours";
+  return null;
+}
+
+// Two active groups conflict when they share a teacher OR a hall, land on the
+// same day, and their time ranges overlap. Warn-only — used by both the group
+// edit form and the scheduling grid, never blocks a save (a center may
+// deliberately double-book while sorting the week).
+// ponytail: O(n²) over a handful of groups; revisit only if that grows.
+function computeGroupConflicts(groups) {
+  const byId = new Map();
+  for (const a of groups) {
+    if (!a.active || !a.day || !a.start_time || !a.end_time) continue;
+    for (const b of groups) {
+      if (b.id === a.id || !b.active || b.day !== a.day || !b.start_time || !b.end_time) continue;
+      const overlap = a.start_time < b.end_time && b.start_time < a.end_time;
+      const same = (a.teacher_id && a.teacher_id === b.teacher_id) || (a.room_id && a.room_id === b.room_id);
+      if (overlap && same) {
+        if (!byId.has(a.id)) byId.set(a.id, []);
+        byId.get(a.id).push(b);
+      }
+    }
+  }
+  return byId;
+}
+
 const PAYMENT_METHODS = {
   cash: { ar: "كاش", en: "Cash" },
   instapay: { ar: "إنستاباي", en: "InstaPay" },
@@ -875,8 +907,9 @@ function bookingRowsWidget(lang, subjectsCsv, bookings, teachersBySubject, group
     : (subjectsCsv || "").split(",").map(s => s.trim()).filter(Boolean).map(subject => ({ subject, teacher_name: "", schedule: "", amount: "", group_id: null }));
   const groupOptionsHtml = groups.map(g => {
     const seats = g.capacity ? `${g.enrolled}/${g.capacity}` : `${g.enrolled}`;
-    const label = `${g.teacher_name} — ${g.subject} — ${[g.day, g.time].filter(Boolean).join(" ")} (${seats})`;
-    return `<option value="${g.id}" data-teacher="${escapeHtml(g.teacher_name)}" data-schedule="${escapeHtml([g.day, g.time].filter(Boolean).join(" · "))}" data-price="${g.price ?? 0}" data-subject="${escapeHtml(g.subject)}">${escapeHtml(label)}</option>`;
+    const timeLabel = g.start_time ? `${g.start_time}–${g.end_time}` : "";
+    const label = `${g.teacher_name} — ${g.subject} — ${[g.day, timeLabel].filter(Boolean).join(" ")} (${seats})`;
+    return `<option value="${g.id}" data-teacher="${escapeHtml(g.teacher_name)}" data-schedule="${escapeHtml([g.day, timeLabel].filter(Boolean).join(" · "))}" data-price="${g.price ?? 0}" data-subject="${escapeHtml(g.subject)}">${escapeHtml(label)}</option>`;
   }).join("");
   const rowsHtml = seedRows.map((b, i) => bookingRow(lang, i, b, groupOptionsHtml)).join("");
   const teacherNames = [...new Set(Object.values(teachersBySubject || {}).flat().map(t => t.name))];
@@ -1766,19 +1799,23 @@ export default {
     const GROUPS_I18N = {
       ar: {
         title: "المجموعات", subject: "المادة", teacher: "الأستاذ", teacherPh: "اسم الأستاذ", stage: "الصف",
-        day: "اليوم", dayPh: "مثلاً: السبت", time: "الميعاد", timePh: "مثلاً: 5 مساءً",
+        day: "اليوم", dayNone: "—", startTime: "من", endTime: "إلى",
         room: "القاعة", roomNone: "بدون قاعة", capacity: "السعة", capacityPh: "عدد الطلاب",
-        price: "السعر", pricePh: "بالجنيه", add: "إضافة مجموعة",
+        price: "السعر", pricePh: "بالجنيه", add: "إضافة مجموعة", save: "حفظ",
         empty: "لا يوجد مجموعات بعد.", deactivate: "إيقاف", activate: "تفعيل", inactive: "متوقفة", full: "مكتملة",
-        pinCounter: "📷 السكانر", attendanceReport: "📋 كشف الحضور"
+        pinCounter: "📷 السكانر", attendanceReport: "📋 كشف الحضور",
+        addTitle: "مجموعة جديدة", editTitle: "تعديل المجموعة",
+        conflictWarning: "⚠️ تضارب في الميعاد مع:"
       },
       en: {
         title: "Groups", subject: "Subject", teacher: "Teacher", teacherPh: "Teacher's name", stage: "Grade",
-        day: "Day", dayPh: "e.g. Saturday", time: "Time", timePh: "e.g. 5PM",
+        day: "Day", dayNone: "—", startTime: "From", endTime: "To",
         room: "Room", roomNone: "No room", capacity: "Capacity", capacityPh: "number of students",
-        price: "Price", pricePh: "in EGP", add: "Add group",
+        price: "Price", pricePh: "in EGP", add: "Add group", save: "Save",
         empty: "No groups yet.", deactivate: "Deactivate", activate: "Activate", inactive: "inactive", full: "Full",
-        pinCounter: "📷 Counter", attendanceReport: "📋 Attendance"
+        pinCounter: "📷 Counter", attendanceReport: "📋 Attendance",
+        addTitle: "New group", editTitle: "Edit group",
+        conflictWarning: "⚠️ Time conflict with:"
       }
     };
 
@@ -1786,14 +1823,86 @@ export default {
     // (not stored) so it's always accurate against the bookings table.
     async function getGroupsWithSeats(env, { activeOnly = false } = {}) {
       const { results } = await env.DB.prepare(
-        `SELECT g.id, g.teacher_id, g.teacher_name, g.subject, g.stage, g.day, g.time, g.price, g.active,
-                r.name AS room_name, g.capacity,
+        `SELECT g.id, g.teacher_id, g.teacher_name, g.subject, g.stage, g.day, g.start_time, g.end_time, g.price, g.active,
+                g.room_id, r.name AS room_name, g.capacity,
                 (SELECT COUNT(*) FROM bookings b WHERE b.group_id = g.id AND b.status = 'active') AS enrolled
          FROM groups g LEFT JOIN rooms r ON r.id = g.room_id
          ${activeOnly ? "WHERE g.active = 1" : ""}
-         ORDER BY g.active DESC, g.subject, g.day, g.time`
+         ORDER BY g.active DESC, g.subject, g.day, g.start_time`
       ).all();
       return results;
+    }
+
+    // A day/start/end triple that's either all empty (unscheduled group,
+    // filled in later from the grid) or all present and valid — partial
+    // input (e.g. a day with no time) is rejected, not silently dropped.
+    function readGroupTimeFields(form) {
+      const day = (form.get("day") || "").toString().trim();
+      const start = (form.get("start_time") || "").toString().trim();
+      const end = (form.get("end_time") || "").toString().trim();
+      if (!day && !start && !end) return { day: null, start_time: null, end_time: null, error: null };
+      const error = validateDayTimeRange(day, start, end);
+      return { day: error ? null : day, start_time: error ? null : start, end_time: error ? null : end, error };
+    }
+
+    // Shared by the /admin/groups inline form, /admin/groups/new, and
+    // /admin/groups/:id/edit — one render function instead of three
+    // near-duplicate forms (same shape as teacherFormHtml).
+    function groupFormHtml(lang, { action, group, rooms, teachersBySubject, prefill }) {
+      const t = GROUPS_I18N[lang];
+      const day = group?.day || prefill?.day || "";
+      const startTime = group?.start_time || prefill?.start || "";
+      const dayOpts = html`<option value="">${t.dayNone}</option>${raw(DAYS_OF_WEEK.map(d => `<option value="${d.v}" ${day === d.v ? "selected" : ""}>${lang === "en" ? d.en : d.ar}</option>`).join(""))}`;
+      const roomOptions = rooms.map(r => html`<option value="${String(r.id)}" ${raw((group?.room_id === r.id || prefill?.hall === String(r.id)) ? "selected" : "")}>${r.name}</option>`).join("");
+      // Subject picked first, then the teacher <select> is filtered client-side
+      // to only teachers who teach that subject — same data source and
+      // baseSubject() convention (strip the "-en" cousin suffix) as /register's
+      // teacher panel, just applied to a <select> instead of radio cards.
+      // Each teacher also carries `avail`, a plain-text rendering of their
+      // declared availability (teacher_availability) so staff can eyeball
+      // whether the day/time they're picking matches what the teacher said —
+      // advisory only, not enforced (see HARV_ATTENDANCE_SUPPORT_PLAYBOOK.md).
+      const teachersJson = JSON.stringify(
+        Object.fromEntries(Object.entries(teachersBySubject).map(([subj, list]) => [subj, list.map(tch => ({ id: tch.id, name: tch.name, avail: tch.schedule || "" }))]))
+      );
+      return html`<form method="POST" action="${action}">
+        <label>${t.subject}</label><select name="subject" id="group-subject" required onchange="fillTeacherOptions(this.value)">${raw(subjectOptions(lang, group?.subject || ""))}</select>
+        <label>${t.teacher}</label><select name="teacher_id" id="group-teacher" required><option value="">${t.teacherPh}</option></select>
+        <p id="avail-hint" class="empty" style="margin:-8px 0 16px"></p>
+        <label>${t.stage}</label><select name="stage"><option value="">—</option>${raw(STAGES.map(s => `<option value="${s.v}" ${group?.stage === s.v ? "selected" : ""}>${lang === "en" ? s.en : s.ar}</option>`).join(""))}</select>
+        <label>${t.day}</label><select name="day">${raw(dayOpts)}</select>
+        <label>${t.startTime}</label><input name="start_time" type="time" min="${BUSINESS_OPEN}" max="${BUSINESS_CLOSE}" value="${startTime}">
+        <label>${t.endTime}</label><input name="end_time" type="time" min="${BUSINESS_OPEN}" max="${BUSINESS_CLOSE}" value="${group?.end_time || ""}">
+        <label>${t.room}</label><select name="room_id"><option value="">${t.roomNone}</option>${raw(roomOptions)}</select>
+        <label>${t.capacity}</label><input name="capacity" type="number" min="1" placeholder="${t.capacityPh}" value="${group?.capacity ?? ""}">
+        <label>${t.price}</label><input name="price" type="number" step="0.01" min="0" placeholder="${t.pricePh}" value="${group?.price ?? ""}">
+        <button type="submit">${group ? t.save : t.add}</button>
+      </form>
+      <script>
+        var TEACHERS_BY_SUBJECT = ${raw(teachersJson)};
+        function baseSubject(slug) { return slug.endsWith("-en") ? slug.slice(0, -3) : slug; }
+        function fillTeacherOptions(subjectSlug, preselectId) {
+          var sel = document.getElementById("group-teacher");
+          var list = TEACHERS_BY_SUBJECT[baseSubject(subjectSlug)] || [];
+          sel.innerHTML = "";
+          list.forEach(function(tch) {
+            var opt = document.createElement("option");
+            opt.value = tch.id;
+            opt.textContent = tch.name;
+            opt.dataset.avail = tch.avail;
+            sel.appendChild(opt);
+          });
+          if (preselectId) sel.value = preselectId;
+          showAvailHint();
+        }
+        function showAvailHint() {
+          var sel = document.getElementById("group-teacher");
+          var opt = sel.options[sel.selectedIndex];
+          document.getElementById("avail-hint").textContent = (opt && opt.dataset.avail) || "";
+        }
+        document.getElementById("group-teacher").addEventListener("change", showAvailHint);
+        ${raw(group ? `document.getElementById('group-subject').value = ${JSON.stringify(group.subject)}; fillTeacherOptions(${JSON.stringify(group.subject)}, ${JSON.stringify(group.teacher_id || "")});` : "")}
+      </script>`;
     }
 
     if (url.pathname === "/admin/groups" && request.method === "GET") {
@@ -1804,67 +1913,54 @@ export default {
       const rows = groups.map(g => {
         const seatsLabel = Number.isFinite(g.capacity) ? `${g.enrolled}/${g.capacity}` : `${g.enrolled}`;
         const isFull = Number.isFinite(g.capacity) && g.enrolled >= g.capacity;
+        const dayLabel = DAYS_OF_WEEK.find(d => d.v === g.day);
+        const timeLabel = g.start_time ? `${g.start_time}–${g.end_time}` : "";
+        const scheduleLabel = [g.stage, dayLabel ? (lang === "en" ? dayLabel.en : dayLabel.ar) : g.day, timeLabel, g.room_name].filter(Boolean).join(" · ");
         return html`<div class="card ${raw(g.active ? "" : "stripe-b")}"><div>
           ${!g.active ? raw(html`<span class="badge-pending" style="background:#8A93A6">${t.inactive}</span><br>`) : ""}
           ${isFull ? raw(html`<span class="badge-pending">${t.full}</span><br>`) : ""}
           <strong>${g.teacher_name} — ${raw(subjectsDisplay(lang, g.subject))}</strong><br>
-          <small>${[g.stage, g.day, g.time, g.room_name].filter(Boolean).join(" · ")} · ${raw(seatsLabel)} · ${g.price ?? 0}</small>
+          <small>${scheduleLabel} · ${raw(seatsLabel)} · ${g.price ?? 0}</small>
           <div class="pending-actions">
+            <a href="/admin/groups/${String(g.id)}/edit${raw(langQs)}"><button type="button">✏️</button></a>
             <a href="/admin/counter?group=${String(g.id)}"><button type="button">${t.pinCounter}</button></a>
             <a href="/admin/attendance?group=${String(g.id)}${raw(langQs.replace("?", "&"))}"><button type="button">${t.attendanceReport}</button></a>
             <form method="POST" action="/admin/groups/${String(g.id)}/toggle${raw(langQs)}"><button type="submit" class="${raw(g.active ? "btn-reject" : "")}">${g.active ? t.deactivate : t.activate}</button></form>
           </div>
         </div></div>`;
       }).join("") || `<p class="empty">${t.empty}</p>`;
-      const roomOptions = rooms.map(r => html`<option value="${String(r.id)}">${r.name}</option>`).join("");
-      // Subject picked first, then the teacher <select> is filtered client-side
-      // to only teachers who teach that subject — same data source and
-      // baseSubject() convention (strip the "-en" cousin suffix) as /register's
-      // teacher panel, just applied to a <select> instead of radio cards.
-      const teachersJson = JSON.stringify(
-        Object.fromEntries(Object.entries(teachersBySubject).map(([subj, list]) => [subj, list.map(tch => ({ id: tch.id, name: tch.name }))]))
-      );
-      const form = html`<form method="POST" action="/admin/groups${raw(langQs)}">
-        <label>${t.subject}</label><select name="subject" id="group-subject" required onchange="fillTeacherOptions(this.value)">${raw(subjectOptions(lang, ""))}</select>
-        <label>${t.teacher}</label><select name="teacher_id" id="group-teacher" required><option value="">${t.teacherPh}</option></select>
-        <label>${t.stage}</label><select name="stage"><option value="">—</option>${raw(STAGES.map(s => `<option value="${s.v}">${lang === "en" ? s.en : s.ar}</option>`).join(""))}</select>
-        <label>${t.day}</label><input name="day" placeholder="${t.dayPh}">
-        <label>${t.time}</label><input name="time" placeholder="${t.timePh}">
-        <label>${t.room}</label><select name="room_id"><option value="">${t.roomNone}</option>${raw(roomOptions)}</select>
-        <label>${t.capacity}</label><input name="capacity" type="number" min="1" placeholder="${t.capacityPh}">
-        <label>${t.price}</label><input name="price" type="number" step="0.01" min="0" placeholder="${t.pricePh}">
-        <button type="submit">${t.add}</button>
-      </form>
-      <script>
-        var TEACHERS_BY_SUBJECT = ${raw(teachersJson)};
-        function baseSubject(slug) { return slug.endsWith("-en") ? slug.slice(0, -3) : slug; }
-        function fillTeacherOptions(subjectSlug) {
-          var sel = document.getElementById("group-teacher");
-          var list = TEACHERS_BY_SUBJECT[baseSubject(subjectSlug)] || [];
-          sel.innerHTML = "";
-          list.forEach(function(tch) {
-            var opt = document.createElement("option");
-            opt.value = tch.id;
-            opt.textContent = tch.name;
-            sel.appendChild(opt);
-          });
-        }
-      </script>`;
+      const form = groupFormHtml(lang, { action: `/admin/groups${langQs}`, group: null, rooms, teachersBySubject });
       return new Response(page(t.title, form + rows, { lang, toggleHref: toggleHref(url, lang), isOwner: roleAllowed(staffRole, ["owner"]) }), { headers: { "content-type": "text/html;charset=utf-8" } });
+    }
+
+    if (url.pathname === "/admin/groups/new" && request.method === "GET") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
+      const lang = langOf(url);
+      const t = GROUPS_I18N[lang];
+      const langQs = lang === "en" ? "?lang=en" : "";
+      const [rooms, teachersBySubject] = await Promise.all([getRooms(env), getAllTeachersGrouped(env, lang)]);
+      const prefill = { day: url.searchParams.get("day") || "", start: url.searchParams.get("start") || "", hall: url.searchParams.get("hall") || "" };
+      const form = groupFormHtml(lang, { action: `/admin/groups${langQs}`, group: null, rooms, teachersBySubject, prefill });
+      return new Response(page(t.addTitle, form, { lang, toggleHref: toggleHref(url, lang), isOwner: true }), { headers: { "content-type": "text/html;charset=utf-8" } });
     }
 
     if (url.pathname === "/admin/groups" && request.method === "POST") {
       if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
       const lang = langOf(url);
+      const langQs = lang === "en" ? "?lang=en" : "";
       const form = await request.formData();
       const teacherId = (form.get("teacher_id") || "").toString().trim();
       const subject = (form.get("subject") || "").toString().trim();
       const stage = sanitizeStage((form.get("stage") || "").toString().trim());
-      const day = (form.get("day") || "").toString().trim() || null;
-      const time = (form.get("time") || "").toString().trim() || null;
+      const { day, start_time, end_time, error: timeError } = readGroupTimeFields(form);
       const roomId = parseInt((form.get("room_id") || "").toString(), 10);
       const capacity = parseInt((form.get("capacity") || "").toString(), 10);
       const price = parseFloat((form.get("price") || "").toString());
+      if (timeError) {
+        const [rooms, teachersBySubject] = await Promise.all([getRooms(env), getAllTeachersGrouped(env, lang)]);
+        const group = { subject, stage, day: (form.get("day") || "").toString(), start_time: (form.get("start_time") || "").toString(), end_time: (form.get("end_time") || "").toString(), teacher_id: teacherId, capacity, price };
+        return new Response(page(GROUPS_I18N[lang].addTitle, groupFormHtml(lang, { action: `/admin/groups${langQs}`, group, rooms, teachersBySubject }), { lang, isOwner: true }), { status: 400, headers: { "content-type": "text/html;charset=utf-8" } });
+      }
       // teacher_id is a real FK now (picked from the subject-filtered <select>,
       // not typed), so the group can be matched precisely instead of by the
       // teacher_name string — see computeTeacherOwed() below.
@@ -1875,16 +1971,70 @@ export default {
       const room = Number.isFinite(roomId) ? await env.DB.prepare("SELECT id FROM rooms WHERE id = ?").bind(roomId).first() : null;
       if (teacher && KNOWN_SUBJECT_SLUGS.has(subject)) {
         await env.DB.prepare(
-          `INSERT INTO groups (teacher_id, teacher_name, subject, stage, day, time, room_id, capacity, price)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO groups (teacher_id, teacher_name, subject, stage, day, start_time, end_time, room_id, capacity, price)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).bind(
-          teacher.id, teacher.name, subject, stage || null, day, time,
+          teacher.id, teacher.name, subject, stage || null, day, start_time, end_time,
           room ? room.id : null,
           Number.isFinite(capacity) && capacity > 0 ? capacity : null,
           Number.isFinite(price) ? price : null
         ).run();
       }
-      return Response.redirect(url.origin + "/admin/groups" + (lang === "en" ? "?lang=en" : ""), 303);
+      return Response.redirect(url.origin + "/admin/groups" + langQs, 303);
+    }
+
+    const groupEditMatch = url.pathname.match(/^\/admin\/groups\/(\d+)\/edit$/);
+    if (groupEditMatch && request.method === "GET") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
+      const lang = langOf(url);
+      const t = GROUPS_I18N[lang];
+      const langQs = lang === "en" ? "?lang=en" : "";
+      const [group, rooms, teachersBySubject, allGroups] = await Promise.all([
+        env.DB.prepare("SELECT * FROM groups WHERE id = ?").bind(groupEditMatch[1]).first(),
+        getRooms(env), getAllTeachersGrouped(env, lang), getGroupsWithSeats(env, { activeOnly: true })
+      ]);
+      if (!group) return new Response("Not found", { status: 404 });
+      const conflicts = computeGroupConflicts(allGroups).get(group.id) || [];
+      const conflictBanner = conflicts.length
+        ? html`<p class="empty" style="color:var(--red)">${t.conflictWarning} ${raw(conflicts.map(c => `${c.teacher_name} — ${c.room_name || ""}`).join("، "))}</p>`
+        : "";
+      const form = groupFormHtml(lang, { action: `/admin/groups/${group.id}/edit${langQs}`, group, rooms, teachersBySubject });
+      return new Response(page(t.editTitle, conflictBanner + form, { lang, toggleHref: toggleHref(url, lang), isOwner: true }), { headers: { "content-type": "text/html;charset=utf-8" } });
+    }
+
+    if (groupEditMatch && request.method === "POST") {
+      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
+      const lang = langOf(url);
+      const langQs = lang === "en" ? "?lang=en" : "";
+      const groupId = groupEditMatch[1];
+      const existing = await env.DB.prepare("SELECT id FROM groups WHERE id = ?").bind(groupId).first();
+      if (!existing) return new Response("Not found", { status: 404 });
+      const form = await request.formData();
+      const teacherId = (form.get("teacher_id") || "").toString().trim();
+      const subject = (form.get("subject") || "").toString().trim();
+      const stage = sanitizeStage((form.get("stage") || "").toString().trim());
+      const { day, start_time, end_time, error: timeError } = readGroupTimeFields(form);
+      const roomId = parseInt((form.get("room_id") || "").toString(), 10);
+      const capacity = parseInt((form.get("capacity") || "").toString(), 10);
+      const price = parseFloat((form.get("price") || "").toString());
+      const teacher = teacherId ? await env.DB.prepare("SELECT id, name FROM teachers WHERE id = ?").bind(teacherId).first() : null;
+      const room = Number.isFinite(roomId) ? await env.DB.prepare("SELECT id FROM rooms WHERE id = ?").bind(roomId).first() : null;
+      if (timeError || !teacher || !KNOWN_SUBJECT_SLUGS.has(subject)) {
+        const [rooms, teachersBySubject] = await Promise.all([getRooms(env), getAllTeachersGrouped(env, lang)]);
+        const group = { id: groupId, subject, stage, day: (form.get("day") || "").toString(), start_time: (form.get("start_time") || "").toString(), end_time: (form.get("end_time") || "").toString(), teacher_id: teacherId, room_id: room ? room.id : null, capacity, price };
+        return new Response(page(GROUPS_I18N[lang].editTitle, groupFormHtml(lang, { action: `/admin/groups/${groupId}/edit${langQs}`, group, rooms, teachersBySubject }), { lang, isOwner: true }), { status: 400, headers: { "content-type": "text/html;charset=utf-8" } });
+      }
+      await env.DB.prepare(
+        `UPDATE groups SET teacher_id = ?, teacher_name = ?, subject = ?, stage = ?, day = ?, start_time = ?, end_time = ?, room_id = ?, capacity = ?, price = ? WHERE id = ?`
+      ).bind(
+        teacher.id, teacher.name, subject, stage || null, day, start_time, end_time,
+        room ? room.id : null,
+        Number.isFinite(capacity) && capacity > 0 ? capacity : null,
+        Number.isFinite(price) ? price : null,
+        groupId
+      ).run();
+      const scheduleQs = room ? `?hall=${room.id}${lang === "en" ? "&lang=en" : ""}` : langQs;
+      return Response.redirect(url.origin + "/admin/schedule" + scheduleQs, 303);
     }
 
     const groupToggleMatch = url.pathname.match(/^\/admin\/groups\/(\d+)\/toggle$/);
@@ -2358,8 +2508,8 @@ export default {
         if (!day) continue;
         const from = (form.get(`avail_from_${n}`) || "").toString().trim();
         const to = (form.get(`avail_to_${n}`) || "").toString().trim();
-        if (!TIME_RE.test(from) || !TIME_RE.test(to) || to <= from) { availabilityError = "bad_time"; break; }
-        if (!inBusinessHours(from) || !inBusinessHours(to)) { availabilityError = "outside_hours"; break; }
+        const err = validateDayTimeRange(day, from, to);
+        if (err) { availabilityError = err; break; }
         const roomIdRaw = parseInt((form.get(`avail_room_${n}`) || "").toString(), 10);
         const room_id = roomIds.has(roomIdRaw) ? roomIdRaw : null;
         availability.push({ day_of_week: day, start_time: from, end_time: to, room_id });
@@ -2796,7 +2946,7 @@ export default {
       // deactivation toggle on /admin/groups.
       const pinnedGroup = Number.isFinite(groupParam)
         ? await env.DB.prepare(
-            `SELECT g.id, g.teacher_name, g.subject, g.day, g.time, r.name AS room_name
+            `SELECT g.id, g.teacher_name, g.subject, g.day, g.start_time, g.end_time, r.name AS room_name
              FROM groups g LEFT JOIN rooms r ON r.id = g.room_id WHERE g.id = ? AND g.active = 1`
           ).bind(groupParam).first()
         : null;
@@ -2808,7 +2958,8 @@ export default {
       let pinnedBanner;
       if (pinnedGroup) {
         const roomBadge = pinnedGroup.room_name ? ` · 🚪 ${escapeHtml(pinnedGroup.room_name)}` : "";
-        pinnedBanner = `<p class="counter-pinned">🗂️ ${escapeHtml(pinnedGroup.teacher_name)} — ${subjectsDisplay("ar", pinnedGroup.subject)} · ${escapeHtml([pinnedGroup.day, pinnedGroup.time].filter(Boolean).join(" "))}${roomBadge} <a href="/admin/counter">(إلغاء التثبيت)</a></p>`;
+        const pinnedTime = pinnedGroup.start_time ? `${pinnedGroup.start_time}–${pinnedGroup.end_time}` : "";
+        pinnedBanner = `<p class="counter-pinned">🗂️ ${escapeHtml(pinnedGroup.teacher_name)} — ${subjectsDisplay("ar", pinnedGroup.subject)} · ${escapeHtml([pinnedGroup.day, pinnedTime].filter(Boolean).join(" "))}${roomBadge} <a href="/admin/counter">(إلغاء التثبيت)</a></p>`;
       } else if (Number.isFinite(groupParam)) {
         pinnedBanner = `<p class="counter-pinned">المجموعة دي مش موجودة. <a href="/admin/counter">اختار تاني</a></p>`;
       } else {
@@ -2973,7 +3124,7 @@ export default {
         return new Response(page(t.title, `<p>${t.pickGroup}</p><div class="pending-actions">${links}</div>`, { lang, toggleHref: toggleHref(url, lang), isOwner: roleAllowed(staffRole, ["owner"]) }), { headers: { "content-type": "text/html;charset=utf-8" } });
       }
       const group = await env.DB.prepare(
-        `SELECT g.id, g.teacher_name, g.subject, g.day, g.time, r.name AS room_name
+        `SELECT g.id, g.teacher_name, g.subject, g.day, g.start_time, g.end_time, r.name AS room_name
          FROM groups g LEFT JOIN rooms r ON r.id = g.room_id WHERE g.id = ?`
       ).bind(groupId).first();
       const { results: enrolled } = await env.DB.prepare(
@@ -2989,8 +3140,9 @@ export default {
         <a href="/admin/students/${r.id}/estamara"><strong>${escapeHtml(r.name)}</strong></a><br>
         <small>${r.scanned_at ? `${t.present} — ${r.scanned_at}` : `<span style="color:var(--red)">${t.absent}</span>`}</small>
       </div></div>`).join("") || `<p class="empty">${t.empty}</p>`;
+      const groupTime = group?.start_time ? `${group.start_time}–${group.end_time}` : "";
       const header = group
-        ? `<p><strong>${escapeHtml(group.teacher_name)} — ${subjectsDisplay(lang, group.subject)}</strong> · ${escapeHtml([group.day, group.time].filter(Boolean).join(" "))}${group.room_name ? ` · 🚪 ${escapeHtml(group.room_name)}` : ""}<br>
+        ? `<p><strong>${escapeHtml(group.teacher_name)} — ${subjectsDisplay(lang, group.subject)}</strong> · ${escapeHtml([group.day, groupTime].filter(Boolean).join(" "))}${group.room_name ? ` · 🚪 ${escapeHtml(group.room_name)}` : ""}<br>
            <form method="GET" style="display:inline-flex;gap:8px;align-items:center;margin-top:8px">
              <input type="hidden" name="group" value="${groupId}">
              <input type="date" name="date" value="${date}">
@@ -3240,7 +3392,7 @@ ${isOwnerGuide ? sec("s-owner", "⚙️ إدارة (مدير بس)", `
         "SELECT id, name, subject, subject_label AS subjectLabel, phase, mode, track, photo, photo_blob IS NOT NULL AS hasPhotoBlob FROM teachers"
       ).all();
       const sessions = await env.DB.prepare(
-        `SELECT g.teacher_name, g.subject, g.stage, g.day, g.time, r.name AS room
+        `SELECT g.teacher_name, g.subject, g.stage, g.day, g.start_time, g.end_time, r.name AS room
          FROM groups g LEFT JOIN rooms r ON r.id = g.room_id
          WHERE g.active = 1`
       ).all();
