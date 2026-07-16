@@ -65,6 +65,25 @@ async function insertStudent(fields: Record<string, string | null>) {
   return meta.last_row_id as number;
 }
 
+describe("/admin roster: client-side name search (full-app reassessment, 2026-07-16)", () => {
+  it("renders a search input and gives every pending/approved card a lowercase data-name for client-side filtering", async () => {
+    await insertStudent({ name: "Ahmed Roster Search", status: "approved" });
+    await insertStudent({ name: "Sameh Pending Search", status: "pending" });
+    const html = await (await adminFetch("https://example.com/admin")).text();
+    expect(html).toContain('id="roster-search"');
+    expect(html).toContain('id="roster-list"');
+    expect(html).toContain('data-name="ahmed roster search"');
+    expect(html).toContain('data-name="sameh pending search"');
+  });
+
+  it("escapes a malicious student name in data-name instead of breaking out of the attribute", async () => {
+    await insertStudent({ name: '"><script>alert(1)</script>', status: "approved" });
+    const html = await (await adminFetch("https://example.com/admin")).text();
+    expect(html).not.toContain('data-name="">');
+    expect(html).not.toContain("<script>alert(1)</script>");
+  });
+});
+
 describe("subjects: stored-XSS regression (found by claude-review on PR #3, fixed 2026-07-10)", () => {
   it("escapes a malicious subjects value on the admin roster instead of rendering it raw", async () => {
     await insertStudent({

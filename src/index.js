@@ -1241,14 +1241,16 @@ export default {
         pending: "بانتظار المعالجة", process: "معالجة ← ", reject: "حذف",
         addName: "اسم الطالب", addNamePh: "اكتب اسم الطالب",
         addClass: "الصف", addClassPh: "مثال: ثانوية عامة", addSubmit: "إضافة طالب (بيحتاج معالجة)",
-        empty: "لا يوجد طلاب مسجلين بعد."
+        empty: "لا يوجد طلاب مسجلين بعد.", search: "دور على اسم طالب", searchPh: "اكتب اسم الطالب هنا",
+        searchEmpty: "مفيش طالب بالاسم ده."
       },
       en: {
         title: "Students", regLink: "Student registration link (share on WhatsApp):",
         pending: "Pending processing", process: "Process → ", reject: "Delete",
         addName: "Student name", addNamePh: "Enter student name",
         addClass: "Class", addClassPh: "e.g. General Secondary", addSubmit: "Add student (needs processing)",
-        empty: "No students registered yet."
+        empty: "No students registered yet.", search: "Find a student by name", searchPh: "Type a student's name",
+        searchEmpty: "No student found with that name."
       }
     };
 
@@ -1267,7 +1269,7 @@ export default {
           ? `<img class="pending-photo" src="data:${s.photo_type || "image/jpeg"};base64,${bytesToBase64(s.photo)}">`
           : "";
         const subjectsLine = subjectsDisplay(lang, s.subjects);
-        return `<div class="card pending-card">
+        return `<div class="card pending-card" data-name="${escapeHtml(s.name.toLowerCase())}">
           ${photoImg}
           <div>
             <span class="badge-pending">${t.pending}</span><br>
@@ -1291,7 +1293,7 @@ export default {
         const scanUrl = `${url.origin}/scan?student=${s.id}`;
         const studentUrl = `${url.origin}/student?id=${s.id}`;
         const waHref = s.phone ? waLink(s.phone, `أهلاً ${s.name} 👋 لينكك في هارف: ${studentUrl}`) : null;
-        return `<div class="card ${i % 2 === 0 ? "stripe-a" : "stripe-b"}">${qrSvg(scanUrl)}<div><a href="/admin/students/${s.id}/estamara${langQs}"><strong>${escapeHtml(s.name)}</strong></a><br><small>${escapeHtml(s.class || "")}</small>
+        return `<div class="card ${i % 2 === 0 ? "stripe-a" : "stripe-b"}" data-name="${escapeHtml(s.name.toLowerCase())}">${qrSvg(scanUrl)}<div><a href="/admin/students/${s.id}/estamara${langQs}"><strong>${escapeHtml(s.name)}</strong></a><br><small>${escapeHtml(s.class || "")}</small>
           <div class="pending-actions">
             ${waHref ? `<a href="${waHref}" target="_blank"><button type="button" class="wa-btn">📤 واتساب</button></a>` : ""}
           </div>
@@ -1308,7 +1310,28 @@ export default {
         <button type="submit">${t.addSubmit}</button>
       </form>`;
       const regLink = `<div class="reg-link">${t.regLink}<br><a href="${url.origin}/register">${url.origin}/register</a></div>`;
-      return new Response(page(t.title, regLink + pendingCards + form + cards, { lang, toggleHref: toggleHref(url, lang), isOwner: roleAllowed(staffRole, ["owner"]) }), { headers: { "content-type": "text/html;charset=utf-8" } });
+      // Client-side name filter (2026-07-16, full-app reassessment): with the
+      // roster's flat, unpaginated card list growing over multiple semesters,
+      // scrolling to find one student was a real cognitive-load problem — the
+      // guide's own "find a student" task otherwise just says "tap their name
+      // anywhere," which assumes you can already see it. Pure markup+JS, no
+      // new route or data fetch (every student is already in the DOM); every
+      // card already carries data-name from the two maps above.
+      const searchBox = (pending.length || approved.length) ? `<form onsubmit="return false">
+        <label for="roster-search">${t.search}</label>
+        <input id="roster-search" type="search" autocomplete="off" placeholder="${t.searchPh}" oninput="
+          var q = this.value.trim().toLowerCase();
+          var any = false;
+          document.querySelectorAll('#roster-list [data-name]').forEach(function(el){
+            var match = !q || el.dataset.name.indexOf(q) !== -1;
+            el.hidden = !match;
+            if (match) any = true;
+          });
+          document.getElementById('roster-search-empty').hidden = any;
+        ">
+      </form>` : "";
+      const rosterBody = `<div id="roster-list">${pendingCards}${cards}</div><p class="empty" id="roster-search-empty" hidden>${t.searchEmpty}</p>`;
+      return new Response(page(t.title, regLink + searchBox + form + rosterBody, { lang, toggleHref: toggleHref(url, lang), isOwner: roleAllowed(staffRole, ["owner"]) }), { headers: { "content-type": "text/html;charset=utf-8" } });
     }
 
     // Old bookmarks/muscle memory (per /council recommended next steps) — kept
@@ -3216,23 +3239,28 @@ export default {
       // scan can land in a different group). The room/session column only
       // renders in auto mode (pinned/general already state their own single
       // context in the banner above, per row would be redundant there).
+      // strftime(...,'+3 hours') on every branch (full-app reassessment,
+      // 2026-07-16): scanned_at is stored UTC (schema.sql's datetime('now')
+      // default); displaying it raw shows staff a time 3 hours behind real
+      // Cairo time, same class of bug fixed on /scan's confirmation earlier
+      // this session.
       const recentScans = pinnedGroup
         ? await env.DB.prepare(
-            `SELECT s.id, s.name, s.stage, s.class, a.scanned_at FROM attendance a JOIN students s ON s.id = a.student_id
+            `SELECT s.id, s.name, s.stage, s.class, strftime('%H:%M', a.scanned_at, '+3 hours') AS local_time FROM attendance a JOIN students s ON s.id = a.student_id
              WHERE a.group_id = ? AND date(a.scanned_at) = date('now') ORDER BY a.scanned_at DESC LIMIT 10`
           ).bind(pinnedGroup.id).all()
         : isGeneralMode
           ? await env.DB.prepare(
-              `SELECT s.id, s.name, s.stage, s.class, a.scanned_at FROM attendance a JOIN students s ON s.id = a.student_id
+              `SELECT s.id, s.name, s.stage, s.class, strftime('%H:%M', a.scanned_at, '+3 hours') AS local_time FROM attendance a JOIN students s ON s.id = a.student_id
                WHERE a.group_id IS NULL AND date(a.scanned_at) = date('now') ORDER BY a.scanned_at DESC LIMIT 10`
             ).all()
           : await env.DB.prepare(
-              `SELECT s.id, s.name, s.stage, s.class, a.scanned_at, r.name AS room_name FROM attendance a
+              `SELECT s.id, s.name, s.stage, s.class, strftime('%H:%M', a.scanned_at, '+3 hours') AS local_time, r.name AS room_name FROM attendance a
                JOIN students s ON s.id = a.student_id LEFT JOIN groups g ON g.id = a.group_id LEFT JOIN rooms r ON r.id = g.room_id
                WHERE date(a.scanned_at) = date('now') ORDER BY a.scanned_at DESC LIMIT 10`
             ).all();
       const recentRowsHtml = recentScans.results.map(r =>
-        `<tr><td><a href="/admin/students/${r.id}/estamara">${escapeHtml(r.name)}</a></td><td>${escapeHtml(r.stage || r.class || "")}</td>${isAutoMode ? `<td>${escapeHtml(r.room_name || "عام")}</td>` : ""}<td>${escapeHtml(r.scanned_at)}</td></tr>`
+        `<tr><td><a href="/admin/students/${r.id}/estamara">${escapeHtml(r.name)}</a></td><td>${escapeHtml(r.stage || r.class || "")}</td>${isAutoMode ? `<td>${escapeHtml(r.room_name || "عام")}</td>` : ""}<td>${escapeHtml(r.local_time)}</td></tr>`
       ).join("");
       const body = `<style>
 .counter-wrap{max-width:480px;margin:0 auto;text-align:center}
@@ -3378,15 +3406,18 @@ export default {
       // lecture halls each scan belongs to — this view flattens every group
       // together by time, so with 4 halls possibly running at once it's the
       // one place room ambiguity would otherwise bite hardest.
+      // strftime(...,'+3 hours'), not raw scanned_at (full-app reassessment,
+      // 2026-07-16): the column is stored UTC, so displaying it raw showed
+      // staff a time 3 hours behind real Cairo time on this daily ops page.
       const { results } = await env.DB.prepare(
-        `SELECT s.id, s.name, a.scanned_at, r.name AS room_name FROM attendance a
+        `SELECT s.id, s.name, strftime('%H:%M', a.scanned_at, '+3 hours') AS local_time, r.name AS room_name FROM attendance a
          JOIN students s ON s.id = a.student_id
          LEFT JOIN groups g ON g.id = a.group_id
          LEFT JOIN rooms r ON r.id = g.room_id
          WHERE date(a.scanned_at) = date('now')
          ORDER BY a.scanned_at DESC`
       ).all();
-      const rows = results.map((r, i) => `<div class="card ${i % 2 === 0 ? "stripe-a" : "stripe-b"}"><div><a href="/admin/students/${r.id}/estamara"><strong>${escapeHtml(r.name)}</strong></a><br><small>${r.scanned_at}${r.room_name ? ` · 🚪 ${escapeHtml(r.room_name)}` : ""}</small></div></div>`).join("") || `<p class="empty">لا يوجد تسجيل حضور اليوم.</p>`;
+      const rows = results.map((r, i) => `<div class="card ${i % 2 === 0 ? "stripe-a" : "stripe-b"}"><div><a href="/admin/students/${r.id}/estamara"><strong>${escapeHtml(r.name)}</strong></a><br><small>${escapeHtml(r.local_time)}${r.room_name ? ` · 🚪 ${escapeHtml(r.room_name)}` : ""}</small></div></div>`).join("") || `<p class="empty">لا يوجد تسجيل حضور اليوم.</p>`;
       return new Response(page("حضور اليوم", rows, { isOwner: roleAllowed(staffRole, ["owner"]) }), { headers: { "content-type": "text/html;charset=utf-8" } });
     }
 
@@ -3413,18 +3444,22 @@ export default {
         `SELECT g.id, g.teacher_name, g.subject, g.day, g.start_time, g.end_time, r.name AS room_name
          FROM groups g LEFT JOIN rooms r ON r.id = g.room_id WHERE g.id = ?`
       ).bind(groupId).first();
+      // strftime(...,'+3 hours'), not raw scanned_at (full-app reassessment,
+      // 2026-07-16) -- same UTC-vs-Cairo display bug as /admin/today and the
+      // counter's recent-scans table, fixed the same way; NULL (absent) rows
+      // pass through strftime as NULL, so the presence check below is unaffected.
       const { results: enrolled } = await env.DB.prepare(
-        `SELECT s.id, s.name, a.scanned_at
+        `SELECT s.id, s.name, strftime('%H:%M', a.scanned_at, '+3 hours') AS local_time
          FROM bookings b
          JOIN students s ON s.id = b.student_id
          LEFT JOIN attendance a ON a.student_id = s.id AND a.group_id = b.group_id AND date(a.scanned_at) = ?
          WHERE b.group_id = ? AND b.status = 'active'
          ORDER BY (a.scanned_at IS NULL) DESC, s.name`
       ).bind(date, groupId).all();
-      const presentCount = enrolled.filter(r => r.scanned_at).length;
+      const presentCount = enrolled.filter(r => r.local_time).length;
       const rows = enrolled.map((r, i) => `<div class="card ${i % 2 === 0 ? "stripe-a" : "stripe-b"}"><div>
         <a href="/admin/students/${r.id}/estamara"><strong>${escapeHtml(r.name)}</strong></a><br>
-        <small>${r.scanned_at ? `${t.present} — ${r.scanned_at}` : `<span style="color:var(--red)">${t.absent}</span>`}</small>
+        <small>${r.local_time ? `${t.present} — ${escapeHtml(r.local_time)}` : `<span style="color:var(--red)">${t.absent}</span>`}</small>
       </div></div>`).join("") || `<p class="empty">${t.empty}</p>`;
       const groupTime = group?.start_time ? `${group.start_time}–${group.end_time}` : "";
       const header = group
