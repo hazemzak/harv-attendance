@@ -68,7 +68,8 @@ CREATE TABLE teacher_availability (
   teacher_id TEXT NOT NULL REFERENCES teachers(id) ON DELETE CASCADE,
   day_of_week TEXT NOT NULL,
   start_time TEXT NOT NULL,
-  end_time TEXT NOT NULL
+  end_time TEXT NOT NULL,
+  room_id INTEGER REFERENCES rooms(id)
 );
 CREATE INDEX idx_teacher_availability_teacher ON teacher_availability(teacher_id);
 

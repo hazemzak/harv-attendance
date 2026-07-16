@@ -102,9 +102,10 @@ select{
 .card.stripe-b{background:#E2E4E9}
 .subjects-grid{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px}
 .avail-grid{margin-bottom:16px}
-.avail-row{display:flex;gap:8px;margin-bottom:8px}
-.avail-row select{flex:1.4;margin-bottom:0}
-.avail-row input[type="time"]{flex:1;margin-bottom:0}
+.avail-row{border:2px solid var(--line);border-radius:10px;padding:10px;margin-bottom:8px}
+.avail-row-top{display:flex;gap:8px;margin-bottom:8px}
+.avail-row-bottom{display:flex;gap:8px}
+.avail-row select,.avail-row input[type="time"]{flex:1;margin-bottom:0}
 .subject-chip{display:flex;align-items:center;gap:6px;background:#fff;border:2px solid var(--line);border-radius:999px;padding:8px 14px;font-size:15px;cursor:pointer}
 .subject-chip input{width:auto;margin:0}
 .pay-options{display:flex;flex-direction:column;gap:10px;margin-bottom:16px}
@@ -336,6 +337,11 @@ function sanitizeDayOfWeek(v) {
   return DAYS_OF_WEEK.some(d => d.v === v) ? v : "";
 }
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/; // 24h "HH:MM", matches <input type="time">
+// Business hours 7am-12am. ponytail: "12am" (midnight) treated as the
+// literal day boundary "23:59" -- <input type="time"> can't express 24:00,
+// and no real lesson ends exactly at midnight, so this is the practical close.
+const BUSINESS_OPEN = "07:00", BUSINESS_CLOSE = "23:59";
+function inBusinessHours(t) { return t >= BUSINESS_OPEN && t <= BUSINESS_CLOSE; }
 
 const PAYMENT_METHODS = {
   cash: { ar: "كاش", en: "Cash" },
@@ -418,7 +424,7 @@ async function getTeacherAvailability(env, ids) {
   if (!list.length) return new Map();
   const placeholders = list.map(() => "?").join(",");
   const { results } = await env.DB.prepare(
-    `SELECT teacher_id, day_of_week, start_time, end_time
+    `SELECT teacher_id, day_of_week, start_time, end_time, room_id
        FROM teacher_availability WHERE teacher_id IN (${placeholders}) ORDER BY id`
   ).bind(...list).all();
   const m = new Map();
@@ -2259,7 +2265,7 @@ export default {
       }
     };
 
-    function teacherFormHtml(lang, action, teacher) {
+    function teacherFormHtml(lang, action, teacher, rooms) {
       const t = TEACHER_FORM_I18N[lang];
       const phaseOpts = `<option value="">—</option>` + PHASES.map(p => `<option value="${p.v}" ${teacher?.phase === p.v ? "selected" : ""}>${lang === "en" ? p.en : p.ar}</option>`).join("");
       const modeOpts = `<option value="">—</option>` + MODES.map(m => `<option value="${escapeHtml(m.v)}" ${teacher?.mode === m.v ? "selected" : ""}>${lang === "en" ? m.en : m.ar}</option>`).join("");
@@ -2270,13 +2276,20 @@ export default {
       const av = teacher?.availability || [];
       const dayOpts = selected => `<option value="">${t.availNone}</option>` +
         DAYS_OF_WEEK.map(d => `<option value="${d.v}" ${selected === d.v ? "selected" : ""}>${lang === "en" ? d.en : d.ar}</option>`).join("");
+      const roomOpts = selected => `<option value="">${t.availNone}</option>` +
+        (rooms || []).map(r => `<option value="${r.id}" ${selected === r.id ? "selected" : ""}>${escapeHtml(r.name)}</option>`).join("");
       const availRows = [0, 1, 2].map(i => {
         const row = av[i] || {};
         const n = i + 1;
         return `<div class="avail-row">
-          <select name="avail_day_${n}">${dayOpts(row.day_of_week || "")}</select>
-          <input type="time" name="avail_from_${n}" value="${escapeHtml(row.start_time || "")}">
-          <input type="time" name="avail_to_${n}" value="${escapeHtml(row.end_time || "")}">
+          <div class="avail-row-top">
+            <select name="avail_day_${n}">${dayOpts(row.day_of_week || "")}</select>
+            <select name="avail_room_${n}">${roomOpts(row.room_id || null)}</select>
+          </div>
+          <div class="avail-row-bottom">
+            <input type="time" name="avail_from_${n}" value="${escapeHtml(row.start_time || "")}" min="${BUSINESS_OPEN}" max="${BUSINESS_CLOSE}">
+            <input type="time" name="avail_to_${n}" value="${escapeHtml(row.end_time || "")}" min="${BUSINESS_OPEN}" max="${BUSINESS_CLOSE}">
+          </div>
         </div>`;
       }).join("");
       return `<form method="POST" action="${action}" enctype="multipart/form-data" onsubmit="return confirm(${JSON.stringify(t.confirm)})">
@@ -2311,7 +2324,7 @@ export default {
       const lang = langOf(url);
       const t = TEACHER_FORM_I18N[lang];
       const langQs = lang === "en" ? "?lang=en" : "";
-      return new Response(page(t.addTitle, teacherFormHtml(lang, `/admin/teachers${langQs}`, null), { lang, toggleHref: toggleHref(url, lang), isOwner: true }), { headers: { "content-type": "text/html;charset=utf-8" } });
+      return new Response(page(t.addTitle, teacherFormHtml(lang, `/admin/teachers${langQs}`, null, await getRooms(env)), { lang, toggleHref: toggleHref(url, lang), isOwner: true }), { headers: { "content-type": "text/html;charset=utf-8" } });
     }
 
     // teachers.id is a TEXT slug (e.g. "reda", "sayed") sourced historically
@@ -2332,8 +2345,12 @@ export default {
       const track = sanitizeTrack((form.get("track") || "").toString().trim());
       // Up to 3 fixed rows (no add/remove-row JS) — a row with no day picked
       // is simply skipped, not an error; a row with a day but a bad/missing
-      // time, or end<=start, rejects the whole submission with a 400 (same
-      // rejection style as the percent-share cap elsewhere in this file).
+      // time, end<=start, or a time outside business hours, rejects the whole
+      // submission with a 400 (same rejection style as the percent-share cap
+      // elsewhere in this file). Hall is optional per row — a day/time can be
+      // set before a hall is decided; the scheduling grid can fill it in later.
+      const rooms = await getRooms(env);
+      const roomIds = new Set(rooms.map(r => r.id));
       const availability = [];
       let availabilityError = null;
       for (let n = 1; n <= 3; n++) {
@@ -2342,7 +2359,10 @@ export default {
         const from = (form.get(`avail_from_${n}`) || "").toString().trim();
         const to = (form.get(`avail_to_${n}`) || "").toString().trim();
         if (!TIME_RE.test(from) || !TIME_RE.test(to) || to <= from) { availabilityError = "bad_time"; break; }
-        availability.push({ day_of_week: day, start_time: from, end_time: to });
+        if (!inBusinessHours(from) || !inBusinessHours(to)) { availabilityError = "outside_hours"; break; }
+        const roomIdRaw = parseInt((form.get(`avail_room_${n}`) || "").toString(), 10);
+        const room_id = roomIds.has(roomIdRaw) ? roomIdRaw : null;
+        availability.push({ day_of_week: day, start_time: from, end_time: to, room_id });
       }
       const photoFile = form.get("photo");
       let photoBuf = null, photoType = null;
@@ -2361,7 +2381,7 @@ export default {
       const { name, subject, phase, mode, track, availability, availabilityError, photoBuf, photoType } = await readTeacherForm(request);
       if (!name || !subject || availabilityError) {
         const teacher = { name, subject, phase, mode, track, availability };
-        return new Response(page(TEACHER_FORM_I18N[lang].addTitle, teacherFormHtml(lang, `/admin/teachers${langQs}`, teacher), { lang, isOwner: true }), { status: 400, headers: { "content-type": "text/html;charset=utf-8" } });
+        return new Response(page(TEACHER_FORM_I18N[lang].addTitle, teacherFormHtml(lang, `/admin/teachers${langQs}`, teacher, await getRooms(env)), { lang, isOwner: true }), { status: 400, headers: { "content-type": "text/html;charset=utf-8" } });
       }
       const id = newTeacherId();
       const stmts = [env.DB.prepare(
@@ -2369,8 +2389,8 @@ export default {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).bind(id, name, subject, subjectLabelFor(subject), phase || null, mode || null, track || null, photoBuf, photoType)];
       for (const a of availability) stmts.push(env.DB.prepare(
-        "INSERT INTO teacher_availability (teacher_id, day_of_week, start_time, end_time) VALUES (?, ?, ?, ?)"
-      ).bind(id, a.day_of_week, a.start_time, a.end_time));
+        "INSERT INTO teacher_availability (teacher_id, day_of_week, start_time, end_time, room_id) VALUES (?, ?, ?, ?, ?)"
+      ).bind(id, a.day_of_week, a.start_time, a.end_time, a.room_id));
       await env.DB.batch(stmts);
       return Response.redirect(url.origin + `/admin/teachers${langQs}`, 303);
     }
@@ -2384,7 +2404,7 @@ export default {
       const teacher = await env.DB.prepare("SELECT id, name, subject, phase, mode, track, photo_blob IS NOT NULL AS hasPhotoBlob FROM teachers WHERE id = ?").bind(teacherEditMatch[1]).first();
       if (!teacher) return new Response("Not found", { status: 404 });
       teacher.availability = (await getTeacherAvailability(env, [teacher.id])).get(teacher.id) || [];
-      return new Response(page(t.editTitle, teacherFormHtml(lang, `/admin/teachers/${teacher.id}${langQs}`, teacher), { lang, toggleHref: toggleHref(url, lang), isOwner: true }), { headers: { "content-type": "text/html;charset=utf-8" } });
+      return new Response(page(t.editTitle, teacherFormHtml(lang, `/admin/teachers/${teacher.id}${langQs}`, teacher, await getRooms(env)), { lang, toggleHref: toggleHref(url, lang), isOwner: true }), { headers: { "content-type": "text/html;charset=utf-8" } });
     }
 
     const teacherUpdateMatch = url.pathname.match(/^\/admin\/teachers\/([^/]+)$/);
@@ -2398,7 +2418,7 @@ export default {
       const { name, subject, phase, mode, track, availability, availabilityError, photoBuf, photoType } = await readTeacherForm(request);
       if (!name || !subject || availabilityError) {
         const teacher = { id: teacherId, name, subject, phase, mode, track, availability };
-        return new Response(page(TEACHER_FORM_I18N[lang].editTitle, teacherFormHtml(lang, `/admin/teachers/${teacherId}${langQs}`, teacher), { lang, isOwner: true }), { status: 400, headers: { "content-type": "text/html;charset=utf-8" } });
+        return new Response(page(TEACHER_FORM_I18N[lang].editTitle, teacherFormHtml(lang, `/admin/teachers/${teacherId}${langQs}`, teacher, await getRooms(env)), { lang, isOwner: true }), { status: 400, headers: { "content-type": "text/html;charset=utf-8" } });
       }
       const update = photoBuf
         ? env.DB.prepare(
@@ -2412,8 +2432,8 @@ export default {
       // overhead. Folded into one batch() with the UPDATE for atomicity.
       const stmts = [update, env.DB.prepare("DELETE FROM teacher_availability WHERE teacher_id = ?").bind(teacherId)];
       for (const a of availability) stmts.push(env.DB.prepare(
-        "INSERT INTO teacher_availability (teacher_id, day_of_week, start_time, end_time) VALUES (?, ?, ?, ?)"
-      ).bind(teacherId, a.day_of_week, a.start_time, a.end_time));
+        "INSERT INTO teacher_availability (teacher_id, day_of_week, start_time, end_time, room_id) VALUES (?, ?, ?, ?, ?)"
+      ).bind(teacherId, a.day_of_week, a.start_time, a.end_time, a.room_id));
       await env.DB.batch(stmts);
       return Response.redirect(url.origin + `/admin/teachers${langQs}`, 303);
     }

@@ -2290,6 +2290,78 @@ describe("/admin/teachers/:id/edit + /admin/teachers/:id (update): editing an ex
   });
 });
 
+describe("teacher_availability: hall assignment + business hours (added 2026-07-16)", () => {
+  it("persists a valid room_id alongside the day/time", async () => {
+    const room = await env.DB.prepare("INSERT INTO rooms (name) VALUES ('قاعة تست') RETURNING id").first() as any;
+    const form = new FormData();
+    form.set("name", "أ. قاعة صحيحة");
+    form.set("subject", "math");
+    form.set("avail_day_1", "mon");
+    form.set("avail_from_1", "17:00");
+    form.set("avail_to_1", "19:00");
+    form.set("avail_room_1", String(room.id));
+    const res = await adminFetch("https://example.com/admin/teachers", { method: "POST", body: form, redirect: "manual" });
+    expect(res.status).toBe(303);
+    const row = await env.DB.prepare("SELECT id FROM teachers WHERE name = 'أ. قاعة صحيحة'").first() as any;
+    const avail = await env.DB.prepare("SELECT room_id FROM teacher_availability WHERE teacher_id = ?").bind(row.id).first() as any;
+    expect(avail.room_id).toBe(room.id);
+  });
+
+  it("stores a crafted/nonexistent room_id as null instead of erroring", async () => {
+    const form = new FormData();
+    form.set("name", "أ. قاعة مزورة");
+    form.set("subject", "math");
+    form.set("avail_day_1", "mon");
+    form.set("avail_from_1", "17:00");
+    form.set("avail_to_1", "19:00");
+    form.set("avail_room_1", "99999");
+    const res = await adminFetch("https://example.com/admin/teachers", { method: "POST", body: form, redirect: "manual" });
+    expect(res.status).toBe(303);
+    const row = await env.DB.prepare("SELECT id FROM teachers WHERE name = 'أ. قاعة مزورة'").first() as any;
+    const avail = await env.DB.prepare("SELECT room_id FROM teacher_availability WHERE teacher_id = ?").bind(row.id).first() as any;
+    expect(avail.room_id).toBeNull();
+  });
+
+  it("leaves room_id null when no hall is picked", async () => {
+    const form = new FormData();
+    form.set("name", "أ. بدون قاعة");
+    form.set("subject", "math");
+    form.set("avail_day_1", "mon");
+    form.set("avail_from_1", "17:00");
+    form.set("avail_to_1", "19:00");
+    await adminFetch("https://example.com/admin/teachers", { method: "POST", body: form });
+    const row = await env.DB.prepare("SELECT id FROM teachers WHERE name = 'أ. بدون قاعة'").first() as any;
+    const avail = await env.DB.prepare("SELECT room_id FROM teacher_availability WHERE teacher_id = ?").bind(row.id).first() as any;
+    expect(avail.room_id).toBeNull();
+  });
+
+  it("rejects a start time before business hours open (7am)", async () => {
+    const form = new FormData();
+    form.set("name", "أ. بدري جدًا");
+    form.set("subject", "math");
+    form.set("avail_day_1", "mon");
+    form.set("avail_from_1", "06:00");
+    form.set("avail_to_1", "08:00");
+    const res = await adminFetch("https://example.com/admin/teachers", { method: "POST", body: form });
+    expect(res.status).toBe(400);
+    const row = await env.DB.prepare("SELECT id FROM teachers WHERE name = 'أ. بدري جدًا'").first();
+    expect(row).toBeNull();
+  });
+
+  it("rejects an end time past midnight (business close)", async () => {
+    const form = new FormData();
+    form.set("name", "أ. متأخر جدًا");
+    form.set("subject", "math");
+    form.set("avail_day_1", "mon");
+    form.set("avail_from_1", "23:00");
+    form.set("avail_to_1", "00:30");
+    const res = await adminFetch("https://example.com/admin/teachers", { method: "POST", body: form });
+    expect(res.status).toBe(400);
+    const row = await env.DB.prepare("SELECT id FROM teachers WHERE name = 'أ. متأخر جدًا'").first();
+    expect(row).toBeNull();
+  });
+});
+
 describe("teacher_availability: structured schedule picker, up to 3 day+time rows (added 2026-07-16)", () => {
   it("silently skips a row with an unknown/crafted day value instead of erroring", async () => {
     const form = new FormData();
