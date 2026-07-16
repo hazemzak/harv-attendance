@@ -1210,12 +1210,12 @@ export default {
       ar: {
         title: "أثناء الحصة", back: "← الرئيسية",
         todayLink: "✅ حضور اليوم", counterLink: "📷 سكانر الاستقبال", printLink: "🖨️ كشف ورقي",
-        findStudentLink: "🔎 بحث عن طالب (تسجيل دفعة)"
+        absentLink: "🚫 الطلاب الغايبين", findStudentLink: "🔎 بحث عن طالب (تسجيل دفعة)"
       },
       en: {
         title: "In Session", back: "← Home",
         todayLink: "✅ Today's Attendance", counterLink: "📷 Counter Scanner", printLink: "🖨️ Print Sheet",
-        findStudentLink: "🔎 Find a Student (record payment)"
+        absentLink: "🚫 Absent Students", findStudentLink: "🔎 Find a Student (record payment)"
       }
     };
 
@@ -1396,6 +1396,7 @@ export default {
           <a href="/admin/today${langQs}">${t.todayLink}</a>
           <a href="/admin/counter">${t.counterLink}</a>
           <a href="/admin/print">${t.printLink}</a>
+          <a href="/admin/absences${langQs}">${t.absentLink}</a>
           <a href="/admin${langQs}">${t.findStudentLink}</a>
         </div>
       </div>`;
@@ -3822,6 +3823,44 @@ export default {
       return new Response(page(t.title, header + rows, { lang, toggleHref: toggleHref(url, lang), isOwner: roleAllowed(staffRole, ["owner"]) }), { headers: { "content-type": "text/html;charset=utf-8" } });
     }
 
+    const ABSENCES_I18N = {
+      ar: { title: "الطلاب الغايبين", absentCount: "غايب", presentCount: "حاضر", empty: "مفيش طلاب مسجلين لسه." },
+      en: { title: "Absent Students", absentCount: "absent", presentCount: "present", empty: "No students registered yet." }
+    };
+
+    // Center-wide, not per-group (that's /admin/attendance): the whole
+    // approved roster minus whoever scanned in ANY group that day -- "who
+    // didn't show up at all today," requested 2026-07-13 in person. Mirrors
+    // /admin/attendance's date-picker + printable pattern.
+    if (url.pathname === "/admin/absences" && request.method === "GET") {
+      const lang = langOf(url);
+      const t = ABSENCES_I18N[lang];
+      const langQs = lang === "en" ? "?lang=en" : "";
+      const date = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("date") || "") ? url.searchParams.get("date") : new Date().toISOString().slice(0, 10);
+      const [{ n: totalApproved }, { results: absent }] = await Promise.all([
+        env.DB.prepare("SELECT COUNT(*) AS n FROM students WHERE status = 'approved'").first(),
+        env.DB.prepare(
+          `SELECT id, name, stage, class FROM students
+           WHERE status = 'approved'
+             AND id NOT IN (SELECT student_id FROM attendance WHERE date(scanned_at) = ?)
+           ORDER BY name`
+        ).bind(date).all()
+      ]);
+      const presentN = totalApproved - absent.length;
+      const rows = absent.map((s, i) => `<div class="card ${i % 2 === 0 ? "stripe-a" : "stripe-b"}"><div>
+        <a href="/admin/students/${s.id}/estamara"><strong>${escapeHtml(s.name)}</strong></a><br>
+        <small>${escapeHtml([s.stage, s.class].filter(Boolean).join(" · "))}</small>
+      </div></div>`).join("") || `<p class="empty">${t.empty}</p>`;
+      const header = `<p class="no-print"><button onclick="window.print()">🖨️</button></p>
+        <form method="GET" style="display:inline-flex;gap:8px;align-items:center;margin-bottom:16px">
+          <input type="hidden" name="lang" value="${lang}">
+          <input type="date" name="date" value="${date}">
+          <button type="submit">🔄</button>
+        </form>
+        <p>${absent.length} ${t.absentCount} · ${presentN}/${totalApproved} ${t.presentCount}</p>`;
+      return new Response(page(t.title, header + rows, { lang, toggleHref: toggleHref(url, lang), isOwner: roleAllowed(staffRole, ["owner"]) }), { headers: { "content-type": "text/html;charset=utf-8" } });
+    }
+
     if (url.pathname === "/admin/print" && request.method === "GET") {
       const { results } = await env.DB.prepare("SELECT name, class FROM students ORDER BY name").all();
       const rows = results.map((s, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(s.name)}</td><td>${escapeHtml(s.class || "")}</td><td></td><td></td><td></td><td><span class="roster-box"></span></td></tr>`).join("")
@@ -3972,6 +4011,7 @@ ${sec("t-attendance", `
 <ul class="guide-steps">
   <li><strong><a href="/admin/counter">سكانر الاستقبال</a></strong> — لو معاك جهاز سكانر QR متوصل بالكمبيوتر، افتح الصفحة دي ووجّه السكانر على كود الطالب، هيتسجل حضوره تلقائي من غير ما تدوس أي حاجة.</li>
   <li><strong><a href="/admin/today">حضور اليوم</a></strong> — مين حضر النهاردة.</li>
+  <li><strong><a href="/admin/absences">الطلاب الغايبين</a></strong> — كل الطلاب المسجلين اللي لسه ما حضروش أي حصة النهاردة.</li>
   <li><strong><a href="/admin/print">كشف ورقي</a></strong> — احتياطي لو النت وقع، تطبعه وتعلّم عليه بالإيد.</li>
 </ul>
 <div class="guide-shot">${diagAttendance}</div>

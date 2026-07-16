@@ -1255,6 +1255,53 @@ describe("/admin/attendance: per-group report (added 2026-07-13)", () => {
   });
 });
 
+describe("/admin/absences: center-wide daily absent-students report (added 2026-07-17)", () => {
+  it("blocks unauthenticated access", async () => {
+    const res = await SELF.fetch("https://example.com/admin/absences");
+    expect(res.status).toBe(403);
+  });
+
+  it("lists an approved student who hasn't scanned in anywhere today as absent, and drops them once they scan", async () => {
+    const groupId = (await env.DB.prepare(
+      "INSERT INTO groups (teacher_name, subject, active) VALUES ('أ. غياب', 'math', 1)"
+    ).run()).meta.last_row_id;
+    const studentId = await insertStudent({ name: "Absence Test Student", status: "approved" });
+
+    const before = await (await adminFetch("https://example.com/admin/absences")).text();
+    expect(before).toContain("Absence Test Student");
+
+    await SELF.fetch(`https://example.com/scan?student=${studentId}&group=${groupId}`);
+
+    const after = await (await adminFetch("https://example.com/admin/absences")).text();
+    expect(after).not.toContain("Absence Test Student");
+  });
+
+  it("never lists a pending (not-yet-approved) student -- only the approved roster counts", async () => {
+    await insertStudent({ name: "Pending Not Absent", status: "pending" });
+    const html = await (await adminFetch("https://example.com/admin/absences")).text();
+    expect(html).not.toContain("Pending Not Absent");
+  });
+
+  it("a student who scanned in on a DIFFERENT group still counts as present -- absence is center-wide, not per-group", async () => {
+    const groupId = (await env.DB.prepare(
+      "INSERT INTO groups (teacher_name, subject, active) VALUES ('أ. غياب مجموعة أخرى', 'physics', 1)"
+    ).run()).meta.last_row_id;
+    const studentId = await insertStudent({ name: "Cross Group Present", status: "approved" });
+    await SELF.fetch(`https://example.com/scan?student=${studentId}&group=${groupId}`);
+    const html = await (await adminFetch("https://example.com/admin/absences")).text();
+    expect(html).not.toContain("Cross Group Present");
+  });
+
+  it("respects an explicit ?date= param instead of always using today", async () => {
+    const studentId = await insertStudent({ name: "Old Date Test", status: "approved" });
+    await env.DB.prepare("INSERT INTO attendance (student_id, scanned_at) VALUES (?, '2020-01-01 10:00:00')").bind(studentId).run();
+    const oldDateHtml = await (await adminFetch("https://example.com/admin/absences?date=2020-01-01")).text();
+    expect(oldDateHtml).not.toContain("Old Date Test");
+    const todayHtml = await (await adminFetch("https://example.com/admin/absences")).text();
+    expect(todayHtml).toContain("Old Date Test");
+  });
+});
+
 describe("/admin/students/:id/pay + balance (added 2026-07-13, migration 0011_payments_ledger.sql)", () => {
   it("blocks unauthenticated access", async () => {
     const id = await insertStudent({ name: "Pay Auth Test", status: "approved" });
