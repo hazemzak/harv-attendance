@@ -2565,13 +2565,13 @@ export default {
         </select>
         <label>${t.shareValue}</label>
         <input name="share_value" type="number" step="0.01" min="0" value="${teacher.share_value ?? ""}" placeholder="${t.shareValuePh}">
-        <button type="submit">${t.saveShare}</button>
+        <button type="submit" class="btn-reject">${t.saveShare}</button>
       </form>`;
       const filterForm = `<form method="GET" style="display:flex;gap:8px;align-items:center;margin:12px 0">
         <input type="hidden" name="lang" value="${lang}">
         <label>${t.from}</label><input type="date" name="from" value="${from}">
         <label>${t.to}</label><input type="date" name="to" value="${to}">
-        <button type="submit">${t.filter}</button>
+        <button type="submit" class="btn-reject">${t.filter}</button>
       </form>`;
       const owedBlock = teacher.share_type
         ? `<p>${teacher.share_type === "per_session" ? t.sessionsCount : t.billedTotal}: <strong>${detail}</strong> · ${t.owed}: <strong style="color:var(--red)">${owed.toFixed(2)}</strong></p>
