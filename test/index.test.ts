@@ -104,6 +104,42 @@ describe("/admin/intake: walk-in self-registration QR (moved here 2026-07-17, ne
   });
 });
 
+describe("/admin/intake: walk-in send-registration-link-on-WhatsApp (added 2026-07-17)", () => {
+  it("offers a third walk-in path -- a phone number field + button that opens a wa.me link to /register", async () => {
+    const html = await (await adminFetch("https://example.com/admin/intake")).text();
+    const walkInPanelMatch = /طالب جديد وصل دلوقتي[\s\S]*?<\/details>/.exec(html);
+    expect(walkInPanelMatch, "walk-in panel should exist").toBeTruthy();
+    const panel = walkInPanelMatch![0];
+    expect(panel).toContain('id="walkin-wa-phone"');
+    expect(panel).toContain("required");
+    // The handler must be a real named function in a <script> block, not a
+    // dynamic message string interpolated straight into an onclick="..."
+    // attribute -- JSON.stringify()'s own double quotes would prematurely
+    // close that attribute and truncate the handler (caught before shipping:
+    // an earlier draft did exactly this, silently breaking the button while
+    // still passing a weaker version of this same test).
+    expect(panel).toContain('onsubmit="return sendWalkinWa()"');
+    expect(panel).toContain("function sendWalkinWa()");
+    expect(panel).toContain("wa.me");
+    // The message text (server-rendered, JSON-escaped into the script body)
+    // must point at this same origin's /register, not a hardcoded domain.
+    expect(panel).toContain("https://example.com/register");
+  });
+
+  it("does not open WhatsApp when the phone field is empty -- native required + reportValidity() instead of a silent no-op (claude-review finding)", async () => {
+    const html = await (await adminFetch("https://example.com/admin/intake")).text();
+    const walkInPanelMatch = /طالب جديد وصل دلوقتي[\s\S]*?<\/details>/.exec(html);
+    const panel = walkInPanelMatch![0];
+    // Real browser behavior isn't exercisable in this Workers-runtime test
+    // environment (no DOM), so this asserts the structural fix instead: the
+    // input is `required` inside a real <form>, and sendWalkinWa() calls
+    // reportValidity() and returns false on an empty value rather than
+    // silently opening wa.me with a garbage/empty number.
+    expect(panel).toMatch(/<input id="walkin-wa-phone"[^>]*required/);
+    expect(panel).toContain("input.reportValidity()");
+  });
+});
+
 describe("subjects: stored-XSS regression (found by claude-review on PR #3, fixed 2026-07-10)", () => {
   it("escapes a malicious subjects value on the admin roster instead of rendering it raw", async () => {
     await insertStudent({
