@@ -5,6 +5,12 @@
   "routes": [
     { "pattern": "attendance.harvcentereg.com", "custom_domain": true }
   ],
+  // Kept alongside the custom domain above -- students already have
+  // printed QR tickets and WhatsApp links pointing at this URL (the app
+  // builds links from the live request origin, so anything issued before
+  // this change is baked to whatever hostname was live at the time).
+  // Adding a `routes` block disables this by default unless set explicitly.
+  "workers_dev": true,
   "d1_databases": [
     {
       "binding": "DB",
