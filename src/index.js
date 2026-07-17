@@ -2408,7 +2408,14 @@ export default {
         ].filter(Boolean).join("");
         return `<${tileTag} class="sched-tile${hasConflict ? " sched-tile--conflict" : ""}" style="grid-column:${dIdx + 2};grid-row:${startRow}/${endRow};${laneStyle}"${tileHref}>
           ${badges ? `<div class="sched-badges">${badges}</div>` : ""}
-          <strong>${escapeHtml(g.teacher_name)}</strong> ${subjectEmoji(g.subject)}${!g.room_id ? ` <span class="sched-nohall-badge" title="${t.noHallBadge}">🔺</span>` : ""}${g.stage ? `<br><span class="sched-stage">${escapeHtml(g.stage)}</span>` : ""}${isGeneral && g.room_name ? `<br>🚪 ${escapeHtml(g.room_name)}` : ""}<br>
+          <strong>${escapeHtml(g.teacher_name)}</strong> ${subjectEmoji(g.subject)}${!g.room_id ? ` <span class="sched-nohall-badge" title="${t.noHallBadge}">🔺</span>` : ""}${
+            // Stage + room combined onto one line instead of two separate
+            // <br>-ed lines -- a short (1-hour) tile has limited vertical
+            // room, and this is the one line most tiles can spare.
+            (g.stage || (isGeneral && g.room_name))
+              ? `<br><span class="sched-stage">${[g.stage ? escapeHtml(g.stage) : "", isGeneral && g.room_name ? `🚪 ${escapeHtml(g.room_name)}` : ""].filter(Boolean).join(" · ")}</span>`
+              : ""
+          }<br>
           <small>${g.start_time}–${g.end_time} · ${escapeHtml(seatsLabel)}</small>
         </${tileTag}>`;
       }).join("");
@@ -2424,7 +2431,7 @@ export default {
         .sched-tabs{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
         .sched-tab{padding:10px 16px;border-radius:999px;background:var(--surface);border:2px solid var(--line);color:var(--ink);text-decoration:none;font-weight:600}
         .sched-tab.active{border-color:var(--red);background:#FFF5F5;color:var(--red)}
-        .sched-grid{display:grid;grid-template-columns:56px repeat(7,minmax(${isGeneral ? 90 * lanes : 90}px,1fr));grid-template-rows:auto repeat(17,44px);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:auto;margin-bottom:24px}
+        .sched-grid{display:grid;grid-template-columns:56px repeat(7,minmax(${isGeneral ? 90 * lanes : 90}px,1fr));grid-template-rows:auto repeat(17,56px);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:auto;margin-bottom:24px}
         .sched-daylabel{grid-row:1;background:var(--surface);padding:8px 4px;text-align:center;font-weight:700;font-size:13px;position:sticky;top:0;z-index:2}
         .sched-lane-labels{display:flex;margin-top:4px}
         .sched-lane-label{font-size:10px;font-weight:600;color:#5A6784;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
