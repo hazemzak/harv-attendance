@@ -1426,16 +1426,20 @@ export default {
         <p style="text-align:center;color:#5A6784;font-size:14px;margin:16px 0 8px">— ${t.walkInOr} —</p>
         <div class="reg-link" style="text-align:center">${qrSvg(`${url.origin}/register`)}<p style="margin:8px 0 0">${t.walkInSelfReg}</p></div>
         <p style="text-align:center;color:#5A6784;font-size:14px;margin:16px 0 8px">— ${t.walkInOr} —</p>
-        <label>${t.walkInWaPh}</label>
-        <input id="walkin-wa-phone" type="tel" placeholder="01xxxxxxxxx">
-        <button type="button" class="wa-btn" onclick="sendWalkinWa()">${t.walkInWaBtn}</button>
+        <form onsubmit="return sendWalkinWa()">
+          <label>${t.walkInWaPh}</label>
+          <input id="walkin-wa-phone" type="tel" placeholder="01xxxxxxxxx" required>
+          <button type="submit" class="wa-btn">${t.walkInWaBtn}</button>
+        </form>
         <script>
           function sendWalkinWa() {
-            var digits = document.getElementById('walkin-wa-phone').value.replace(/\D/g, '');
-            if (!digits) return;
+            var input = document.getElementById('walkin-wa-phone');
+            var digits = input.value.replace(/\D/g, '');
+            if (!digits) { input.reportValidity(); return false; }
             var intl = digits.indexOf('0') === 0 ? '20' + digits.slice(1) : (digits.indexOf('20') === 0 ? digits : '20' + digits);
             var msg = ${JSON.stringify(t.walkInWaMsg(`${url.origin}/register`))};
             window.open('https://wa.me/' + intl + '?text=' + encodeURIComponent(msg), '_blank');
+            return false;
           }
         </script>
       </details>
