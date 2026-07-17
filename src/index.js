@@ -9,8 +9,8 @@ const LOGO_B64 = "iVBORw0KGgoAAAANSUhEUgAAAPAAAAEKCAYAAAAsK9hZAABNxElEQVR42u29d3
 // as contextual links instead of top-level nav — those routes are unchanged,
 // just no longer all equally weighted in the nav.
 const NAV_I18N = {
-  ar: { home: "🏠 الرئيسية", session: "▶️ أثناء الحصة", owner: "⚙️ إدارة", guide: "📖 دليل الموظفين", brand: "هارف · تسجيل الحضور" },
-  en: { home: "🏠 Home", session: "▶️ In Session", owner: "⚙️ Management", guide: "📖 Staff Guide", brand: "Harv · Attendance" }
+  ar: { home: "🏠 الرئيسية", session: "▶️ أثناء الحصة", schedule: "🗓️ الجدول", owner: "⚙️ إدارة", guide: "📖 دليل الموظفين", brand: "هارف · تسجيل الحضور" },
+  en: { home: "🏠 Home", session: "▶️ In Session", schedule: "🗓️ Schedule", owner: "⚙️ Management", guide: "📖 Staff Guide", brand: "Harv · Attendance" }
 };
 
 function langOf(url) {
@@ -200,7 +200,7 @@ ${LOGO_B64 ? `<img src="data:image/png;base64,${LOGO_B64}" alt="Harv">` : ""}
 </a>
 ${toggle ? `<a class="lang-switch" href="${toggle}">${lang === "en" ? "العربية" : "English"}</a>` : ""}
 </header>
-${nav ? `<nav><a href="/admin/intake${lang === "en" ? "?lang=en" : ""}">${n.home}</a><a href="/admin/session${lang === "en" ? "?lang=en" : ""}">${n.session}</a>${isOwner ? `<a href="/admin/owner${lang === "en" ? "?lang=en" : ""}">${n.owner}</a>` : ""}<a href="/admin/guide">${n.guide}</a></nav>` : ""}
+${nav ? `<nav><a href="/admin/intake${lang === "en" ? "?lang=en" : ""}">${n.home}</a><a href="/admin/session${lang === "en" ? "?lang=en" : ""}">${n.session}</a><a href="/admin/schedule${lang === "en" ? "?lang=en" : ""}">${n.schedule}</a>${isOwner ? `<a href="/admin/owner${lang === "en" ? "?lang=en" : ""}">${n.owner}</a>` : ""}</nav><nav><a href="/admin/guide">${n.guide}</a></nav>` : ""}
 <h1>${title}</h1>
 ${body}
 </div>
@@ -565,15 +565,26 @@ async function getAllTeachersGrouped(env, lang) {
 async function getTeacherAvailability(env, ids) {
   const list = [...new Set(ids)].filter(Boolean);
   if (!list.length) return new Map();
-  const placeholders = list.map(() => "?").join(",");
-  const { results } = await env.DB.prepare(
-    `SELECT teacher_id, day_of_week, start_time, end_time, room_id
-       FROM teacher_availability WHERE teacher_id IN (${placeholders}) ORDER BY id`
-  ).bind(...list).all();
   const m = new Map();
-  for (const r of results) {
-    if (!m.has(r.teacher_id)) m.set(r.teacher_id, []);
-    m.get(r.teacher_id).push(r);
+  // Cloudflare D1's actual bound-parameter cap is well under classic
+  // SQLite's desktop 999 default (confirmed empirically: 500 still errored)
+  // -- chunk defensively so a large id list (a real large roster someday, or
+  // in tests a shared D1 instance accumulating rows across hundreds of tests
+  // in one run) can never trip a SQLITE_ERROR here. Each teacher's own rows
+  // stay within one chunk (we chunk the id list, not individual availability
+  // rows), so per-teacher ordering from "ORDER BY id" is unaffected.
+  const CHUNK = 90;
+  for (let i = 0; i < list.length; i += CHUNK) {
+    const chunk = list.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    const { results } = await env.DB.prepare(
+      `SELECT teacher_id, day_of_week, start_time, end_time, room_id
+         FROM teacher_availability WHERE teacher_id IN (${placeholders}) ORDER BY id`
+    ).bind(...chunk).all();
+    for (const r of results) {
+      if (!m.has(r.teacher_id)) m.set(r.teacher_id, []);
+      m.get(r.teacher_id).push(r);
+    }
   }
   return m;
 }
@@ -2233,13 +2244,19 @@ export default {
     }
 
     if (url.pathname === "/admin/schedule" && request.method === "GET") {
-      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
+      // Viewing is open to any authenticated staff (clerk/viewer included) --
+      // only actual mutation stays owner-gated, at the real enforcement
+      // points (/admin/groups/new, /admin/groups POST, /admin/groups/:id/edit
+      // GET+POST, untouched by this change). canEdit only controls what this
+      // render shows as clickable -- mirrors the isOwnerGuide ? ... : ""
+      // idiom /admin/guide already uses to hide whole blocks from non-owners.
+      const canEdit = roleAllowed(staffRole, ["owner"]);
       const lang = langOf(url);
       const t = SCHEDULE_I18N[lang];
       const langQs = lang === "en" ? "?lang=en" : "";
       const rooms = await getRooms(env);
       if (!rooms.length) {
-        return new Response(page(t.title, `<p class="empty">${t.noRooms}</p>`, { lang, toggleHref: toggleHref(url, lang), isOwner: true }), { headers: { "content-type": "text/html;charset=utf-8" } });
+        return new Response(page(t.title, `<p class="empty">${t.noRooms}</p>`, { lang, toggleHref: toggleHref(url, lang), isOwner: canEdit }), { headers: { "content-type": "text/html;charset=utf-8" } });
       }
       // "general" is a virtual tab spanning every hall at once, plus groups
       // with no hall yet -- distinguished from a real numeric room id before
@@ -2277,7 +2294,7 @@ export default {
       // happens via the group edit form or a real hall tab) -- there's no
       // single hall to pre-fill a "+" create link with here, so it renders none.
       const cells = [];
-      if (!isGeneral) {
+      if (!isGeneral && canEdit) {
         for (let i = 0; i < 17; i++) {
           const hh = `${String(i + 7).padStart(2, "0")}:00`;
           for (let d = 0; d < DAYS_OF_WEEK.length; d++) {
@@ -2300,18 +2317,25 @@ export default {
         const seatsLabel = Number.isFinite(g.capacity) ? `${g.enrolled}/${g.capacity}` : `${g.enrolled}`;
         const laneIdx = isGeneral ? (g.room_id ? rooms.findIndex(r => r.id === g.room_id) : rooms.length) : -1;
         const laneStyle = isGeneral ? `width:${laneWidth}%;margin-inline-start:${laneIdx * laneWidth}%;` : "";
-        return `<a class="sched-tile${hasConflict ? " sched-tile--conflict" : ""}" style="grid-column:${dIdx + 2};grid-row:${startRow}/${endRow};${laneStyle}" href="/admin/groups/${g.id}/edit${langQs}">
+        // canEdit=false swaps the tile from a clickable edit-link to a plain
+        // div -- inner content is identical either way, only the wrapping
+        // tag/href changes, so a clerk sees the exact same badges/info with
+        // nothing to click through to a 403 on.
+        const tileTag = canEdit ? "a" : "div";
+        const tileHref = canEdit ? ` href="/admin/groups/${g.id}/edit${langQs}"` : "";
+        return `<${tileTag} class="sched-tile${hasConflict ? " sched-tile--conflict" : ""}" style="grid-column:${dIdx + 2};grid-row:${startRow}/${endRow};${laneStyle}"${tileHref}>
           ${hasConflict ? `<span class="sched-conflict-badge">${t.conflict}</span>` : ""}
           ${!g.room_id ? `<span class="sched-nohall-badge">${t.noHallBadge}</span>` : ""}
           ${hasWeeklyBadge ? `<span class="sched-weekly-badge">${t.weeklyBadge}</span>` : ""}
           <strong>${escapeHtml(g.teacher_name)}</strong>${g.stage ? `<br><span class="sched-stage">${escapeHtml(g.stage)}</span>` : ""}<br>${isGeneral && g.room_name ? `🚪 ${escapeHtml(g.room_name)}<br>` : ""}${subjectsDisplay(lang, g.subject)}<br>
           <small>${g.start_time}–${g.end_time} · ${escapeHtml(seatsLabel)}</small>
-        </a>`;
+        </${tileTag}>`;
       }).join("");
 
+      const unassignedTag = canEdit ? "a" : "div";
       const unassignedHtml = unassigned.length
         ? `<h2 style="font-size:15px;color:var(--muted)">${t.unassignedTitle}</h2>` + unassigned.map(g =>
-            `<a class="card" href="/admin/groups/${g.id}/edit${langQs}"><div><strong>${escapeHtml(g.teacher_name)} — ${subjectsDisplay(lang, g.subject)}</strong></div></a>`
+            `<${unassignedTag} class="card"${canEdit ? ` href="/admin/groups/${g.id}/edit${langQs}"` : ""}><div><strong>${escapeHtml(g.teacher_name)} — ${subjectsDisplay(lang, g.subject)}</strong></div></${unassignedTag}>`
           ).join("")
         : "";
 
@@ -2341,7 +2365,7 @@ export default {
           ${tiles}
         </div>
         ${unassignedHtml}`;
-      return new Response(page(t.title, body, { lang, toggleHref: toggleHref(url, lang), isOwner: true }), { headers: { "content-type": "text/html;charset=utf-8" } });
+      return new Response(page(t.title, body, { lang, toggleHref: toggleHref(url, lang), isOwner: canEdit }), { headers: { "content-type": "text/html;charset=utf-8" } });
     }
 
     const LEDGER_I18N = {

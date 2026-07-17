@@ -1702,9 +1702,46 @@ describe("/admin/groups: structured day/start_time/end_time + edit route (added 
 });
 
 describe("/admin/schedule: weekly grid across halls (added 2026-07-16)", () => {
-  it("blocks unauthenticated and clerk access", async () => {
+  it("blocks unauthenticated access but allows a clerk to view (view/edit split added 2026-07-17)", async () => {
     expect((await SELF.fetch("https://example.com/admin/schedule")).status).toBe(403);
-    expect((await clerkFetch("https://example.com/admin/schedule")).status).toBe(403);
+    expect((await clerkFetch("https://example.com/admin/schedule")).status).toBe(200);
+  });
+
+  it("a clerk sees the schedule read-only: no create-cell '+' links, no clickable edit-links on tiles or the unassigned list -- same badges/info either way", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-clerkview', 'أ. عرض موظف', 'math')").run();
+    const room = (await env.DB.prepare("SELECT id FROM rooms ORDER BY id LIMIT 1").first()) as any;
+    await env.DB.prepare(
+      "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES ('t-sched-clerkview', 'أ. عرض موظف', 'math', 'sat', '17:00', '19:00', ?, 1)"
+    ).bind(room.id).run();
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-clerkview-nohall', 'أ. عرض بلا قاعة', 'math')").run();
+    await env.DB.prepare(
+      "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES ('t-sched-clerkview-nohall', 'أ. عرض بلا قاعة', 'math', 'sun', '17:00', '19:00', NULL, 1)"
+    ).run();
+
+    const clerkHtml = await (await clerkFetch(`https://example.com/admin/schedule?hall=${room.id}`)).text();
+    expect(clerkHtml).not.toContain("/admin/groups/new?hall=");
+    expect(clerkHtml).not.toContain("href=\"/admin/groups/");
+    expect(clerkHtml).toContain("أ. عرض موظف");
+    expect(clerkHtml).not.toContain("⚙️ إدارة"); // canEdit=false also flows into isOwner for the nav
+
+    const ownerHtml = await (await adminFetch(`https://example.com/admin/schedule?hall=${room.id}`)).text();
+    expect(ownerHtml).toContain("/admin/groups/new?hall=");
+    expect(ownerHtml).toContain(`href="/admin/groups/`);
+
+    // "no hall" group has a real day/time, so it lives in the General tab
+    // (flagged, needs a hall) -- not the flat "no time at all" unassigned list.
+    const clerkGeneralHtml = await (await clerkFetch("https://example.com/admin/schedule?hall=general")).text();
+    expect(clerkGeneralHtml).toContain("أ. عرض بلا قاعة");
+    expect(clerkGeneralHtml).not.toContain("href=\"/admin/groups/");
+  });
+
+  it("the persistent nav shows 🗓️ الجدول to both owner and clerk, but ⚙️ إدارة only to the owner", async () => {
+    const ownerHtml = await (await adminFetch("https://example.com/admin/intake")).text();
+    expect(ownerHtml).toContain("🗓️ الجدول");
+    expect(ownerHtml).toContain("⚙️ إدارة");
+    const clerkHtml = await (await clerkFetch("https://example.com/admin/intake")).text();
+    expect(clerkHtml).toContain("🗓️ الجدول");
+    expect(clerkHtml).not.toContain("⚙️ إدارة");
   });
 
   it("renders 7 day headers, 17 hour labels, and a tab per real hall", async () => {
@@ -3289,5 +3326,29 @@ describe("/public/roster: resolves a blob-photo teacher to /public/teachers/:id/
     const body = await (await SELF.fetch("https://example.com/public/roster")).json() as any;
     const t = body.teachers.find((x: any) => x.id === "roster-test-1");
     expect(t.photo).toBe("teachers/roster-test.jpg");
+  });
+});
+
+describe("getTeacherAvailability chunking (fixed 2026-07-17, real bug: this shared-D1 test suite's own cumulative teacher count was tripping SQLite's ~999 bound-parameter limit on the old single unchunked IN(...) query)", () => {
+  it("looks up availability correctly for a teacher list spanning more than one 500-item chunk", async () => {
+    // Literal multi-row VALUES (no bound params) so this test's own setup
+    // can't hit the very limit it's exercising -- ids are test-generated,
+    // not user input, so string interpolation here is safe.
+    const n = 600;
+    const teacherRows = Array.from({ length: n }, (_, i) => `('chunk-test-${i}','Chunk Teacher ${i}','math')`).join(",");
+    const availRows = Array.from({ length: n }, (_, i) => `('chunk-test-${i}','sat','10:00','11:00')`).join(",");
+    await env.DB.prepare(`INSERT INTO teachers (id, name, subject) VALUES ${teacherRows}`).run();
+    await env.DB.prepare(`INSERT INTO teacher_availability (teacher_id, day_of_week, start_time, end_time) VALUES ${availRows}`).run();
+
+    const res = await SELF.fetch("https://example.com/public/roster");
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    // One id from the first chunk, one from the second -- both must resolve
+    // correctly, proving the per-chunk results merged rather than the second
+    // chunk's query silently never running or overwriting the first's.
+    const first = body.teachers.find((t: any) => t.id === "chunk-test-0");
+    const last = body.teachers.find((t: any) => t.id === "chunk-test-599");
+    expect(first?.schedule).toContain("10:00");
+    expect(last?.schedule).toContain("10:00");
   });
 });
