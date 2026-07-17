@@ -248,6 +248,16 @@ const SUBJECT_EN_COUSINS = [
 
 const KNOWN_SUBJECT_SLUGS = new Set([...SUBJECTS.map(s => s.v), ...SUBJECT_EN_COUSINS.map(s => s.v)]);
 
+// Schedule-tile-only shorthand (see subjectEmoji() below) -- one glance to
+// tell two same-named teachers apart, without spelling out the full subject
+// name in an already-tight tile. -en cousins share their base subject's icon.
+const SUBJECT_EMOJI = {
+  arabic: "📕", english: "📘", french: "🇫🇷", german: "🇩🇪", italian: "🇮🇹",
+  math: "📐", physics: "⚛️", chemistry: "🧪", biology: "🧬", geology: "🪨",
+  statistics: "📊", history: "🏛️", geography: "🌍", philosophy: "🦉",
+  accounting: "🧮", business: "💼", programming: "💻", psychology: "🧠"
+};
+
 // UI-only grouping for subjectsCheckboxes() below — every SUBJECTS slug appears
 // in exactly one group (18 total: 5+6+4+3), matching common Egyptian secondary
 // curriculum clusters. Purely a rendering/chunking change (mom-test cognitive-load
@@ -532,6 +542,10 @@ function stageRadios(lang, selectedValue) {
 
 function baseSubject(slug) {
   return slug.endsWith("-en") ? slug.slice(0, -3) : slug;
+}
+
+function subjectEmoji(slug) {
+  return SUBJECT_EMOJI[baseSubject(slug)] || "📚";
 }
 
 async function getTeachersForSubjects(env, subjectsCsv, lang) {
@@ -1203,6 +1217,7 @@ export default {
         sessionCta: "▶️ أثناء الحصة", counterCta: "📷 السكانر",
         walkInTitle: "🆕 طالب جديد وصل دلوقتي", walkInName: "الاسم", walkInNamePh: "اسم الطالب",
         walkInClass: "الصف (اختياري)", walkInClassPh: "-- اختر الصف --", walkInSubmit: "ابدأ التسجيل ←",
+        walkInOr: "أو", walkInSelfReg: "خليه يمسح الكود ده ويسجل بياناته بنفسه من موبايله",
         hint: "الصفحة دي بوابتك اليومية: دوس \"أثناء الحصة\" وانت جوه المجموعة، أو افتح \"طالب جديد وصل دلوقتي\" تحت لو حد وصل. محتاج تفاصيل أكتر؟ دوس ❓ تحت يمين وقت ما تحتاجها."
       },
       en: {
@@ -1213,6 +1228,7 @@ export default {
         sessionCta: "▶️ In Session", counterCta: "📷 Scanner",
         walkInTitle: "🆕 A student just walked in", walkInName: "Name", walkInNamePh: "Student's name",
         walkInClass: "Grade (optional)", walkInClassPh: "-- Pick a grade --", walkInSubmit: "Start registration ←",
+        walkInOr: "or", walkInSelfReg: "let them scan this and fill in their own info from their phone",
         hint: "This is your daily starting point: tap \"In Session\" once you're in class, or open \"A student just walked in\" below if someone shows up. Need more detail? Tap ❓ in the corner any time."
       }
     };
@@ -1323,11 +1339,11 @@ export default {
         </select>
         <button type="submit">${t.addSubmit}</button>
       </form>`;
-      // A new walk-in can scan this straight into /register on their own
-      // phone instead of staff reading the URL aloud -- reuses the existing
-      // qrSvg() helper (already used for the daily attendance QR elsewhere),
-      // no new dependency.
-      const regLink = `<div class="reg-link">${t.regLink}<br><a href="${url.origin}/register">${url.origin}/register</a>${qrSvg(`${url.origin}/register`)}</div>`;
+      // The scannable version of this link lives on /admin/intake's "طالب
+      // جديد وصل دلوقتي" walk-in panel instead -- that's the page staff
+      // actually opens when a new student physically arrives, so the QR
+      // belongs there, not buried on the full roster page.
+      const regLink = `<div class="reg-link">${t.regLink}<br><a href="${url.origin}/register">${url.origin}/register</a></div>`;
       // Client-side name filter (2026-07-16, full-app reassessment): with the
       // roster's flat, unpaginated card list growing over multiple semesters,
       // scrolling to find one student was a real cognitive-load problem — the
@@ -1379,6 +1395,8 @@ export default {
           </select>
           <button type="submit">${t.walkInSubmit}</button>
         </form>
+        <p style="text-align:center;color:#5A6784;font-size:14px;margin:16px 0 8px">— ${t.walkInOr} —</p>
+        <div class="reg-link" style="text-align:center">${qrSvg(`${url.origin}/register`)}<p style="margin:8px 0 0">${t.walkInSelfReg}</p></div>
       </details>
       <details class="dash-card"${pendingCount.n ? " open" : ""}>
         <summary>${t.pendingTitle}${pendingCount.n ? ` (${pendingCount.n})` : ""}</summary>
@@ -2232,8 +2250,8 @@ export default {
     }
 
     const SCHEDULE_I18N = {
-      ar: { title: "الجدول", noRooms: "لسه معملتش أي قاعة. ابدأ من صفحة القاعات.", unassignedTitle: "مجموعات بدون ميعاد", conflict: "⚠️ تضارب", generalTab: "العام", noHallBadge: "⚠️ محتاج قاعة", weeklyBadge: "×٢ أسبوعيًا" },
-      en: { title: "Schedule", noRooms: "No halls yet — add one from the Rooms page first.", unassignedTitle: "Groups with no time set", conflict: "⚠️ Conflict", generalTab: "General", noHallBadge: "⚠️ Needs a hall", weeklyBadge: "×2 weekly" }
+      ar: { title: "الجدول", noRooms: "لسه معملتش أي قاعة. ابدأ من صفحة القاعات.", unassignedTitle: "مجموعات بدون ميعاد", conflict: "⚠️ تضارب", generalTab: "العام", noHallBadge: "محتاج قاعة", noHallLegend: "🔺 = محتاج قاعة", weeklyBadge: "×٢ أسبوعيًا" },
+      en: { title: "Schedule", noRooms: "No halls yet — add one from the Rooms page first.", unassignedTitle: "Groups with no time set", conflict: "⚠️ Conflict", generalTab: "General", noHallBadge: "Needs a hall", noHallLegend: "🔺 = needs a hall", weeklyBadge: "×2 weekly" }
     };
 
     // Business hours are hourly rows (07:00-23:00, 17 rows); a group's time is
@@ -2327,11 +2345,20 @@ export default {
         // nothing to click through to a 403 on.
         const tileTag = canEdit ? "a" : "div";
         const tileHref = canEdit ? ` href="/admin/groups/${g.id}/edit${langQs}"` : "";
+        // Subject shown as a single emoji, not the full name -- staff already
+        // know their own roster by name/face, so this exists purely to tell
+        // two same-named teachers apart at a glance. The old "⚠️ محتاج قاعة"
+        // text badge became a bare 🔺 (hover title for a reminder, legend
+        // once near the tab row below) -- decluttering, not losing the info.
+        // Both badge rows now sit on one line instead of stacking, since a
+        // tile is often only ~44px wide in General's multi-hall layout.
+        const badges = [
+          hasConflict ? `<span class="sched-conflict-badge">${t.conflict}</span>` : "",
+          hasWeeklyBadge ? `<span class="sched-weekly-badge">${t.weeklyBadge}</span>` : ""
+        ].filter(Boolean).join("");
         return `<${tileTag} class="sched-tile${hasConflict ? " sched-tile--conflict" : ""}" style="grid-column:${dIdx + 2};grid-row:${startRow}/${endRow};${laneStyle}"${tileHref}>
-          ${hasConflict ? `<span class="sched-conflict-badge">${t.conflict}</span>` : ""}
-          ${!g.room_id ? `<span class="sched-nohall-badge">${t.noHallBadge}</span>` : ""}
-          ${hasWeeklyBadge ? `<span class="sched-weekly-badge">${t.weeklyBadge}</span>` : ""}
-          <strong>${escapeHtml(g.teacher_name)}</strong>${g.stage ? `<br><span class="sched-stage">${escapeHtml(g.stage)}</span>` : ""}<br>${isGeneral && g.room_name ? `🚪 ${escapeHtml(g.room_name)}<br>` : ""}${subjectsDisplay(lang, g.subject)}<br>
+          ${badges ? `<div class="sched-badges">${badges}</div>` : ""}
+          <strong>${escapeHtml(g.teacher_name)}</strong> ${subjectEmoji(g.subject)}${!g.room_id ? ` <span class="sched-nohall-badge" title="${t.noHallBadge}">🔺</span>` : ""}${g.stage ? `<br><span class="sched-stage">${escapeHtml(g.stage)}</span>` : ""}${isGeneral && g.room_name ? `<br>🚪 ${escapeHtml(g.room_name)}` : ""}<br>
           <small>${g.start_time}–${g.end_time} · ${escapeHtml(seatsLabel)}</small>
         </${tileTag}>`;
       }).join("");
@@ -2347,20 +2374,23 @@ export default {
         .sched-tabs{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
         .sched-tab{padding:10px 16px;border-radius:999px;background:var(--surface);border:2px solid var(--line);color:var(--ink);text-decoration:none;font-weight:600}
         .sched-tab.active{border-color:var(--red);background:#FFF5F5;color:var(--red)}
-        .sched-grid{display:grid;grid-template-columns:56px repeat(7,minmax(${isGeneral ? 220 : 90}px,1fr));grid-template-rows:auto repeat(17,44px);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:auto;margin-bottom:24px}
+        .sched-grid{display:grid;grid-template-columns:56px repeat(7,minmax(${isGeneral ? 90 * lanes : 90}px,1fr));grid-template-rows:auto repeat(17,44px);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:auto;margin-bottom:24px}
         .sched-daylabel{grid-row:1;background:var(--surface);padding:8px 4px;text-align:center;font-weight:700;font-size:13px;position:sticky;top:0}
         .sched-hourlabel{grid-column:1;background:var(--surface);padding:4px;text-align:center;font-size:12px;color:#5A6784}
         .sched-cell{background:var(--paper);color:var(--line);text-decoration:none;display:flex;align-items:center;justify-content:center;font-size:14px}
         .sched-cell:hover{background:var(--line-soft);color:var(--red)}
         .sched-tile{background:var(--surface);border:2px solid var(--ink);border-radius:6px;padding:4px 6px;font-size:12px;line-height:1.3;color:var(--ink);text-decoration:none;overflow:hidden;z-index:1;position:relative}
         .sched-tile--conflict{border-color:var(--red);box-shadow:0 0 0 2px var(--red) inset}
-        .sched-conflict-badge{color:var(--red);font-weight:700;display:block}
-        .sched-nohall-badge{color:var(--red);font-weight:700;display:block}
-        .sched-weekly-badge{color:#5A6784;font-weight:700;display:block}
+        .sched-badges{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:2px}
+        .sched-conflict-badge{color:var(--red);font-weight:700}
+        .sched-nohall-badge{cursor:help}
+        .sched-weekly-badge{color:#5A6784;font-weight:700}
         .sched-stage{color:#5A6784;font-size:11px}
+        .sched-legend{font-size:13px;color:#5A6784;margin:-8px 0 16px}
       </style>`;
 
       const body = `${gridStyle}<div class="sched-tabs">${tabs}</div>
+        ${isGeneral ? `<p class="sched-legend">${t.noHallLegend}</p>` : ""}
         <div class="sched-grid">
           <div style="grid-column:1;grid-row:1;background:var(--surface)"></div>
           ${dayHeaders}
