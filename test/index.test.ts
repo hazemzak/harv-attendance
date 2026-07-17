@@ -104,6 +104,28 @@ describe("/admin/intake: walk-in self-registration QR (moved here 2026-07-17, ne
   });
 });
 
+describe("/admin/intake: walk-in send-registration-link-on-WhatsApp (added 2026-07-17)", () => {
+  it("offers a third walk-in path -- a phone number field + button that opens a wa.me link to /register", async () => {
+    const html = await (await adminFetch("https://example.com/admin/intake")).text();
+    const walkInPanelMatch = /طالب جديد وصل دلوقتي[\s\S]*?<\/details>/.exec(html);
+    expect(walkInPanelMatch, "walk-in panel should exist").toBeTruthy();
+    const panel = walkInPanelMatch![0];
+    expect(panel).toContain('id="walkin-wa-phone"');
+    // The handler must be a real named function in a <script> block, not a
+    // dynamic message string interpolated straight into the onclick="..."
+    // attribute -- JSON.stringify()'s own double quotes would prematurely
+    // close that attribute and truncate the handler (caught before shipping:
+    // an earlier draft did exactly this, silently breaking the button while
+    // still passing a weaker version of this same test).
+    expect(panel).toContain('onclick="sendWalkinWa()"');
+    expect(panel).toContain("function sendWalkinWa()");
+    expect(panel).toContain("wa.me");
+    // The message text (server-rendered, JSON-escaped into the script body)
+    // must point at this same origin's /register, not a hardcoded domain.
+    expect(panel).toContain("https://example.com/register");
+  });
+});
+
 describe("subjects: stored-XSS regression (found by claude-review on PR #3, fixed 2026-07-10)", () => {
   it("escapes a malicious subjects value on the admin roster instead of rendering it raw", async () => {
     await insertStudent({

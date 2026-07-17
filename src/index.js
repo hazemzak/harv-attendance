@@ -1242,6 +1242,8 @@ export default {
         walkInTitle: "🆕 طالب جديد وصل دلوقتي", walkInName: "الاسم", walkInNamePh: "اسم الطالب",
         walkInClass: "الصف (اختياري)", walkInClassPh: "-- اختر الصف --", walkInSubmit: "ابدأ التسجيل ←",
         walkInOr: "أو", walkInSelfReg: "خليه يمسح الكود ده ويسجل بياناته بنفسه من موبايله",
+        walkInWaPh: "رقم واتسابه (01xxxxxxxxx)", walkInWaBtn: "📤 ابعتله لينك التسجيل على واتساب",
+        walkInWaMsg: link => `أهلاً 👋 اتفضل سجل بياناتك في هارف من اللينك ده: ${link}`,
         hint: "الصفحة دي بوابتك اليومية: دوس \"أثناء الحصة\" وانت جوه المجموعة، أو افتح \"طالب جديد وصل دلوقتي\" تحت لو حد وصل. محتاج تفاصيل أكتر؟ دوس ❓ تحت يمين وقت ما تحتاجها."
       },
       en: {
@@ -1253,6 +1255,8 @@ export default {
         walkInTitle: "🆕 A student just walked in", walkInName: "Name", walkInNamePh: "Student's name",
         walkInClass: "Grade (optional)", walkInClassPh: "-- Pick a grade --", walkInSubmit: "Start registration ←",
         walkInOr: "or", walkInSelfReg: "let them scan this and fill in their own info from their phone",
+        walkInWaPh: "Their WhatsApp number (01xxxxxxxxx)", walkInWaBtn: "📤 Send them the registration link on WhatsApp",
+        walkInWaMsg: link => `Hi 👋 register with Harv here: ${link}`,
         hint: "This is your daily starting point: tap \"In Session\" once you're in class, or open \"A student just walked in\" below if someone shows up. Need more detail? Tap ❓ in the corner any time."
       }
     };
@@ -1421,6 +1425,19 @@ export default {
         </form>
         <p style="text-align:center;color:#5A6784;font-size:14px;margin:16px 0 8px">— ${t.walkInOr} —</p>
         <div class="reg-link" style="text-align:center">${qrSvg(`${url.origin}/register`)}<p style="margin:8px 0 0">${t.walkInSelfReg}</p></div>
+        <p style="text-align:center;color:#5A6784;font-size:14px;margin:16px 0 8px">— ${t.walkInOr} —</p>
+        <label>${t.walkInWaPh}</label>
+        <input id="walkin-wa-phone" type="tel" placeholder="01xxxxxxxxx">
+        <button type="button" class="wa-btn" onclick="sendWalkinWa()">${t.walkInWaBtn}</button>
+        <script>
+          function sendWalkinWa() {
+            var digits = document.getElementById('walkin-wa-phone').value.replace(/\D/g, '');
+            if (!digits) return;
+            var intl = digits.indexOf('0') === 0 ? '20' + digits.slice(1) : (digits.indexOf('20') === 0 ? digits : '20' + digits);
+            var msg = ${JSON.stringify(t.walkInWaMsg(`${url.origin}/register`))};
+            window.open('https://wa.me/' + intl + '?text=' + encodeURIComponent(msg), '_blank');
+          }
+        </script>
       </details>
       <details class="dash-card"${pendingCount.n ? " open" : ""}>
         <summary>${t.pendingTitle}${pendingCount.n ? ` (${pendingCount.n})` : ""}</summary>
