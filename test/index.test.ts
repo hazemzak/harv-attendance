@@ -2015,6 +2015,64 @@ describe("/admin/schedule: weekly grid across halls (added 2026-07-16)", () => {
       expect(tile?.[2]).not.toContain("محتاج قاعة</span>");
     });
   });
+
+  describe("overlapping tiles in the same lane split its width side by side instead of rendering on top of each other (added 2026-07-17, real bug from a screenshot: several hall-less groups at the same time all landed in the same cell)", () => {
+    it("gives each of 3 same-time, same-lane (hall-less) groups its own width/offset slice, none identical to another", async () => {
+      for (const id of ["t-overlap-1", "t-overlap-2", "t-overlap-3"]) {
+        await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES (?, ?, 'math')").bind(id, `أ. ${id}`).run();
+        await env.DB.prepare(
+          "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES (?, ?, 'math', 'sat', '17:00', '18:00', NULL, 1)"
+        ).bind(id, `أ. ${id}`).run();
+      }
+      const html = await (await adminFetch("https://example.com/admin/schedule?hall=general")).text();
+      const tiles = ["t-overlap-1", "t-overlap-2", "t-overlap-3"].map(id => {
+        const m = [...html.matchAll(/<a class="(sched-tile[^"]*)" style="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].find(t => t[3].includes(`أ. ${id}`));
+        return m?.[2];
+      });
+      expect(tiles.every(Boolean)).toBe(true);
+      // Every style string must be distinct -- that's what actually prevents
+      // visual stacking (same grid-column/row is fine, same width+offset is not).
+      expect(new Set(tiles).size).toBe(3);
+    });
+
+    it("does not change layout for the common case (no overlap in a lane) -- behaves exactly as before", async () => {
+      // A fresh, dedicated room -- this suite's shared local D1 accumulates
+      // groups across hundreds of tests in one run, so reusing an existing
+      // room/time risks a real (unrelated) overlap already sitting there.
+      const { meta } = await env.DB.prepare("INSERT INTO rooms (name) VALUES ('قاعة اختبار بدون تداخل')").run();
+      const roomId = meta.last_row_id;
+      await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-nooverlap', 'أ. بدون تداخل', 'math')").run();
+      await env.DB.prepare(
+        "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES ('t-nooverlap', 'أ. بدون تداخل', 'math', 'sun', '10:00', '11:00', ?, 1)"
+      ).bind(roomId).run();
+      const html = await (await adminFetch(`https://example.com/admin/schedule?hall=${roomId}`)).text();
+      const tile = [...html.matchAll(/<a class="(sched-tile[^"]*)" style="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].find(t => t[3].includes("أ. بدون تداخل"));
+      // A real hall tab with no conflicting overlap gets no width/offset
+      // styling at all -- same as before this change.
+      expect(tile?.[2]).not.toContain("width:");
+    });
+  });
+
+  describe("sticky hour column + corner, and per-lane hall labels under each day header on General (added 2026-07-17, from Hazem losing track of the time/hall while scrolling)", () => {
+    it("the hour column and the top-left corner are sticky so the current hour stays visible while scrolling horizontally", async () => {
+      const html = await (await adminFetch("https://example.com/admin/schedule?hall=general")).text();
+      expect(html).toContain(".sched-hourlabel{grid-column:1;background:var(--surface);padding:4px;text-align:center;font-size:12px;color:#5A6784;position:sticky;inset-inline-start:0");
+      expect(html).toContain(".sched-corner{position:sticky;top:0;inset-inline-start:0");
+    });
+
+    it("General's day headers show one small label per lane (every real hall + a hall-less label), a real hall tab does not", async () => {
+      const generalHtml = await (await adminFetch("https://example.com/admin/schedule?hall=general")).text();
+      const rooms = (await env.DB.prepare("SELECT name FROM rooms ORDER BY id").all()).results as any[];
+      for (const r of rooms) expect(generalHtml).toContain(`<span class="sched-lane-label"`);
+      expect((generalHtml.match(/sched-lane-label/g) || []).length).toBeGreaterThanOrEqual((rooms.length + 1) * 7); // ×7 days
+
+      const room = (await env.DB.prepare("SELECT id FROM rooms ORDER BY id LIMIT 1").first()) as any;
+      const hallHtml = await (await adminFetch(`https://example.com/admin/schedule?hall=${room.id}`)).text();
+      // ".sched-lane-label{...}" is always present in the page's own <style>
+      // block regardless of any real lane label -- check for the rendered tag.
+      expect(hallHtml).not.toContain('class="sched-lane-label"');
+    });
+  });
 });
 
 describe("bookings: group_id linkage + drop/transfer lifecycle (added 2026-07-13)", () => {
