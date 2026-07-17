@@ -487,6 +487,30 @@ function computeGroupConflicts(groups) {
   return byId;
 }
 
+// Standard calendar-view overlap packing (same idea as Google Calendar's day
+// view): within one lane, several groups can share overlapping day/time --
+// most visibly the "no hall" lane in General, since nothing stops several
+// legacy-backfilled or newly-added groups from landing at the same slot with
+// no hall to keep them apart. Without this they render in the exact same
+// grid cell and visually stack directly on top of each other. Greedy
+// column assignment (sort by start time, reuse the first column whose last
+// tile has already ended, else open a new one) gives every tile in a
+// mutually-overlapping cluster an equal fraction of the lane's width -- not
+// pixel-optimal for partial overlaps, but it guarantees no more overlap.
+function packOverlaps(items) {
+  const sorted = [...items].sort((a, b) => a.start_time.localeCompare(b.start_time));
+  const columnEnds = []; // last end_time occupying each column
+  const colOf = new Map();
+  for (const it of sorted) {
+    let col = columnEnds.findIndex(end => end <= it.start_time);
+    if (col === -1) { col = columnEnds.length; columnEnds.push(it.end_time); }
+    else columnEnds[col] = it.end_time;
+    colOf.set(it.id, col);
+  }
+  const totalCols = columnEnds.length || 1;
+  return { colOf, totalCols };
+}
+
 const PAYMENT_METHODS = {
   cash: { ar: "كاش", en: "Cash" },
   instapay: { ar: "إنستاباي", en: "InstaPay" },
@@ -2310,7 +2334,19 @@ export default {
         ...rooms.map(r => `<a class="sched-tab${!isGeneral && r.id === currentHall.id ? " active" : ""}" href="/admin/schedule?hall=${r.id}${langQs.replace("?", "&")}">${escapeHtml(r.name)}</a>`)
       ].join("");
 
-      const dayHeaders = DAYS_OF_WEEK.map((d, i) => `<div class="sched-daylabel" style="grid-column:${i + 2}">${lang === "en" ? d.en : d.ar}</div>`).join("");
+      // General mode can stack up to (every hall + one "no hall" lane) tiles
+      // in the same day/hour cell -- narrow each tile to its own lane via
+      // width+offset instead of restructuring the grid's own columns.
+      const lanes = rooms.length + 1; // + the "no hall" lane
+      const laneWidth = 100 / lanes;
+      // Hazem: scrolling right in General lost track of which hall a lane
+      // belongs to, since only individual tiles ever named their room. A
+      // small sticky sub-label row under each day name, one per lane, fixes
+      // that the same way the day name itself stays visible on scroll.
+      const laneLabels = isGeneral
+        ? `<div class="sched-lane-labels">${rooms.map(r => `<span class="sched-lane-label" style="width:${laneWidth}%">${escapeHtml(r.name)}</span>`).join("")}<span class="sched-lane-label" style="width:${laneWidth}%">${t.noHallBadge}</span></div>`
+        : "";
+      const dayHeaders = DAYS_OF_WEEK.map((d, i) => `<div class="sched-daylabel" style="grid-column:${i + 2}">${lang === "en" ? d.en : d.ar}${laneLabels}</div>`).join("");
       const hourLabels = Array.from({ length: 17 }, (_, i) => `<div class="sched-hourlabel" style="grid-row:${i + 2}">${String(i + 7).padStart(2, "0")}:00</div>`).join("");
       // General is read-only (confirmed with Hazem: assigning a hall still
       // happens via the group edit form or a real hall tab) -- there's no
@@ -2324,11 +2360,21 @@ export default {
           }
         }
       }
-      // General mode can stack up to (every hall + one "no hall" lane) tiles
-      // in the same day/hour cell -- narrow each tile to its own lane via
-      // width+offset instead of restructuring the grid's own columns.
-      const lanes = rooms.length + 1; // + the "no hall" lane
-      const laneWidth = 100 / lanes;
+      // Within a single lane, several groups can still genuinely overlap in
+      // time (real screenshot from Hazem: 4 hall-less legacy-backfilled
+      // groups landing on the same slot, rendering directly on top of each
+      // other) -- pack each (day, lane) bucket separately so overlapping
+      // tiles split that lane's width instead of overlapping.
+      const packByBucket = new Map(); // "day|lane" -> {colOf, totalCols}
+      for (const g of hallGroups) {
+        const laneIdx = isGeneral ? (g.room_id ? rooms.findIndex(r => r.id === g.room_id) : rooms.length) : 0;
+        const key = `${g.day}|${laneIdx}`;
+        if (!packByBucket.has(key)) packByBucket.set(key, []);
+        packByBucket.get(key).push(g);
+      }
+      const packResults = new Map(); // key -> packOverlaps() result
+      for (const [key, items] of packByBucket) packResults.set(key, packOverlaps(items));
+
       const tiles = hallGroups.map(g => {
         const dIdx = DAYS_OF_WEEK.findIndex(d => d.v === g.day);
         if (dIdx === -1) return "";
@@ -2337,8 +2383,12 @@ export default {
         const hasConflict = conflicts.has(g.id);
         const hasWeeklyBadge = g.series_key && seriesKeyCounts.get(g.series_key) > 1;
         const seatsLabel = Number.isFinite(g.capacity) ? `${g.enrolled}/${g.capacity}` : `${g.enrolled}`;
-        const laneIdx = isGeneral ? (g.room_id ? rooms.findIndex(r => r.id === g.room_id) : rooms.length) : -1;
-        const laneStyle = isGeneral ? `width:${laneWidth}%;margin-inline-start:${laneIdx * laneWidth}%;` : "";
+        const laneIdx = isGeneral ? (g.room_id ? rooms.findIndex(r => r.id === g.room_id) : rooms.length) : 0;
+        const { colOf, totalCols } = packResults.get(`${g.day}|${laneIdx}`);
+        const col = colOf.get(g.id);
+        const subWidth = (isGeneral ? laneWidth : 100) / totalCols;
+        const subOffset = (isGeneral ? laneIdx * laneWidth : 0) + col * subWidth;
+        const laneStyle = (isGeneral || totalCols > 1) ? `width:${subWidth}%;margin-inline-start:${subOffset}%;` : "";
         // canEdit=false swaps the tile from a clickable edit-link to a plain
         // div -- inner content is identical either way, only the wrapping
         // tag/href changes, so a clerk sees the exact same badges/info with
@@ -2375,8 +2425,11 @@ export default {
         .sched-tab{padding:10px 16px;border-radius:999px;background:var(--surface);border:2px solid var(--line);color:var(--ink);text-decoration:none;font-weight:600}
         .sched-tab.active{border-color:var(--red);background:#FFF5F5;color:var(--red)}
         .sched-grid{display:grid;grid-template-columns:56px repeat(7,minmax(${isGeneral ? 90 * lanes : 90}px,1fr));grid-template-rows:auto repeat(17,44px);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:auto;margin-bottom:24px}
-        .sched-daylabel{grid-row:1;background:var(--surface);padding:8px 4px;text-align:center;font-weight:700;font-size:13px;position:sticky;top:0}
-        .sched-hourlabel{grid-column:1;background:var(--surface);padding:4px;text-align:center;font-size:12px;color:#5A6784}
+        .sched-daylabel{grid-row:1;background:var(--surface);padding:8px 4px;text-align:center;font-weight:700;font-size:13px;position:sticky;top:0;z-index:2}
+        .sched-lane-labels{display:flex;margin-top:4px}
+        .sched-lane-label{font-size:10px;font-weight:600;color:#5A6784;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .sched-hourlabel{grid-column:1;background:var(--surface);padding:4px;text-align:center;font-size:12px;color:#5A6784;position:sticky;inset-inline-start:0;z-index:1}
+        .sched-corner{position:sticky;top:0;inset-inline-start:0;z-index:3;background:var(--surface)}
         .sched-cell{background:var(--paper);color:var(--line);text-decoration:none;display:flex;align-items:center;justify-content:center;font-size:14px}
         .sched-cell:hover{background:var(--line-soft);color:var(--red)}
         .sched-tile{background:var(--surface);border:2px solid var(--ink);border-radius:6px;padding:4px 6px;font-size:12px;line-height:1.3;color:var(--ink);text-decoration:none;overflow:hidden;z-index:1;position:relative}
@@ -2392,7 +2445,7 @@ export default {
       const body = `${gridStyle}<div class="sched-tabs">${tabs}</div>
         ${isGeneral ? `<p class="sched-legend">${t.noHallLegend}</p>` : ""}
         <div class="sched-grid">
-          <div style="grid-column:1;grid-row:1;background:var(--surface)"></div>
+          <div class="sched-corner" style="grid-column:1;grid-row:1"></div>
           ${dayHeaders}
           ${hourLabels}
           ${cells.join("")}
