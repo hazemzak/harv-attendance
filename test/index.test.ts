@@ -1954,6 +1954,19 @@ describe("/admin/schedule: weekly grid across halls (added 2026-07-16)", () => {
       const tile = [...html.matchAll(/<a class="(sched-tile[^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].find(m => m[2].includes("أ. بدون مرحلة"));
       expect(tile?.[2]).not.toContain("sched-stage");
     });
+
+    it("combines stage and room onto one line on General (not two separate lines) -- a short tile has limited vertical room (added 2026-07-17)", async () => {
+      await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-density', 'أ. كثافة', 'math')").run();
+      const room = (await env.DB.prepare("SELECT id, name FROM rooms ORDER BY id LIMIT 1").first()) as any;
+      await env.DB.prepare(
+        "INSERT INTO groups (teacher_id, teacher_name, subject, stage, day, start_time, end_time, room_id, active) VALUES ('t-sched-density', 'أ. كثافة', 'math', 'تالتة ثانوي', 'sat', '10:00', '11:00', ?, 1)"
+      ).bind(room.id).run();
+      const html = await (await adminFetch("https://example.com/admin/schedule?hall=general")).text();
+      const tile = [...html.matchAll(/<a class="(sched-tile[^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].find(m => m[2].includes("أ. كثافة"));
+      expect(tile?.[2]).toContain(`<span class="sched-stage">تالتة ثانوي · 🚪 ${room.name}</span>`);
+      // Only one sched-stage span, not two separate lines for stage vs room.
+      expect((tile?.[2].match(/sched-stage/g) || []).length).toBe(1);
+    });
   });
 
   describe("subject shown as a single emoji, not the full name (added 2026-07-17)", () => {
