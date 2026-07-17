@@ -1963,6 +1963,24 @@ describe("/admin/schedule: weekly grid across halls (added 2026-07-16)", () => {
       const tile = [...html.matchAll(/<a class="(sched-tile[^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].find(m => m[2].includes("أ. مرة واحدة"));
       expect(tile?.[2]).not.toContain("sched-weekly-badge");
     });
+
+    it("does not show the badge for two different teachers who happen to type the same series_key (claude-review finding on PR #20's re-review)", async () => {
+      await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-series-x', 'أ. مفتاح مشترك اكس', 'math')").run();
+      await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-series-y', 'أ. مفتاح مشترك واي', 'math')").run();
+      const room = (await env.DB.prepare("SELECT id FROM rooms ORDER BY id LIMIT 1").first()) as any;
+      await env.DB.prepare(
+        "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active, series_key) VALUES ('t-sched-series-x', 'أ. مفتاح مشترك اكس', 'math', 'tue', '17:00', '19:00', ?, 1, 'series1')"
+      ).bind(room.id).run();
+      await env.DB.prepare(
+        "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active, series_key) VALUES ('t-sched-series-y', 'أ. مفتاح مشترك واي', 'math', 'wed', '17:00', '19:00', ?, 1, 'series1')"
+      ).bind(room.id).run();
+      const html = await (await adminFetch(`https://example.com/admin/schedule?hall=${room.id}`)).text();
+      const tiles = [...html.matchAll(/<a class="(sched-tile[^"]*)"[^>]*>([\s\S]*?)<\/a>/g)];
+      const tileX = tiles.find(m => m[2].includes("أ. مفتاح مشترك اكس"));
+      const tileY = tiles.find(m => m[2].includes("أ. مفتاح مشترك واي"));
+      expect(tileX?.[2]).not.toContain("sched-weekly-badge");
+      expect(tileY?.[2]).not.toContain("sched-weekly-badge");
+    });
   });
 
   describe("stage (year) shown on the tile itself (added 2026-07-17)", () => {
