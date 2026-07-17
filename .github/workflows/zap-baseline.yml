@@ -1,0 +1,26 @@
+name: ZAP baseline scan
+
+# No staging environment exists for this app, so this runs against the live
+# site. ZAP's "baseline" mode is passive-only (crawls + inspects responses,
+# never attempts SQLi/XSS/auth-bypass payloads), so it's safe to run against
+# production. Weekly + manual, not on every push -- this is a periodic
+# backstop, not a merge gate.
+on:
+  schedule:
+    - cron: "0 5 * * 1"
+  workflow_dispatch: {}
+
+jobs:
+  zap-baseline:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: ZAP baseline scan
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: "https://attendance.harvcentereg.com"
+          cmd_options: "-a"
+          issue_title: "ZAP baseline scan findings"
+          fail_action: false
