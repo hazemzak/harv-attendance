@@ -9,8 +9,8 @@ const LOGO_B64 = "iVBORw0KGgoAAAANSUhEUgAAAPAAAAEKCAYAAAAsK9hZAABNxElEQVR42u29d3
 // as contextual links instead of top-level nav — those routes are unchanged,
 // just no longer all equally weighted in the nav.
 const NAV_I18N = {
-  ar: { home: "🏠 الرئيسية", session: "▶️ أثناء الحصة", owner: "⚙️ إدارة", guide: "📖 دليل الموظفين", brand: "هارف · تسجيل الحضور" },
-  en: { home: "🏠 Home", session: "▶️ In Session", owner: "⚙️ Management", guide: "📖 Staff Guide", brand: "Harv · Attendance" }
+  ar: { home: "🏠 الرئيسية", session: "▶️ أثناء الحصة", schedule: "🗓️ الجدول", owner: "⚙️ إدارة", guide: "📖 دليل الموظفين", brand: "هارف · تسجيل الحضور" },
+  en: { home: "🏠 Home", session: "▶️ In Session", schedule: "🗓️ Schedule", owner: "⚙️ Management", guide: "📖 Staff Guide", brand: "Harv · Attendance" }
 };
 
 function langOf(url) {
@@ -200,7 +200,7 @@ ${LOGO_B64 ? `<img src="data:image/png;base64,${LOGO_B64}" alt="Harv">` : ""}
 </a>
 ${toggle ? `<a class="lang-switch" href="${toggle}">${lang === "en" ? "العربية" : "English"}</a>` : ""}
 </header>
-${nav ? `<nav><a href="/admin/intake${lang === "en" ? "?lang=en" : ""}">${n.home}</a><a href="/admin/session${lang === "en" ? "?lang=en" : ""}">${n.session}</a>${isOwner ? `<a href="/admin/owner${lang === "en" ? "?lang=en" : ""}">${n.owner}</a>` : ""}<a href="/admin/guide">${n.guide}</a></nav>` : ""}
+${nav ? `<nav><a href="/admin/intake${lang === "en" ? "?lang=en" : ""}">${n.home}</a><a href="/admin/session${lang === "en" ? "?lang=en" : ""}">${n.session}</a><a href="/admin/schedule${lang === "en" ? "?lang=en" : ""}">${n.schedule}</a>${isOwner ? `<a href="/admin/owner${lang === "en" ? "?lang=en" : ""}">${n.owner}</a>` : ""}</nav><nav><a href="/admin/guide">${n.guide}</a></nav>` : ""}
 <h1>${title}</h1>
 ${body}
 </div>
@@ -565,15 +565,26 @@ async function getAllTeachersGrouped(env, lang) {
 async function getTeacherAvailability(env, ids) {
   const list = [...new Set(ids)].filter(Boolean);
   if (!list.length) return new Map();
-  const placeholders = list.map(() => "?").join(",");
-  const { results } = await env.DB.prepare(
-    `SELECT teacher_id, day_of_week, start_time, end_time, room_id
-       FROM teacher_availability WHERE teacher_id IN (${placeholders}) ORDER BY id`
-  ).bind(...list).all();
   const m = new Map();
-  for (const r of results) {
-    if (!m.has(r.teacher_id)) m.set(r.teacher_id, []);
-    m.get(r.teacher_id).push(r);
+  // Cloudflare D1's actual bound-parameter cap is well under classic
+  // SQLite's desktop 999 default (confirmed empirically: 500 still errored)
+  // -- chunk defensively so a large id list (a real large roster someday, or
+  // in tests a shared D1 instance accumulating rows across hundreds of tests
+  // in one run) can never trip a SQLITE_ERROR here. Each teacher's own rows
+  // stay within one chunk (we chunk the id list, not individual availability
+  // rows), so per-teacher ordering from "ORDER BY id" is unaffected.
+  const CHUNK = 90;
+  for (let i = 0; i < list.length; i += CHUNK) {
+    const chunk = list.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    const { results } = await env.DB.prepare(
+      `SELECT teacher_id, day_of_week, start_time, end_time, room_id
+         FROM teacher_availability WHERE teacher_id IN (${placeholders}) ORDER BY id`
+    ).bind(...chunk).all();
+    for (const r of results) {
+      if (!m.has(r.teacher_id)) m.set(r.teacher_id, []);
+      m.get(r.teacher_id).push(r);
+    }
   }
   return m;
 }
@@ -1312,7 +1323,11 @@ export default {
         </select>
         <button type="submit">${t.addSubmit}</button>
       </form>`;
-      const regLink = `<div class="reg-link">${t.regLink}<br><a href="${url.origin}/register">${url.origin}/register</a></div>`;
+      // A new walk-in can scan this straight into /register on their own
+      // phone instead of staff reading the URL aloud -- reuses the existing
+      // qrSvg() helper (already used for the daily attendance QR elsewhere),
+      // no new dependency.
+      const regLink = `<div class="reg-link">${t.regLink}<br><a href="${url.origin}/register">${url.origin}/register</a>${qrSvg(`${url.origin}/register`)}</div>`;
       // Client-side name filter (2026-07-16, full-app reassessment): with the
       // roster's flat, unpaginated card list growing over multiple semesters,
       // scrolling to find one student was a real cognitive-load problem — the
@@ -2233,13 +2248,19 @@ export default {
     }
 
     if (url.pathname === "/admin/schedule" && request.method === "GET") {
-      if (!roleAllowed(staffRole, ["owner"])) return forbiddenRole();
+      // Viewing is open to any authenticated staff (clerk/viewer included) --
+      // only actual mutation stays owner-gated, at the real enforcement
+      // points (/admin/groups/new, /admin/groups POST, /admin/groups/:id/edit
+      // GET+POST, untouched by this change). canEdit only controls what this
+      // render shows as clickable -- mirrors the isOwnerGuide ? ... : ""
+      // idiom /admin/guide already uses to hide whole blocks from non-owners.
+      const canEdit = roleAllowed(staffRole, ["owner"]);
       const lang = langOf(url);
       const t = SCHEDULE_I18N[lang];
       const langQs = lang === "en" ? "?lang=en" : "";
       const rooms = await getRooms(env);
       if (!rooms.length) {
-        return new Response(page(t.title, `<p class="empty">${t.noRooms}</p>`, { lang, toggleHref: toggleHref(url, lang), isOwner: true }), { headers: { "content-type": "text/html;charset=utf-8" } });
+        return new Response(page(t.title, `<p class="empty">${t.noRooms}</p>`, { lang, toggleHref: toggleHref(url, lang), isOwner: canEdit }), { headers: { "content-type": "text/html;charset=utf-8" } });
       }
       // "general" is a virtual tab spanning every hall at once, plus groups
       // with no hall yet -- distinguished from a real numeric room id before
@@ -2277,7 +2298,7 @@ export default {
       // happens via the group edit form or a real hall tab) -- there's no
       // single hall to pre-fill a "+" create link with here, so it renders none.
       const cells = [];
-      if (!isGeneral) {
+      if (!isGeneral && canEdit) {
         for (let i = 0; i < 17; i++) {
           const hh = `${String(i + 7).padStart(2, "0")}:00`;
           for (let d = 0; d < DAYS_OF_WEEK.length; d++) {
@@ -2300,18 +2321,25 @@ export default {
         const seatsLabel = Number.isFinite(g.capacity) ? `${g.enrolled}/${g.capacity}` : `${g.enrolled}`;
         const laneIdx = isGeneral ? (g.room_id ? rooms.findIndex(r => r.id === g.room_id) : rooms.length) : -1;
         const laneStyle = isGeneral ? `width:${laneWidth}%;margin-inline-start:${laneIdx * laneWidth}%;` : "";
-        return `<a class="sched-tile${hasConflict ? " sched-tile--conflict" : ""}" style="grid-column:${dIdx + 2};grid-row:${startRow}/${endRow};${laneStyle}" href="/admin/groups/${g.id}/edit${langQs}">
+        // canEdit=false swaps the tile from a clickable edit-link to a plain
+        // div -- inner content is identical either way, only the wrapping
+        // tag/href changes, so a clerk sees the exact same badges/info with
+        // nothing to click through to a 403 on.
+        const tileTag = canEdit ? "a" : "div";
+        const tileHref = canEdit ? ` href="/admin/groups/${g.id}/edit${langQs}"` : "";
+        return `<${tileTag} class="sched-tile${hasConflict ? " sched-tile--conflict" : ""}" style="grid-column:${dIdx + 2};grid-row:${startRow}/${endRow};${laneStyle}"${tileHref}>
           ${hasConflict ? `<span class="sched-conflict-badge">${t.conflict}</span>` : ""}
           ${!g.room_id ? `<span class="sched-nohall-badge">${t.noHallBadge}</span>` : ""}
           ${hasWeeklyBadge ? `<span class="sched-weekly-badge">${t.weeklyBadge}</span>` : ""}
           <strong>${escapeHtml(g.teacher_name)}</strong>${g.stage ? `<br><span class="sched-stage">${escapeHtml(g.stage)}</span>` : ""}<br>${isGeneral && g.room_name ? `🚪 ${escapeHtml(g.room_name)}<br>` : ""}${subjectsDisplay(lang, g.subject)}<br>
           <small>${g.start_time}–${g.end_time} · ${escapeHtml(seatsLabel)}</small>
-        </a>`;
+        </${tileTag}>`;
       }).join("");
 
+      const unassignedTag = canEdit ? "a" : "div";
       const unassignedHtml = unassigned.length
         ? `<h2 style="font-size:15px;color:var(--muted)">${t.unassignedTitle}</h2>` + unassigned.map(g =>
-            `<a class="card" href="/admin/groups/${g.id}/edit${langQs}"><div><strong>${escapeHtml(g.teacher_name)} — ${subjectsDisplay(lang, g.subject)}</strong></div></a>`
+            `<${unassignedTag} class="card"${canEdit ? ` href="/admin/groups/${g.id}/edit${langQs}"` : ""}><div><strong>${escapeHtml(g.teacher_name)} — ${subjectsDisplay(lang, g.subject)}</strong></div></${unassignedTag}>`
           ).join("")
         : "";
 
@@ -2341,7 +2369,7 @@ export default {
           ${tiles}
         </div>
         ${unassignedHtml}`;
-      return new Response(page(t.title, body, { lang, toggleHref: toggleHref(url, lang), isOwner: true }), { headers: { "content-type": "text/html;charset=utf-8" } });
+      return new Response(page(t.title, body, { lang, toggleHref: toggleHref(url, lang), isOwner: canEdit }), { headers: { "content-type": "text/html;charset=utf-8" } });
     }
 
     const LEDGER_I18N = {
@@ -3889,7 +3917,10 @@ export default {
     // actual owner — no point explaining pages a clerk's account can't open.
     if (url.pathname === "/admin/guide" && request.method === "GET") {
       const isOwnerGuide = roleAllowed(staffRole, ["owner"]);
-      const sec = (id, bodyHtml) => `<div id="${id}">${bodyHtml}</div>`;
+      // Collapsed by default (native <details>, no JS framework) -- title is
+      // its own param now (was embedded as a hardcoded <h2> on the first
+      // line of each call site's bodyHtml) so it can become the <summary>.
+      const sec = (id, title, bodyHtml) => `<details id="${id}"><summary><h2 style="font-size:20px;margin:0;display:inline">${title}</h2></summary>${bodyHtml}</details>`;
       const numCircle = (n, x, y) => `<circle cx="${x}" cy="${y}" r="11" fill="#D42027"/><text x="${x}" y="${y + 5}" text-anchor="middle" font-size="13" font-weight="700" fill="#fff">${n}</text>`;
 
       // Hand-built inline schematic diagrams (not real screenshots — see
@@ -3958,7 +3989,8 @@ export default {
         ["#t-pay", "💵", "حصّل فلوس من طالب"],
         ["#t-owing", "📊", "اتأكد مين لسه مدفعش"],
         ["#t-attendance", "✅", "سجل حضور"],
-        ["#t-find", "🔎", "دور على بيانات طالب"]
+        ["#t-find", "🔎", "دور على بيانات طالب"],
+        ["#t-schedule", "🗓️", "شوف الجدول"]
       ];
       const ownerTasks = [
         ["#t-teacherpay", "💰", "ادفع للأستاذ"],
@@ -3978,8 +4010,7 @@ ${isOwnerGuide ? `<div class="guide-owner-zone" id="s-owner">
   <div class="guide-tasks">${ownerTasks.map(taskCard).join("")}</div>
 </div>` : ""}
 
-${sec("t-newstudent", `
-<h2 style="font-size:20px;margin:24px 0 10px">🆕 سجل طالب جديد</h2>
+${sec("t-newstudent", "🆕 سجل طالب جديد", `
 <ol class="guide-steps">
   <li>ابعتله رابط التسجيل — <code>/register</code> — يملأه بنفسه من موبايله لو معاه نت.</li>
   <li>لو مفيش نت معاه، افتح <a href="/admin/intake">الرئيسية</a> واكتب اسمه بس في نموذج "طالب جديد وصل دلوقتي"، وكمل الباقي بعدين.</li>
@@ -3990,8 +4021,7 @@ ${sec("t-newstudent", `
 <a class="guide-task-link" href="/admin/intake">الرئيسية</a>
 `)}
 
-${sec("t-pay", `
-<h2 style="font-size:20px;margin:24px 0 10px">💵 حصّل فلوس من طالب</h2>
+${sec("t-pay", "💵 حصّل فلوس من طالب", `
 <p>دوس على اسم الطالب في أي مكان — <a href="/admin/today">حضور اليوم</a> أو <a href="/admin/estamarat">الاستمارات</a> — هيفتحلك استمارته كاملة فيها المطلوب/المدفوع/المتبقي وزرار تسجيل الدفعة.</p>
 <ul class="guide-steps">
   <li><strong>المتبقي</strong> = المطلوب ناقص المدفوع. لو الطالب دفع أكتر من المطلوب، بدل "المتبقي" هيظهرله <strong>"رصيد للطالب"</strong> (يعني له فلوس زيادة عندك، مش عليه).</li>
@@ -4001,13 +4031,11 @@ ${sec("t-pay", `
 <div class="guide-shot">${diagPayment}</div>
 `)}
 
-${sec("t-owing", `
-<h2 style="font-size:20px;margin:24px 0 10px">📊 اتأكد مين لسه مدفعش</h2>
+${sec("t-owing", "📊 اتأكد مين لسه مدفعش", `
 <p>افتح <a href="/admin/estamarat">الاستمارات</a> — هتلاقي كل الطلاب وإجمالي فلوسهم في مكان واحد، دوس على أي اسم عشان تشوف تفاصيله وتسجل دفعة لو محتاج.</p>
 `)}
 
-${sec("t-attendance", `
-<h2 style="font-size:20px;margin:24px 0 10px">✅ سجل حضور</h2>
+${sec("t-attendance", "✅ سجل حضور", `
 <ul class="guide-steps">
   <li><strong><a href="/admin/counter">سكانر الاستقبال</a></strong> — لو معاك جهاز سكانر QR متوصل بالكمبيوتر، افتح الصفحة دي ووجّه السكانر على كود الطالب، هيتسجل حضوره تلقائي من غير ما تدوس أي حاجة.</li>
   <li><strong><a href="/admin/today">حضور اليوم</a></strong> — مين حضر النهاردة.</li>
@@ -4017,13 +4045,20 @@ ${sec("t-attendance", `
 <div class="guide-shot">${diagAttendance}</div>
 `)}
 
-${sec("t-find", `
-<h2 style="font-size:20px;margin:24px 0 10px">🔎 دور على بيانات طالب</h2>
+${sec("t-find", "🔎 دور على بيانات طالب", `
 <p>دوس على اسم أي طالب في أي مكان — <a href="/admin">صفحة الطلاب</a>، <a href="/admin/today">حضور اليوم</a>، أو <a href="/admin/estamarat">الاستمارات</a> — هيفتحلك استمارته كاملة (بياناته، المواد، الفلوس)، وتقدر تبعتله رابطه على الواتساب تاني من هناك.</p>
 `)}
 
-${isOwnerGuide ? sec("t-teacherpay", `
-<h2 style="font-size:20px;margin:24px 0 10px">💰 ادفع للأستاذ</h2>
+${sec("t-schedule", "🗓️ شوف الجدول", `
+<p>افتح <a href="/admin/schedule">الجدول</a> — بيوريك كل المجموعات على مدار الأسبوع.</p>
+<ul class="guide-steps">
+  <li><strong>تبويب "عام"</strong> يجمع كل القاعات مع بعض؛ وكل تبويب قاعة يوري مجموعاتها بس.</li>
+  <li><strong>الشارات:</strong> المرحلة، 🚪 القاعة، شارة "تعارض" حمرا لو فيه تضارب مواعيد، وشارة "×2 أسبوعي" لو المجموعة بتتكرر.</li>
+</ul>
+${isOwnerGuide ? `<p>كمدير: دوس على أي مجموعة عشان تعدّلها، أو على "+" في خلية فاضية عشان تعمل مجموعة جديدة. موظف الاستقبال بيشوف الجدول بس، مش بيعدّل.</p>` : ""}
+`)}
+
+${isOwnerGuide ? sec("t-teacherpay", "💰 ادفع للأستاذ", `
 <p>كل أستاذ ليه طريقة حساب واحدة بس، بتحددها من <a href="/admin/teachers">صفحة الأساتذة</a>:</p>
 <ul class="guide-steps">
   <li><strong>بالحصة</strong> — مبلغ ثابت عن كل حصة فعلاً اتعملت (مش عن كل طالب حضر).</li>
@@ -4035,8 +4070,7 @@ ${isOwnerGuide ? sec("t-teacherpay", `
 <a class="guide-task-link" href="/admin/teachers">الأساتذة</a>
 `) : ""}
 
-${isOwnerGuide ? sec("t-staff", `
-<h2 style="font-size:20px;margin:24px 0 10px">👥 ضيف/عدّل موظف</h2>
+${isOwnerGuide ? sec("t-staff", "👥 ضيف/عدّل موظف", `
 <h3 style="font-size:17px;margin:16px 0 8px">صلاحيات الموظفين</h3>
 <p>من <a href="/admin/staff">صفحة الموظفين</a> تقدر تضيف أي موظف بإيميله، وتحدد صلاحيته من 3:</p>
 <ul class="guide-steps">
@@ -4049,8 +4083,7 @@ ${isOwnerGuide ? sec("t-staff", `
 <a class="guide-task-link" href="/admin/staff">الموظفين</a>
 `) : ""}
 
-${isOwnerGuide ? sec("t-ledger", `
-<h2 style="font-size:20px;margin:24px 0 10px">📒 دفتر الحساب</h2>
+${isOwnerGuide ? sec("t-ledger", "📒 دفتر الحساب", `
 <p><a href="/admin/ledger">دفتر الحساب</a> فيه كل الفلوس الداخلة والخارجة، وتقدر تسجل مصروف (إيجار، مرتبات، فاتورة تليفون...) من هنا. تقدر كمان تشوف مين محتاج تسوية فلوس دلوقتي من قسم "⚠️ يحتاج متابعة" فوق <a href="/admin/teachers">صفحة الأساتذة</a>. وتلاقي روابط لـ <a href="/admin/groups">المجموعات</a>، <a href="/admin/rooms">القاعات</a>، و<a href="/admin/promotions">العروض</a> من هناك برضه.</p>
 `) : ""}
 
@@ -4058,7 +4091,21 @@ ${isOwnerGuide ? sec("t-ledger", `
   <p>❓ <strong>لو تهت:</strong> دوس على شعار هارف فوق في أي وقت، وهيرجعك لـ<a href="/admin/intake">الرئيسية</a> على طول.</p>
   <p>🔐 <strong>لو ظهرلك شاشة تسجيل دخول:</strong> ده طبيعي، بيحصل كل شهر تقريبًا. اكتب إيميلك، وهيبعتلك كود من 6 أرقام على نفس الإيميل — افتح الإيميل واكتب الكود.</p>
   <p class="no-print"><a class="guide-print-link" href="javascript:window.print()">🖨️ اطبع الدليل</a></p>
-</div>`;
+</div>
+<script>
+(function(){
+  // Sections are collapsed <details> by default -- a plain #anchor jump
+  // (from the task cards above, or a bookmarked/shared link) scrolls to a
+  // collapsed, invisible section unless we explicitly open it on navigation.
+  function openHash(){
+    if(!location.hash) return;
+    var el=document.querySelector(location.hash);
+    if(el&&el.tagName==='DETAILS'){el.open=true;el.scrollIntoView();}
+  }
+  window.addEventListener('hashchange',openHash);
+  openHash();
+})();
+</script>`;
       return new Response(page("دليل الموظفين", body, { isOwner: isOwnerGuide }), { headers: { "content-type": "text/html;charset=utf-8" } });
     }
 
