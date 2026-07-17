@@ -2,6 +2,9 @@
   "name": "harv-attendance",
   "main": "src/index.js",
   "compatibility_date": "2026-07-01",
+  "routes": [
+    { "pattern": "attendance.harvcentereg.com", "custom_domain": true }
+  ],
   "d1_databases": [
     {
       "binding": "DB",
