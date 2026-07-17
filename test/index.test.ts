@@ -82,6 +82,12 @@ describe("/admin roster: client-side name search (full-app reassessment, 2026-07
     expect(html).not.toContain('data-name="">');
     expect(html).not.toContain("<script>alert(1)</script>");
   });
+
+  it("shows a scannable QR code next to the /register link, so a new walk-in can scan straight to it (added 2026-07-17)", async () => {
+    const html = await (await adminFetch("https://example.com/admin")).text();
+    expect(html).toContain("/register");
+    expect(html).toMatch(/reg-link[\s\S]*?<svg/);
+  });
 });
 
 describe("subjects: stored-XSS regression (found by claude-review on PR #3, fixed 2026-07-10)", () => {
@@ -2625,6 +2631,31 @@ describe("/admin/guide: sectioned + hyperlinked, role-aware (rewritten 2026-07-1
 
     const clerkHtml = await (await clerkFetch("https://example.com/admin/guide")).text();
     expect(clerkHtml).not.toContain("صلاحيات الموظفين");
+  });
+
+  it("every topic section is a collapsed-by-default <details> (added 2026-07-17)", async () => {
+    const html = await (await adminFetch("https://example.com/admin/guide")).text();
+    for (const id of ["t-newstudent", "t-pay", "t-owing", "t-attendance", "t-find", "t-schedule", "t-teacherpay", "t-staff", "t-ledger"]) {
+      const openTag = new RegExp(`<details id="${id}"[^>]*>`).exec(html)?.[0];
+      expect(openTag, `section ${id} should exist as a <details>`).toBeTruthy();
+      expect(openTag).not.toMatch(/\bopen\b/);
+    }
+  });
+
+  it("documents the scheduler for a clerk (view-only), with an owner-only editing note added for an owner (added 2026-07-17)", async () => {
+    const clerkHtml = await (await clerkFetch("https://example.com/admin/guide")).text();
+    expect(clerkHtml).toContain('id="t-schedule"');
+    expect(clerkHtml).toContain('href="/admin/schedule"');
+    expect(clerkHtml).not.toContain("موظف الاستقبال بيشوف الجدول بس");
+
+    const ownerHtml = await (await adminFetch("https://example.com/admin/guide")).text();
+    expect(ownerHtml).toContain("موظف الاستقبال بيشوف الجدول بس");
+  });
+
+  it("opens the matching <details> section when the page loads with a matching #hash", async () => {
+    const html = await (await adminFetch("https://example.com/admin/guide")).text();
+    expect(html).toContain("openHash");
+    expect(html).toContain("hashchange");
   });
 });
 

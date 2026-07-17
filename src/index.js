@@ -1323,7 +1323,11 @@ export default {
         </select>
         <button type="submit">${t.addSubmit}</button>
       </form>`;
-      const regLink = `<div class="reg-link">${t.regLink}<br><a href="${url.origin}/register">${url.origin}/register</a></div>`;
+      // A new walk-in can scan this straight into /register on their own
+      // phone instead of staff reading the URL aloud -- reuses the existing
+      // qrSvg() helper (already used for the daily attendance QR elsewhere),
+      // no new dependency.
+      const regLink = `<div class="reg-link">${t.regLink}<br><a href="${url.origin}/register">${url.origin}/register</a>${qrSvg(`${url.origin}/register`)}</div>`;
       // Client-side name filter (2026-07-16, full-app reassessment): with the
       // roster's flat, unpaginated card list growing over multiple semesters,
       // scrolling to find one student was a real cognitive-load problem — the
@@ -3913,7 +3917,10 @@ export default {
     // actual owner — no point explaining pages a clerk's account can't open.
     if (url.pathname === "/admin/guide" && request.method === "GET") {
       const isOwnerGuide = roleAllowed(staffRole, ["owner"]);
-      const sec = (id, bodyHtml) => `<div id="${id}">${bodyHtml}</div>`;
+      // Collapsed by default (native <details>, no JS framework) -- title is
+      // its own param now (was embedded as a hardcoded <h2> on the first
+      // line of each call site's bodyHtml) so it can become the <summary>.
+      const sec = (id, title, bodyHtml) => `<details id="${id}"><summary><h2 style="font-size:20px;margin:0;display:inline">${title}</h2></summary>${bodyHtml}</details>`;
       const numCircle = (n, x, y) => `<circle cx="${x}" cy="${y}" r="11" fill="#D42027"/><text x="${x}" y="${y + 5}" text-anchor="middle" font-size="13" font-weight="700" fill="#fff">${n}</text>`;
 
       // Hand-built inline schematic diagrams (not real screenshots — see
@@ -3982,7 +3989,8 @@ export default {
         ["#t-pay", "💵", "حصّل فلوس من طالب"],
         ["#t-owing", "📊", "اتأكد مين لسه مدفعش"],
         ["#t-attendance", "✅", "سجل حضور"],
-        ["#t-find", "🔎", "دور على بيانات طالب"]
+        ["#t-find", "🔎", "دور على بيانات طالب"],
+        ["#t-schedule", "🗓️", "شوف الجدول"]
       ];
       const ownerTasks = [
         ["#t-teacherpay", "💰", "ادفع للأستاذ"],
@@ -4002,8 +4010,7 @@ ${isOwnerGuide ? `<div class="guide-owner-zone" id="s-owner">
   <div class="guide-tasks">${ownerTasks.map(taskCard).join("")}</div>
 </div>` : ""}
 
-${sec("t-newstudent", `
-<h2 style="font-size:20px;margin:24px 0 10px">🆕 سجل طالب جديد</h2>
+${sec("t-newstudent", "🆕 سجل طالب جديد", `
 <ol class="guide-steps">
   <li>ابعتله رابط التسجيل — <code>/register</code> — يملأه بنفسه من موبايله لو معاه نت.</li>
   <li>لو مفيش نت معاه، افتح <a href="/admin/intake">الرئيسية</a> واكتب اسمه بس في نموذج "طالب جديد وصل دلوقتي"، وكمل الباقي بعدين.</li>
@@ -4014,8 +4021,7 @@ ${sec("t-newstudent", `
 <a class="guide-task-link" href="/admin/intake">الرئيسية</a>
 `)}
 
-${sec("t-pay", `
-<h2 style="font-size:20px;margin:24px 0 10px">💵 حصّل فلوس من طالب</h2>
+${sec("t-pay", "💵 حصّل فلوس من طالب", `
 <p>دوس على اسم الطالب في أي مكان — <a href="/admin/today">حضور اليوم</a> أو <a href="/admin/estamarat">الاستمارات</a> — هيفتحلك استمارته كاملة فيها المطلوب/المدفوع/المتبقي وزرار تسجيل الدفعة.</p>
 <ul class="guide-steps">
   <li><strong>المتبقي</strong> = المطلوب ناقص المدفوع. لو الطالب دفع أكتر من المطلوب، بدل "المتبقي" هيظهرله <strong>"رصيد للطالب"</strong> (يعني له فلوس زيادة عندك، مش عليه).</li>
@@ -4025,13 +4031,11 @@ ${sec("t-pay", `
 <div class="guide-shot">${diagPayment}</div>
 `)}
 
-${sec("t-owing", `
-<h2 style="font-size:20px;margin:24px 0 10px">📊 اتأكد مين لسه مدفعش</h2>
+${sec("t-owing", "📊 اتأكد مين لسه مدفعش", `
 <p>افتح <a href="/admin/estamarat">الاستمارات</a> — هتلاقي كل الطلاب وإجمالي فلوسهم في مكان واحد، دوس على أي اسم عشان تشوف تفاصيله وتسجل دفعة لو محتاج.</p>
 `)}
 
-${sec("t-attendance", `
-<h2 style="font-size:20px;margin:24px 0 10px">✅ سجل حضور</h2>
+${sec("t-attendance", "✅ سجل حضور", `
 <ul class="guide-steps">
   <li><strong><a href="/admin/counter">سكانر الاستقبال</a></strong> — لو معاك جهاز سكانر QR متوصل بالكمبيوتر، افتح الصفحة دي ووجّه السكانر على كود الطالب، هيتسجل حضوره تلقائي من غير ما تدوس أي حاجة.</li>
   <li><strong><a href="/admin/today">حضور اليوم</a></strong> — مين حضر النهاردة.</li>
@@ -4041,13 +4045,20 @@ ${sec("t-attendance", `
 <div class="guide-shot">${diagAttendance}</div>
 `)}
 
-${sec("t-find", `
-<h2 style="font-size:20px;margin:24px 0 10px">🔎 دور على بيانات طالب</h2>
+${sec("t-find", "🔎 دور على بيانات طالب", `
 <p>دوس على اسم أي طالب في أي مكان — <a href="/admin">صفحة الطلاب</a>، <a href="/admin/today">حضور اليوم</a>، أو <a href="/admin/estamarat">الاستمارات</a> — هيفتحلك استمارته كاملة (بياناته، المواد، الفلوس)، وتقدر تبعتله رابطه على الواتساب تاني من هناك.</p>
 `)}
 
-${isOwnerGuide ? sec("t-teacherpay", `
-<h2 style="font-size:20px;margin:24px 0 10px">💰 ادفع للأستاذ</h2>
+${sec("t-schedule", "🗓️ شوف الجدول", `
+<p>افتح <a href="/admin/schedule">الجدول</a> — بيوريك كل المجموعات على مدار الأسبوع.</p>
+<ul class="guide-steps">
+  <li><strong>تبويب "عام"</strong> يجمع كل القاعات مع بعض؛ وكل تبويب قاعة يوري مجموعاتها بس.</li>
+  <li><strong>الشارات:</strong> المرحلة، 🚪 القاعة، شارة "تعارض" حمرا لو فيه تضارب مواعيد، وشارة "×2 أسبوعي" لو المجموعة بتتكرر.</li>
+</ul>
+${isOwnerGuide ? `<p>كمدير: دوس على أي مجموعة عشان تعدّلها، أو على "+" في خلية فاضية عشان تعمل مجموعة جديدة. موظف الاستقبال بيشوف الجدول بس، مش بيعدّل.</p>` : ""}
+`)}
+
+${isOwnerGuide ? sec("t-teacherpay", "💰 ادفع للأستاذ", `
 <p>كل أستاذ ليه طريقة حساب واحدة بس، بتحددها من <a href="/admin/teachers">صفحة الأساتذة</a>:</p>
 <ul class="guide-steps">
   <li><strong>بالحصة</strong> — مبلغ ثابت عن كل حصة فعلاً اتعملت (مش عن كل طالب حضر).</li>
@@ -4059,8 +4070,7 @@ ${isOwnerGuide ? sec("t-teacherpay", `
 <a class="guide-task-link" href="/admin/teachers">الأساتذة</a>
 `) : ""}
 
-${isOwnerGuide ? sec("t-staff", `
-<h2 style="font-size:20px;margin:24px 0 10px">👥 ضيف/عدّل موظف</h2>
+${isOwnerGuide ? sec("t-staff", "👥 ضيف/عدّل موظف", `
 <h3 style="font-size:17px;margin:16px 0 8px">صلاحيات الموظفين</h3>
 <p>من <a href="/admin/staff">صفحة الموظفين</a> تقدر تضيف أي موظف بإيميله، وتحدد صلاحيته من 3:</p>
 <ul class="guide-steps">
@@ -4073,8 +4083,7 @@ ${isOwnerGuide ? sec("t-staff", `
 <a class="guide-task-link" href="/admin/staff">الموظفين</a>
 `) : ""}
 
-${isOwnerGuide ? sec("t-ledger", `
-<h2 style="font-size:20px;margin:24px 0 10px">📒 دفتر الحساب</h2>
+${isOwnerGuide ? sec("t-ledger", "📒 دفتر الحساب", `
 <p><a href="/admin/ledger">دفتر الحساب</a> فيه كل الفلوس الداخلة والخارجة، وتقدر تسجل مصروف (إيجار، مرتبات، فاتورة تليفون...) من هنا. تقدر كمان تشوف مين محتاج تسوية فلوس دلوقتي من قسم "⚠️ يحتاج متابعة" فوق <a href="/admin/teachers">صفحة الأساتذة</a>. وتلاقي روابط لـ <a href="/admin/groups">المجموعات</a>، <a href="/admin/rooms">القاعات</a>، و<a href="/admin/promotions">العروض</a> من هناك برضه.</p>
 `) : ""}
 
@@ -4082,7 +4091,21 @@ ${isOwnerGuide ? sec("t-ledger", `
   <p>❓ <strong>لو تهت:</strong> دوس على شعار هارف فوق في أي وقت، وهيرجعك لـ<a href="/admin/intake">الرئيسية</a> على طول.</p>
   <p>🔐 <strong>لو ظهرلك شاشة تسجيل دخول:</strong> ده طبيعي، بيحصل كل شهر تقريبًا. اكتب إيميلك، وهيبعتلك كود من 6 أرقام على نفس الإيميل — افتح الإيميل واكتب الكود.</p>
   <p class="no-print"><a class="guide-print-link" href="javascript:window.print()">🖨️ اطبع الدليل</a></p>
-</div>`;
+</div>
+<script>
+(function(){
+  // Sections are collapsed <details> by default -- a plain #anchor jump
+  // (from the task cards above, or a bookmarked/shared link) scrolls to a
+  // collapsed, invisible section unless we explicitly open it on navigation.
+  function openHash(){
+    if(!location.hash) return;
+    var el=document.querySelector(location.hash);
+    if(el&&el.tagName==='DETAILS'){el.open=true;el.scrollIntoView();}
+  }
+  window.addEventListener('hashchange',openHash);
+  openHash();
+})();
+</script>`;
       return new Response(page("دليل الموظفين", body, { isOwner: isOwnerGuide }), { headers: { "content-type": "text/html;charset=utf-8" } });
     }
 
