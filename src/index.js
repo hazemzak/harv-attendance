@@ -2325,9 +2325,13 @@ export default {
       // series_key: a group tile gets the "×2 weekly" badge whenever another
       // *currently displayed* group shares its key (Phase-style link, mirrors
       // teachers.person_id) -- computed once against the full active list so
-      // it's correct regardless of which tab is open.
+      // it's correct regardless of which tab is open. Scoped by teacher_id
+      // (not just the raw free-text key) so two unrelated teachers who
+      // happen to type the same generic key (e.g. "series1") don't get
+      // falsely linked -- caught by claude-review on PR #20's re-review.
+      const seriesGroupKey = g => `${g.teacher_id}:${g.series_key}`;
       const seriesKeyCounts = new Map();
-      for (const g of groups) if (g.series_key) seriesKeyCounts.set(g.series_key, (seriesKeyCounts.get(g.series_key) || 0) + 1);
+      for (const g of groups) if (g.series_key) seriesKeyCounts.set(seriesGroupKey(g), (seriesKeyCounts.get(seriesGroupKey(g)) || 0) + 1);
 
       const tabs = [
         `<a class="sched-tab${isGeneral ? " active" : ""}" href="/admin/schedule?hall=general${langQs.replace("?", "&")}">${t.generalTab}</a>`,
@@ -2381,7 +2385,7 @@ export default {
         const startRow = schedRowFor(g.start_time, false);
         const endRow = schedRowFor(g.end_time, true);
         const hasConflict = conflicts.has(g.id);
-        const hasWeeklyBadge = g.series_key && seriesKeyCounts.get(g.series_key) > 1;
+        const hasWeeklyBadge = g.series_key && seriesKeyCounts.get(seriesGroupKey(g)) > 1;
         const seatsLabel = Number.isFinite(g.capacity) ? `${g.enrolled}/${g.capacity}` : `${g.enrolled}`;
         const laneIdx = isGeneral ? (g.room_id ? rooms.findIndex(r => r.id === g.room_id) : rooms.length) : 0;
         const { colOf, totalCols } = packResults.get(`${g.day}|${laneIdx}`);
