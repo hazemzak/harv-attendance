@@ -83,10 +83,24 @@ describe("/admin roster: client-side name search (full-app reassessment, 2026-07
     expect(html).not.toContain("<script>alert(1)</script>");
   });
 
-  it("shows a scannable QR code next to the /register link, so a new walk-in can scan straight to it (added 2026-07-17)", async () => {
+  it("/admin's registration link stays plain text -- the scannable QR lives on /admin/intake's walk-in panel instead (moved 2026-07-17)", async () => {
     const html = await (await adminFetch("https://example.com/admin")).text();
     expect(html).toContain("/register");
-    expect(html).toMatch(/reg-link[\s\S]*?<svg/);
+    // Scoped to just the reg-link div's own content -- the page has other
+    // <svg> QR codes further down (one per approved student card), so an
+    // unscoped [\s\S]*? regex would false-positive-match across those.
+    const regLinkMatch = /<div class="reg-link">[\s\S]*?<\/div>/.exec(html);
+    expect(regLinkMatch, "reg-link div should exist").toBeTruthy();
+    expect(regLinkMatch![0]).not.toContain("<svg");
+  });
+});
+
+describe("/admin/intake: walk-in self-registration QR (moved here 2026-07-17, next to the walk-in form since this is the actual 'a new student arrived' page)", () => {
+  it("shows a scannable QR into /register inside the walk-in panel", async () => {
+    const html = await (await adminFetch("https://example.com/admin/intake")).text();
+    const walkInPanelMatch = /طالب جديد وصل دلوقتي[\s\S]*?<\/details>/.exec(html);
+    expect(walkInPanelMatch, "walk-in panel should exist").toBeTruthy();
+    expect(walkInPanelMatch![0]).toContain("<svg");
   });
 });
 
@@ -1939,6 +1953,66 @@ describe("/admin/schedule: weekly grid across halls (added 2026-07-16)", () => {
       const html = await (await adminFetch(`https://example.com/admin/schedule?hall=${room.id}`)).text();
       const tile = [...html.matchAll(/<a class="(sched-tile[^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].find(m => m[2].includes("أ. بدون مرحلة"));
       expect(tile?.[2]).not.toContain("sched-stage");
+    });
+  });
+
+  describe("subject shown as a single emoji, not the full name (added 2026-07-17)", () => {
+    it("shows the subject's emoji on the tile instead of the spelled-out subject name", async () => {
+      await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-emoji', 'أ. إيموجي', 'chemistry')").run();
+      const room = (await env.DB.prepare("SELECT id FROM rooms ORDER BY id LIMIT 1").first()) as any;
+      await env.DB.prepare(
+        "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES ('t-sched-emoji', 'أ. إيموجي', 'chemistry', 'wed', '17:00', '19:00', ?, 1)"
+      ).bind(room.id).run();
+      const html = await (await adminFetch(`https://example.com/admin/schedule?hall=${room.id}`)).text();
+      const tile = [...html.matchAll(/<a class="(sched-tile[^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].find(m => m[2].includes("أ. إيموجي"));
+      expect(tile?.[2]).toContain("🧪");
+      expect(tile?.[2]).not.toContain("كيمياء");
+    });
+
+    it("two teachers sharing the same name are distinguishable by their subject emoji", async () => {
+      await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-dup1', 'أ. اتنين', 'math')").run();
+      await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-dup2', 'أ. اتنين', 'biology')").run();
+      const room = (await env.DB.prepare("SELECT id FROM rooms ORDER BY id LIMIT 1").first()) as any;
+      await env.DB.prepare(
+        "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES ('t-sched-dup1', 'أ. اتنين', 'math', 'thu', '09:00', '10:00', ?, 1)"
+      ).bind(room.id).run();
+      await env.DB.prepare(
+        "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES ('t-sched-dup2', 'أ. اتنين', 'biology', 'thu', '11:00', '12:00', ?, 1)"
+      ).bind(room.id).run();
+      const html = await (await adminFetch(`https://example.com/admin/schedule?hall=${room.id}`)).text();
+      const tiles = [...html.matchAll(/<a class="(sched-tile[^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].filter(m => m[2].includes("أ. اتنين"));
+      expect(tiles.length).toBe(2);
+      const emojis = tiles.map(t => (t[2].includes("📐") ? "math" : t[2].includes("🧬") ? "biology" : "unknown"));
+      expect(emojis.sort()).toEqual(["biology", "math"]);
+    });
+  });
+
+  describe("hall-less tile shows a bare 🔺 (no text), with a one-time legend on General instead of a repeated text badge (added 2026-07-17)", () => {
+    it("General shows the legend once; a real hall tab (which can never have a hall-less tile) does not", async () => {
+      const generalHtml = await (await adminFetch("https://example.com/admin/schedule?hall=general")).text();
+      expect(generalHtml).toContain("sched-legend");
+      // The legend and each tile's hover title legitimately say "محتاج قاعة"
+      // by design now -- what should be GONE is the old verbose per-tile
+      // text badge (⚠️ prefix + text, always visible, not just on hover).
+      expect(generalHtml).not.toContain("⚠️ محتاج قاعة");
+
+      const room = (await env.DB.prepare("SELECT id FROM rooms ORDER BY id LIMIT 1").first()) as any;
+      const hallHtml = await (await adminFetch(`https://example.com/admin/schedule?hall=${room.id}`)).text();
+      // ".sched-legend{...}" is always present in the page's own <style>
+      // block regardless of any real legend -- check for the rendered tag.
+      expect(hallHtml).not.toContain('class="sched-legend"');
+    });
+
+    it("a hall-less tile carries the 🔺 marker with a hover title, and no leftover text badge", async () => {
+      await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-triangle', 'أ. مثلث', 'math')").run();
+      await env.DB.prepare(
+        "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES ('t-sched-triangle', 'أ. مثلث', 'math', 'fri', '17:00', '19:00', NULL, 1)"
+      ).run();
+      const html = await (await adminFetch("https://example.com/admin/schedule?hall=general")).text();
+      const tile = [...html.matchAll(/<a class="(sched-tile[^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].find(m => m[2].includes("أ. مثلث"));
+      expect(tile?.[2]).toContain("🔺");
+      expect(tile?.[2]).toContain("title=");
+      expect(tile?.[2]).not.toContain("محتاج قاعة</span>");
     });
   });
 });
