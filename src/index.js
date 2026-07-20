@@ -1006,15 +1006,20 @@ function subjectTeacherBlocks(lang, teachersBySubject) {
 // Remaining estamara contact fields — shared by /register and the clerk's
 // process form. Father/mother/home phone + address are all optional free text
 // (only the student's own phone + parent_phone are mandatory/validated).
-function contactFields(lang, s = {}) {
+// /register passes { minimal: true } (2026-07-20, Hazem's direct ask) to drop
+// father/mother phone from the public self-registration form — student/parent/
+// home is the 3-phone-number set he wants there; the process page still shows
+// the full estamara set (father/mother/home/address) to match the paper form.
+function contactFields(lang, s = {}, opts = {}) {
   const L = lang === "en"
     ? { father: "Father's phone", mother: "Mother's phone", home: "Home phone", address: "Address" }
     : { father: "تليفون الأب", mother: "تليفون الأم", home: "تليفون المنزل", address: "العنوان" };
-  return `
+  const parentPhones = opts.minimal ? "" : `
   <label>${L.father}</label>
   <input name="father_phone" type="tel" placeholder="01xxxxxxxxx" value="${escapeHtml(s.father_phone || "")}">
   <label>${L.mother}</label>
-  <input name="mother_phone" type="tel" placeholder="01xxxxxxxxx" value="${escapeHtml(s.mother_phone || "")}">
+  <input name="mother_phone" type="tel" placeholder="01xxxxxxxxx" value="${escapeHtml(s.mother_phone || "")}">`;
+  return `${parentPhones}
   <label>${L.home}</label>
   <input name="home_phone" type="tel" value="${escapeHtml(s.home_phone || "")}">
   <label>${L.address}</label>
@@ -3368,7 +3373,7 @@ export default {
         <label>${t.phone}</label>
         <input name="phone" type="tel" placeholder="${t.phonePh}" autocomplete="tel" required>
         ${parentPhoneField(lang, "")}
-        ${contactFields(lang)}
+        ${contactFields(lang, {}, { minimal: true })}
         <label>${t.email}</label>
         <input name="email" type="email" placeholder="${t.emailPh}" autocomplete="email">
         <label>${t.subjects}</label>

@@ -1109,6 +1109,24 @@ describe("/register: subject → teacher live panel (added 2026-07-13, most stud
   });
 });
 
+describe("/register: phone fields trimmed to 3 (2026-07-20, Hazem's direct ask -- father/mother phone dropped from public self-registration, home phone stays optional)", () => {
+  it("does not render father_phone or mother_phone inputs, but still renders home_phone and address", async () => {
+    const html = await (await SELF.fetch("https://example.com/register")).text();
+    expect(html).not.toContain('name="father_phone"');
+    expect(html).not.toContain('name="mother_phone"');
+    expect(html).toContain('name="home_phone"');
+    expect(html).toContain('name="address"');
+  });
+
+  it("the staff process page still shows the full estamara set (father/mother/home phone) unaffected by the /register change", async () => {
+    const id = await insertStudent({ name: "Full Estamara Test", status: "pending" });
+    const html = await (await adminFetch(`https://example.com/admin/students/${id}/process`)).text();
+    expect(html).toContain('name="father_phone"');
+    expect(html).toContain('name="mother_phone"');
+    expect(html).toContain('name="home_phone"');
+  });
+});
+
 describe("/register: teacher picker (added 2026-07-13, students can now select a teacher, not just view them)", () => {
   it("renders a selectable radio per teacher with the pick_<slug> name and a data-teacher-schedule attribute generated from teacher_availability", async () => {
     await env.DB.prepare(
