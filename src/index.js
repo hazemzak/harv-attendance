@@ -2300,8 +2300,8 @@ export default {
     }
 
     const SCHEDULE_I18N = {
-      ar: { title: "الجدول", noRooms: "لسه معملتش أي قاعة. ابدأ من صفحة القاعات.", unassignedTitle: "مجموعات بدون ميعاد", conflict: "⚠️ تضارب", generalTab: "العام", noHallBadge: "محتاج قاعة", noHallLegend: "🔺 = محتاج قاعة", weeklyBadge: "×٢ أسبوعيًا" },
-      en: { title: "Schedule", noRooms: "No halls yet — add one from the Rooms page first.", unassignedTitle: "Groups with no time set", conflict: "⚠️ Conflict", generalTab: "General", noHallBadge: "Needs a hall", noHallLegend: "🔺 = needs a hall", weeklyBadge: "×2 weekly" }
+      ar: { title: "الجدول", noRooms: "لسه معملتش أي قاعة. ابدأ من صفحة القاعات.", unassignedTitle: "مجموعات بدون ميعاد", needsHallTitle: "🔺 مجموعات محتاجة قاعة — دوس عليها عشان تحدد القاعة", conflict: "⚠️ تضارب", generalTab: "العام", weeklyBadge: "×٢ أسبوعيًا" },
+      en: { title: "Schedule", noRooms: "No halls yet — add one from the Rooms page first.", unassignedTitle: "Groups with no time set", needsHallTitle: "🔺 Classes still needing a hall — tap one to assign it", conflict: "⚠️ Conflict", generalTab: "General", weeklyBadge: "×2 weekly" }
     };
 
     // Business hours are hourly rows (07:00-23:00, 17 rows); a group's time is
@@ -2340,14 +2340,21 @@ export default {
       const groups = await getGroupsWithSeats(env, { activeOnly: true });
       const conflicts = computeGroupConflicts(groups);
       const scheduled = g => g.day && g.start_time && g.end_time;
-      // Real per-hall tiles unchanged. General shows every scheduled group
-      // regardless of room (including hall-less ones, flagged) -- that's the
-      // whole point of the tab, so it drops the room_id condition entirely.
-      const hallGroups = isGeneral ? groups.filter(scheduled) : groups.filter(g => g.room_id === currentHall.id && scheduled(g));
-      // Narrowed to "no day/time at all" now that a hall-less-but-scheduled
-      // group has a real home (the General grid, flagged there) instead of
-      // only ever surfacing in this flat list on every single tab.
+      // Hall-less groups used to plot on the grid too (a "no hall" lane) --
+      // with real data that lane routinely holds a dozen+ same-slot groups
+      // (Hazem: 16 distinct classes all Saturday 07:00, no hall yet) and the
+      // lane-splitting that keeps a handful of tiles legible turns into an
+      // unreadable sliver "barcode" at that count. Only fully-set (day+time+
+      // hall) groups plot on the grid now; scheduled-but-hall-less groups get
+      // their own list below instead (needsHall), same pattern as the
+      // long-standing "no time at all" list (unassigned).
+      const hallGroups = isGeneral ? groups.filter(g => scheduled(g) && g.room_id) : groups.filter(g => g.room_id === currentHall.id && scheduled(g));
       const unassigned = groups.filter(g => !scheduled(g));
+      const needsHall = isGeneral ? groups.filter(g => scheduled(g) && !g.room_id) : [];
+      needsHall.sort((a, b) => {
+        const da = DAYS_OF_WEEK.findIndex(d => d.v === a.day), db = DAYS_OF_WEEK.findIndex(d => d.v === b.day);
+        return da !== db ? da - db : a.start_time.localeCompare(b.start_time);
+      });
       // series_key: a group tile gets the "×2 weekly" badge whenever another
       // *currently displayed* group shares its key (Phase-style link, mirrors
       // teachers.person_id) -- computed once against the full active list so
@@ -2364,17 +2371,18 @@ export default {
         ...rooms.map(r => `<a class="sched-tab${!isGeneral && r.id === currentHall.id ? " active" : ""}" href="/admin/schedule?hall=${r.id}${langQs.replace("?", "&")}">${escapeHtml(r.name)}</a>`)
       ].join("");
 
-      // General mode can stack up to (every hall + one "no hall" lane) tiles
-      // in the same day/hour cell -- narrow each tile to its own lane via
-      // width+offset instead of restructuring the grid's own columns.
-      const lanes = rooms.length + 1; // + the "no hall" lane
+      // General mode can stack up to (every hall) tiles in the same day/hour
+      // cell -- narrow each tile to its own lane via width+offset instead of
+      // restructuring the grid's own columns. No "no hall" lane anymore --
+      // those groups don't reach the grid at all now (see needsHall above).
+      const lanes = rooms.length;
       const laneWidth = 100 / lanes;
       // Hazem: scrolling right in General lost track of which hall a lane
       // belongs to, since only individual tiles ever named their room. A
       // small sticky sub-label row under each day name, one per lane, fixes
       // that the same way the day name itself stays visible on scroll.
       const laneLabels = isGeneral
-        ? `<div class="sched-lane-labels">${rooms.map(r => `<span class="sched-lane-label" style="width:${laneWidth}%">${escapeHtml(r.name)}</span>`).join("")}<span class="sched-lane-label" style="width:${laneWidth}%">${t.noHallBadge}</span></div>`
+        ? `<div class="sched-lane-labels">${rooms.map(r => `<span class="sched-lane-label" style="width:${laneWidth}%">${escapeHtml(r.name)}</span>`).join("")}</div>`
         : "";
       const dayHeaders = DAYS_OF_WEEK.map((d, i) => `<div class="sched-daylabel" style="grid-column:${i + 2}">${lang === "en" ? d.en : d.ar}${laneLabels}</div>`).join("");
       const hourLabels = Array.from({ length: 17 }, (_, i) => `<div class="sched-hourlabel" style="grid-row:${i + 2}">${String(i + 7).padStart(2, "0")}:00</div>`).join("");
@@ -2397,7 +2405,7 @@ export default {
       // tiles split that lane's width instead of overlapping.
       const packByBucket = new Map(); // "day|lane" -> {colOf, totalCols}
       for (const g of hallGroups) {
-        const laneIdx = isGeneral ? (g.room_id ? rooms.findIndex(r => r.id === g.room_id) : rooms.length) : 0;
+        const laneIdx = isGeneral ? rooms.findIndex(r => r.id === g.room_id) : 0;
         const key = `${g.day}|${laneIdx}`;
         if (!packByBucket.has(key)) packByBucket.set(key, []);
         packByBucket.get(key).push(g);
@@ -2413,7 +2421,7 @@ export default {
         const hasConflict = conflicts.has(g.id);
         const hasWeeklyBadge = g.series_key && seriesKeyCounts.get(seriesGroupKey(g)) > 1;
         const seatsLabel = Number.isFinite(g.capacity) ? `${g.enrolled}/${g.capacity}` : `${g.enrolled}`;
-        const laneIdx = isGeneral ? (g.room_id ? rooms.findIndex(r => r.id === g.room_id) : rooms.length) : 0;
+        const laneIdx = isGeneral ? rooms.findIndex(r => r.id === g.room_id) : 0;
         const { colOf, totalCols } = packResults.get(`${g.day}|${laneIdx}`);
         const col = colOf.get(g.id);
         const subWidth = (isGeneral ? laneWidth : 100) / totalCols;
@@ -2427,18 +2435,16 @@ export default {
         const tileHref = canEdit ? ` href="/admin/groups/${g.id}/edit${langQs}"` : "";
         // Subject shown as a single emoji, not the full name -- staff already
         // know their own roster by name/face, so this exists purely to tell
-        // two same-named teachers apart at a glance. The old "⚠️ محتاج قاعة"
-        // text badge became a bare 🔺 (hover title for a reminder, legend
-        // once near the tab row below) -- decluttering, not losing the info.
-        // Both badge rows now sit on one line instead of stacking, since a
-        // tile is often only ~44px wide in General's multi-hall layout.
+        // two same-named teachers apart at a glance. No hall-less badge here
+        // anymore -- every tile that reaches the grid has a room_id by
+        // construction now (see hallGroups above), so it'd always be dead.
         const badges = [
           hasConflict ? `<span class="sched-conflict-badge">${t.conflict}</span>` : "",
           hasWeeklyBadge ? `<span class="sched-weekly-badge">${t.weeklyBadge}</span>` : ""
         ].filter(Boolean).join("");
         return `<${tileTag} class="sched-tile${hasConflict ? " sched-tile--conflict" : ""}" style="grid-column:${dIdx + 2};grid-row:${startRow}/${endRow};${laneStyle}"${tileHref}>
           ${badges ? `<div class="sched-badges">${badges}</div>` : ""}
-          <strong>${escapeHtml(g.teacher_name)}</strong> ${subjectEmoji(g.subject)}${!g.room_id ? ` <span class="sched-nohall-badge" title="${t.noHallBadge}">🔺</span>` : ""}${
+          <strong>${escapeHtml(g.teacher_name)}</strong> ${subjectEmoji(g.subject)}${
             // Stage + room combined onto one line instead of two separate
             // <br>-ed lines -- a short (1-hour) tile has limited vertical
             // room, and this is the one line most tiles can spare.
@@ -2455,6 +2461,16 @@ export default {
         ? `<h2 style="font-size:15px;color:var(--muted)">${t.unassignedTitle}</h2>` + unassigned.map(g =>
             `<${unassignedTag} class="card"${canEdit ? ` href="/admin/groups/${g.id}/edit${langQs}"` : ""}><div><strong>${escapeHtml(g.teacher_name)} — ${subjectsDisplay(lang, g.subject)}</strong></div></${unassignedTag}>`
           ).join("")
+        : "";
+      // Same card list as unassignedHtml above, but for groups that DO have a
+      // day/time -- shows it, sorted day-then-time (see needsHall.sort above)
+      // so it reads as a clean queue instead of the grid's packed slivers.
+      const needsHallHtml = needsHall.length
+        ? `<h2 style="font-size:15px;color:var(--muted)">${t.needsHallTitle}</h2>` + needsHall.map(g => {
+            const dayLabel = DAYS_OF_WEEK.find(d => d.v === g.day);
+            const dayText = dayLabel ? (lang === "en" ? dayLabel.en : dayLabel.ar) : g.day;
+            return `<${unassignedTag} class="card"${canEdit ? ` href="/admin/groups/${g.id}/edit${langQs}"` : ""}><div><strong>${escapeHtml(g.teacher_name)} — ${subjectsDisplay(lang, g.subject)}</strong><br><small>${escapeHtml(dayText)} · ${g.start_time}–${g.end_time}${g.stage ? ` · ${escapeHtml(g.stage)}` : ""}</small></div></${unassignedTag}>`;
+          }).join("")
         : "";
 
       const gridStyle = `<style>
@@ -2473,14 +2489,11 @@ export default {
         .sched-tile--conflict{border-color:var(--red);box-shadow:0 0 0 2px var(--red) inset}
         .sched-badges{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:2px}
         .sched-conflict-badge{color:var(--red);font-weight:700}
-        .sched-nohall-badge{cursor:help}
         .sched-weekly-badge{color:#5A6784;font-weight:700}
         .sched-stage{color:#5A6784;font-size:11px}
-        .sched-legend{font-size:13px;color:#5A6784;margin:-8px 0 16px}
       </style>`;
 
       const body = `${gridStyle}<div class="sched-tabs">${tabs}</div>
-        ${isGeneral ? `<p class="sched-legend">${t.noHallLegend}</p>` : ""}
         <div class="sched-grid">
           <div class="sched-corner" style="grid-column:1;grid-row:1"></div>
           ${dayHeaders}
@@ -2488,6 +2501,7 @@ export default {
           ${cells.join("")}
           ${tiles}
         </div>
+        ${needsHallHtml}
         ${unassignedHtml}`;
       return new Response(page(t.title, body, { lang, toggleHref: toggleHref(url, lang), isOwner: canEdit }), { headers: { "content-type": "text/html;charset=utf-8" } });
     }

@@ -1903,21 +1903,23 @@ describe("/admin/schedule: weekly grid across halls (added 2026-07-16)", () => {
       expect(html).toContain("hall=general");
     });
 
-    it("shows a scheduled-but-hall-less group in the General grid, flagged as needing a hall -- and no longer in the flat unassigned list, and not on any real hall tab", async () => {
+    it("shows a scheduled-but-hall-less group in the dedicated 'needs a hall' list, not on the grid -- and no longer in the flat unassigned list, and not on any real hall tab (redesigned 2026-07-26: real data routinely put a dozen+ hall-less groups in the same slot, which the old inline grid lane packed into unreadable slivers)", async () => {
       await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-nohall', 'أ. بلا قاعة', 'math')").run();
       await env.DB.prepare(
         "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES ('t-sched-nohall', 'أ. بلا قاعة', 'math', 'wed', '17:00', '19:00', NULL, 1)"
       ).run();
       const generalHtml = await (await adminFetch("https://example.com/admin/schedule?hall=general")).text();
       expect(generalHtml).toContain("أ. بلا قاعة");
-      // Scoped to this teacher's own tile (not a bare substring check) --
-      // ".sched-nohall-badge{...}" is always present in the page's own
-      // <style> block regardless of any real badge, so a bare toContain()
-      // here would pass even with a real bug.
+      // Not a grid tile anymore -- only fully-set (day+time+hall) groups
+      // plot on the grid now.
       const ownTile = [...generalHtml.matchAll(/<a class="(sched-tile[^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].find(m => m[2].includes("أ. بلا قاعة"));
-      expect(ownTile?.[2]).toContain("sched-nohall-badge");
-      // narrowed unassigned list only holds groups with no time at all now --
-      // a hall-less-but-scheduled group's home is the General grid instead
+      expect(ownTile).toBeUndefined();
+      // shows in the needs-a-hall list instead, with its day/time as text
+      const needsHallIdx = generalHtml.indexOf("محتاجة قاعة");
+      expect(needsHallIdx).toBeGreaterThan(-1);
+      expect(generalHtml.slice(needsHallIdx)).toContain("أ. بلا قاعة");
+      // narrowed unassigned list only holds groups with no time at all --
+      // a hall-less-but-scheduled group's home is the needs-a-hall list instead
       expect(generalHtml.indexOf("مجموعات بدون ميعاد") === -1 || !generalHtml.slice(generalHtml.indexOf("مجموعات بدون ميعاد")).includes("أ. بلا قاعة")).toBe(true);
       const rooms = (await env.DB.prepare("SELECT id FROM rooms ORDER BY id LIMIT 1").all()).results as any[];
       const hallHtml = await (await adminFetch(`https://example.com/admin/schedule?hall=${rooms[0].id}`)).text();
@@ -2072,42 +2074,44 @@ describe("/admin/schedule: weekly grid across halls (added 2026-07-16)", () => {
     });
   });
 
-  describe("hall-less tile shows a bare 🔺 (no text), with a one-time legend on General instead of a repeated text badge (added 2026-07-17)", () => {
-    it("General shows the legend once; a real hall tab (which can never have a hall-less tile) does not", async () => {
+  describe("hall-less groups move off the grid into a dedicated 'needs a hall' list on General, instead of an inline per-tile badge (redesigned 2026-07-26)", () => {
+    it("General shows the needs-a-hall heading; a real hall tab (whose groups always already have that hall) never does", async () => {
+      await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-needshall-heading', 'أ. عنوان القائمة', 'math')").run();
+      await env.DB.prepare(
+        "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES ('t-sched-needshall-heading', 'أ. عنوان القائمة', 'math', 'sun', '20:00', '21:00', NULL, 1)"
+      ).run();
       const generalHtml = await (await adminFetch("https://example.com/admin/schedule?hall=general")).text();
-      expect(generalHtml).toContain("sched-legend");
-      // The legend and each tile's hover title legitimately say "محتاج قاعة"
-      // by design now -- what should be GONE is the old verbose per-tile
-      // text badge (⚠️ prefix + text, always visible, not just on hover).
-      expect(generalHtml).not.toContain("⚠️ محتاج قاعة");
+      expect(generalHtml).toContain("محتاجة قاعة");
 
       const room = (await env.DB.prepare("SELECT id FROM rooms ORDER BY id LIMIT 1").first()) as any;
       const hallHtml = await (await adminFetch(`https://example.com/admin/schedule?hall=${room.id}`)).text();
-      // ".sched-legend{...}" is always present in the page's own <style>
-      // block regardless of any real legend -- check for the rendered tag.
-      expect(hallHtml).not.toContain('class="sched-legend"');
+      expect(hallHtml).not.toContain("محتاجة قاعة");
     });
 
-    it("a hall-less tile carries the 🔺 marker with a hover title, and no leftover text badge", async () => {
+    it("a hall-less group's list row shows its day/time as plain text and links to its own edit form for the owner, with no grid tile anywhere", async () => {
       await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('t-sched-triangle', 'أ. مثلث', 'math')").run();
-      await env.DB.prepare(
+      const { meta } = await env.DB.prepare(
         "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES ('t-sched-triangle', 'أ. مثلث', 'math', 'fri', '17:00', '19:00', NULL, 1)"
       ).run();
       const html = await (await adminFetch("https://example.com/admin/schedule?hall=general")).text();
+      const row = [...html.matchAll(/<a class="card"([^>]*)>([\s\S]*?)<\/a>/g)].find(m => m[2].includes("أ. مثلث"));
+      expect(row).toBeDefined();
+      expect(row?.[2]).toContain("17:00");
+      expect(row?.[1]).toContain(`/admin/groups/${meta.last_row_id}/edit`);
       const tile = [...html.matchAll(/<a class="(sched-tile[^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].find(m => m[2].includes("أ. مثلث"));
-      expect(tile?.[2]).toContain("🔺");
-      expect(tile?.[2]).toContain("title=");
-      expect(tile?.[2]).not.toContain("محتاج قاعة</span>");
+      expect(tile).toBeUndefined();
     });
   });
 
-  describe("overlapping tiles in the same lane split its width side by side instead of rendering on top of each other (added 2026-07-17, real bug from a screenshot: several hall-less groups at the same time all landed in the same cell)", () => {
-    it("gives each of 3 same-time, same-lane (hall-less) groups its own width/offset slice, none identical to another", async () => {
+  describe("overlapping tiles in the same lane split its width side by side instead of rendering on top of each other (added 2026-07-17; the hall-less scenario that originally triggered this moved to the needs-a-hall list in the 2026-07-26 redesign, but a real hall can still get double-booked, so the packing logic itself is tested against 3 groups sharing one real hall+slot instead)", () => {
+    it("gives each of 3 same-time, same-lane (same real hall) groups its own width/offset slice, none identical to another", async () => {
+      const { meta: roomMeta } = await env.DB.prepare("INSERT INTO rooms (name) VALUES ('قاعة اختبار تزاحم')").run();
+      const roomId = roomMeta.last_row_id;
       for (const id of ["t-overlap-1", "t-overlap-2", "t-overlap-3"]) {
         await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES (?, ?, 'math')").bind(id, `أ. ${id}`).run();
         await env.DB.prepare(
-          "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES (?, ?, 'math', 'sat', '17:00', '18:00', NULL, 1)"
-        ).bind(id, `أ. ${id}`).run();
+          "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES (?, ?, 'math', 'sat', '17:00', '18:00', ?, 1)"
+        ).bind(id, `أ. ${id}`, roomId).run();
       }
       const html = await (await adminFetch("https://example.com/admin/schedule?hall=general")).text();
       const tiles = ["t-overlap-1", "t-overlap-2", "t-overlap-3"].map(id => {
