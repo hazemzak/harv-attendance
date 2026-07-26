@@ -2581,14 +2581,14 @@ export default {
         title: "الأساتذة", noShare: "لسه معملتش تسوية", perSession: "بالحصة", percent: "نسبة %",
         settlement: "التسوية", attentionTitle: "⚠️ يحتاج متابعة", attentionEmpty: "الكل متسوّي، مفيش حد محتاج متابعة دلوقتي.",
         owed: "مستحق", addNew: "➕ ضيف أستاذ جديد", edit: "✏️ عدّل",
-        retire: "إيقاف", activateBack: "رجّعه تاني", retiredBadge: "متوقف", confirmRetire: "متأكد إنك عايز توقف الأستاذ ده؟ اسمه هيفضل في القايمة بس مش هيظهر للحجز.", confirmReturn: "متأكد إنك عايز ترجّعه؟",
+        retire: "إيقاف", activateBack: "رجّعه تاني", retiredBadge: "متوقف", confirmRetire: "متأكد إنك عايز توقف الأستاذ ده؟ اسمه هيفضل في القايمة بس مش هيظهر للحجز.", confirmRetireGroups: "متأكد إنك عايز توقف الأستاذ ده؟ عنده {n} مجموعة/مجموعات شغالة دلوقتي، هيتم إيقافها هي كمان عشان محدش يحجز فيها أو تفضل تظهر في الجدول.", confirmReturn: "متأكد إنك عايز ترجّعه؟",
         rename: "✏️ غيّر الاسم", renamePrompt: "اكتب الاسم الجديد:"
       },
       en: {
         title: "Teachers", noShare: "No payout share set", perSession: "Per session", percent: "Percent %",
         settlement: "Settlement", attentionTitle: "⚠️ Needs follow-up", attentionEmpty: "Everyone's settled — nobody needs follow-up right now.",
         owed: "owed", addNew: "➕ Add new teacher", edit: "✏️ Edit",
-        retire: "Retire", activateBack: "Bring back", retiredBadge: "Retired", confirmRetire: "Retire this teacher? Their name stays on the list but they'll stop showing up for booking.", confirmReturn: "Bring this teacher back?",
+        retire: "Retire", activateBack: "Bring back", retiredBadge: "Retired", confirmRetire: "Retire this teacher? Their name stays on the list but they'll stop showing up for booking.", confirmRetireGroups: "Retire this teacher? They have {n} active group(s) right now -- those will be deactivated too, so no one can book into them or see them on the schedule anymore.", confirmReturn: "Bring this teacher back?",
         rename: "✏️ Rename", renamePrompt: "Enter the new name:"
       }
     };
@@ -2600,6 +2600,15 @@ export default {
       const langQs = lang === "en" ? "?lang=en" : "";
       const { results } = await env.DB.prepare("SELECT id, name, subject, share_type, share_value, person_id, retired_at FROM teachers ORDER BY name").all();
       const today = new Date().toISOString().slice(0, 10);
+      // Active-group counts per teacher (one batched query, not N+1) -- feeds
+      // the retire confirm prompt below so it names the real consequence
+      // ("this also deactivates N of their live classes") instead of retiring
+      // silently leaving groups behind that still show up on the schedule for
+      // someone who no longer teaches here (real case: Ahmed Samir Megaly's
+      // group kept showing on /admin/schedule after he'd already been retired
+      // and removed from the public site).
+      const groupCountRows = (await env.DB.prepare("SELECT teacher_id, COUNT(*) AS n FROM groups WHERE active = 1 AND teacher_id IS NOT NULL GROUP BY teacher_id").all()).results;
+      const activeGroupCountByTeacher = new Map(groupCountRows.map(r => [r.teacher_id, r.n]));
       // "Money left" = owed computed since their last recorded payout (or since
       // the beginning, if never paid out) — a naive unbounded-always computation
       // would show every configured teacher as "owing" forever, since payouts
@@ -2613,10 +2622,11 @@ export default {
       // roster grows enough for this page to noticeably lag (claude-review
       // finding #4 on PR #12).
       const withStatus = await Promise.all(results.map(async tch => {
-        if (!tch.share_type) return { ...tch, needsAttention: true, owed: 0 };
+        const activeGroups = activeGroupCountByTeacher.get(tch.id) || 0;
+        if (!tch.share_type) return { ...tch, needsAttention: true, owed: 0, activeGroups };
         const from = await lastPayoutFrom(env, tch.id);
         const { owed } = await computeTeacherOwed(env, tch.id, tch.name, tch.share_type, tch.share_value, from, today);
-        return { ...tch, needsAttention: owed > 0, owed };
+        return { ...tch, needsAttention: owed > 0, owed, activeGroups };
       }));
       const shareLabel = tch => tch.share_type
         ? `${tch.share_type === "percent" ? t.percent : t.perSession}: ${tch.share_value ?? 0}`
@@ -2624,7 +2634,15 @@ export default {
       // Retire/return shares one toggle route (mirrors the existing
       // /admin/staff/:email/toggle and /admin/promotions/:id/toggle
       // pattern already used in this file, rather than two new routes).
-      const retireForm = tch => `<form method="POST" action="/admin/teachers/${tch.id}/retire-toggle${langQs}" onsubmit="return confirm('${(tch.retired_at ? t.confirmReturn : t.confirmRetire).replace(/'/g, "\\'")}')">
+      // Retiring cascades (see the retire-toggle route below): a real
+      // consequence, so the confirm text names it plainly instead of staying
+      // generic -- "sure of the results of what they did", not just "sure".
+      // Un-retiring never cascades (bringing someone back doesn't imply their
+      // old slot config is still valid), so that direction keeps the plain message.
+      const retireConfirmMsg = tch => tch.retired_at
+        ? t.confirmReturn
+        : tch.activeGroups > 0 ? t.confirmRetireGroups.replace("{n}", String(tch.activeGroups)) : t.confirmRetire;
+      const retireForm = tch => `<form method="POST" action="/admin/teachers/${tch.id}/retire-toggle${langQs}" onsubmit="return confirm('${retireConfirmMsg(tch).replace(/'/g, "\\'")}')">
           <button type="submit" class="${tch.retired_at ? "" : "btn-reject"}">${tch.retired_at ? t.activateBack : t.retire}</button>
         </form>`;
       // Phase 4: rename is deliberately a prompt()-driven single button, not a
@@ -2722,12 +2740,14 @@ export default {
       ar: {
         shareTitle: "إعدادات النسبة", shareType: "نوع النسبة", perSession: "بالحصة (جنيه/حصة)", percent: "نسبة من قيمة الحجوزات %",
         shareValue: "القيمة", shareValuePh: "مثلاً: 20", saveShare: "حفظ", from: "من", to: "إلى", filter: "فلترة",
+        sessionPrice: "تمن الحصة", sessionPricePh: "مثلاً: 100", teacherShare: "نصيب المدرس", centerShare: "نصيب السنتر",
         owed: "المستحق", recordPayout: "تسجيل صرف", amount: "المبلغ", amountPh: "بالجنيه", note: "ملاحظة (اختياري)", notePh: "اختياري",
         sessionsCount: "عدد الحصص", billedTotal: "إجمالي المحصّل من الحجوزات", noShareYet: "من فضلك حدد نوع ونسبة الصرف أولاً."
       },
       en: {
         shareTitle: "Payout share settings", shareType: "Share type", perSession: "Per session (EGP/session)", percent: "Percent of booked value %",
         shareValue: "Value", shareValuePh: "e.g. 20", saveShare: "Save", from: "From", to: "To", filter: "Filter",
+        sessionPrice: "Session price", sessionPricePh: "e.g. 100", teacherShare: "Teacher's share", centerShare: "Center's share",
         owed: "Owed", recordPayout: "Record payout", amount: "Amount", amountPh: "in EGP", note: "Note (optional)", notePh: "optional",
         sessionsCount: "Session count", billedTotal: "Total collected", noShareYet: "Please set a payout share type and value first."
       }
@@ -2828,6 +2848,13 @@ export default {
       const langQs = lang === "en" ? "?lang=en" : "";
       const teacher = await env.DB.prepare("SELECT id, name, subject, share_type, share_value FROM teachers WHERE id = ?").bind(settlementMatch[1]).first();
       if (!teacher) return new Response("Not found", { status: 404 });
+      // Pre-fills the "session price" calculator field below from whatever
+      // this teacher's own group(s) actually charge -- purely a convenience
+      // default, not authoritative (a teacher can run several groups at
+      // different prices; staff can always retype it).
+      const defaultSessionPrice = await env.DB.prepare(
+        "SELECT price FROM groups WHERE (teacher_id = ? OR (teacher_id IS NULL AND teacher_name = ?)) AND price IS NOT NULL ORDER BY id LIMIT 1"
+      ).bind(teacher.id, teacher.name).first();
       const from = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("from") || "") ? url.searchParams.get("from") : await lastPayoutFrom(env, teacher.id);
       // Clamped at today (claude-review finding #2, this session): a future
       // `to` (fat-fingered in the date picker) would close a period past
@@ -2837,16 +2864,48 @@ export default {
       const today = new Date().toISOString().slice(0, 10);
       const to = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("to") || "") ? [url.searchParams.get("to"), today].sort()[0] : today;
       const { owed, detail } = await computeTeacherOwed(env, teacher.id, teacher.name, teacher.share_type, teacher.share_value, from, to);
+      // Per-session split made concrete instead of abstract (Hazem: "so for
+      // instance if a class costs 100, they can just write 80 for the
+      // teacher, and 20 for the center, so the math is even easier"). Only
+      // one value is actually stored/submitted -- share_value, the teacher's
+      // own flat per-session cut, exactly as before -- "session price" and
+      // "center's share" are pure client-side arithmetic aids around it, not
+      // new stored fields, so computeTeacherOwed() needed zero changes.
+      // Percent mode (a real, still-supported second option for teachers paid
+      // a cut of what's actually collected rather than a flat per-session
+      // rate) hides the calculator and reuses the same input/label.
       const shareForm = `<form method="POST" action="/admin/teachers/${teacher.id}/share${langQs}">
         <label>${t.shareType}</label>
-        <select name="share_type">
+        <select name="share_type" id="share-type" onchange="toggleShareMode()">
           <option value="per_session" ${teacher.share_type === "per_session" ? "selected" : ""}>${t.perSession}</option>
           <option value="percent" ${teacher.share_type === "percent" ? "selected" : ""}>${t.percent}</option>
         </select>
-        <label>${t.shareValue}</label>
-        <input name="share_value" type="number" step="0.01" min="0" value="${teacher.share_value ?? ""}" placeholder="${t.shareValuePh}">
+        <div id="session-price-row">
+          <label>${t.sessionPrice}</label>
+          <input id="session-price" type="number" step="0.01" min="0" placeholder="${t.sessionPricePh}" value="${defaultSessionPrice?.price ?? ""}" oninput="recalcCenterShare()">
+        </div>
+        <label id="share-value-label">${teacher.share_type === "percent" ? t.percent : t.teacherShare}</label>
+        <input name="share_value" id="share-value" type="number" step="0.01" min="0" value="${teacher.share_value ?? ""}" placeholder="${t.shareValuePh}" oninput="recalcCenterShare()">
+        <p class="empty" id="center-share-hint" style="margin:-8px 0 16px"></p>
         <button type="submit" class="btn-reject">${t.saveShare}</button>
-      </form>`;
+      </form>
+      <script>
+        function toggleShareMode(){
+          var isPercent = document.getElementById('share-type').value === 'percent';
+          document.getElementById('session-price-row').style.display = isPercent ? 'none' : '';
+          document.getElementById('share-value-label').textContent = isPercent ? ${JSON.stringify(t.percent)} : ${JSON.stringify(t.teacherShare)};
+          recalcCenterShare();
+        }
+        function recalcCenterShare(){
+          var hint = document.getElementById('center-share-hint');
+          if (document.getElementById('share-type').value === 'percent') { hint.textContent = ''; return; }
+          var price = parseFloat(document.getElementById('session-price').value);
+          var teacherShare = parseFloat(document.getElementById('share-value').value);
+          if (!Number.isFinite(price) || !Number.isFinite(teacherShare)) { hint.textContent = ''; return; }
+          hint.textContent = ${JSON.stringify(t.centerShare)} + ': ' + (price - teacherShare).toFixed(2);
+        }
+        toggleShareMode();
+      </script>`;
       const filterForm = `<form method="GET" style="display:flex;gap:8px;align-items:center;margin:12px 0">
         <input type="hidden" name="lang" value="${lang}">
         <label>${t.from}</label><input type="date" name="from" value="${from}">
@@ -3143,14 +3202,33 @@ export default {
       const lang = langOf(url);
       const langQs = lang === "en" ? "?lang=en" : "";
       // A retired teacher's row is never deleted -- money/settlement/payout
-      // history keeps reading it (nothing there filters by retired_at).
+      // history keeps reading it (nothing there filters by retired_at, and
+      // deactivating a group below doesn't touch attendance/payment_allocations
+      // either -- both are queried by group_id directly, not by groups.active).
       // Only the two shared teacher-picker functions (getTeachersForSubjects/
       // getAllTeachersGrouped, feeding /register and /admin/groups) exclude
       // a retired row, so retiring only affects future scheduling, never
       // past bookings or owed money.
-      await env.DB.prepare(
-        "UPDATE teachers SET retired_at = CASE WHEN retired_at IS NULL THEN datetime('now') ELSE NULL END WHERE id = ?"
-      ).bind(teacherRetireMatch[1]).run();
+      const teacher = await env.DB.prepare("SELECT id, name, retired_at FROM teachers WHERE id = ?").bind(teacherRetireMatch[1]).first();
+      if (teacher) {
+        const isRetiring = !teacher.retired_at;
+        const stmts = [env.DB.prepare(
+          "UPDATE teachers SET retired_at = CASE WHEN retired_at IS NULL THEN datetime('now') ELSE NULL END WHERE id = ?"
+        ).bind(teacher.id)];
+        // Cascade on retire only, never on bringing someone back (real bug this
+        // closes: a retired teacher's already-created groups kept showing on
+        // /admin/schedule and staying bookable, since nothing there ever
+        // checked retired_at -- Hazem: "he doesn't work with us anymore, but
+        // he is still there on the general schedule"). Un-retiring doesn't
+        // reverse this -- their old slots may no longer be valid, so bringing
+        // a group back is a deliberate separate action via /admin/groups.
+        if (isRetiring) {
+          stmts.push(env.DB.prepare(
+            "UPDATE groups SET active = 0 WHERE (teacher_id = ? OR (teacher_id IS NULL AND teacher_name = ?)) AND active = 1"
+          ).bind(teacher.id, teacher.name));
+        }
+        await env.DB.batch(stmts);
+      }
       return Response.redirect(url.origin + `/admin/teachers${langQs}`, 303);
     }
 

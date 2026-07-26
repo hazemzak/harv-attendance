@@ -2772,6 +2772,36 @@ describe("/admin/teachers/:id/settlement: payout math (added 2026-07-13)", () =>
   });
 });
 
+describe("/admin/teachers/:id/settlement: concrete session-price split calculator (added 2026-07-26)", () => {
+  it("pre-fills the session-price field from the teacher's own group price, and still submits share_value as before", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('split-test', 'أ. تقسيم', 'math')").run();
+    const room = (await env.DB.prepare("SELECT id FROM rooms ORDER BY id LIMIT 1").first()) as any;
+    await env.DB.prepare(
+      "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active, price) VALUES ('split-test', 'أ. تقسيم', 'math', 'sat', '17:00', '19:00', ?, 1, 100)"
+    ).bind(room.id).run();
+    const html = await (await adminFetch("https://example.com/admin/teachers/split-test/settlement")).text();
+    expect(html).toContain('id="session-price"');
+    expect(html).toContain('value="100"');
+    expect(html).toContain("تمن الحصة");
+    expect(html).toContain("نصيب المدرس");
+    expect(html).toContain("نصيب السنتر");
+
+    const form = new URLSearchParams();
+    form.set("share_type", "per_session");
+    form.set("share_value", "80");
+    await adminFetch("https://example.com/admin/teachers/split-test/share", { method: "POST", body: form });
+    const row = await env.DB.prepare("SELECT share_type, share_value FROM teachers WHERE id = 'split-test'").first() as any;
+    expect(row?.share_type).toBe("per_session");
+    expect(row?.share_value).toBe(80);
+  });
+
+  it("leaves the session-price field empty when the teacher has no group with a price set yet", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('split-test-noprice', 'أ. بدون سعر', 'math')").run();
+    const html = await (await adminFetch("https://example.com/admin/teachers/split-test-noprice/settlement")).text();
+    expect(html).toContain('id="session-price" type="number" step="0.01" min="0" placeholder="مثلاً: 100" value=""');
+  });
+});
+
 describe("/admin/teachers: subject grouping + needs-attention ordering (added 2026-07-14)", () => {
   it("a teacher with no share configured appears in the needs-attention section", async () => {
     await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('no-share-teacher', 'أ. لسه', 'math')").run();
@@ -3144,6 +3174,23 @@ describe("Teacher retire/return via retired_at (added 2026-07-16)", () => {
     expect(html).toContain(">متوقف<"); // retired badge shown, but the row itself is not hidden
   });
 
+  it("the retire confirm prompt names the real consequence (how many active groups will be deactivated) instead of a generic message", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('retire-test-confirm-none', 'أ. بدون مجموعات', 'math')").run();
+    const room = (await env.DB.prepare("SELECT id FROM rooms ORDER BY id LIMIT 1").first()) as any;
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('retire-test-confirm-two', 'أ. عنده مجموعتين', 'math')").run();
+    await env.DB.prepare(
+      "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES ('retire-test-confirm-two', 'أ. عنده مجموعتين', 'math', 'mon', '10:00', '11:00', ?, 1)"
+    ).bind(room.id).run();
+    await env.DB.prepare(
+      "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES ('retire-test-confirm-two', 'أ. عنده مجموعتين', 'math', 'tue', '10:00', '11:00', ?, 1)"
+    ).bind(room.id).run();
+    const html = await (await adminFetch("https://example.com/admin/teachers")).text();
+    const rowNone = html.slice(html.indexOf("أ. بدون مجموعات"), html.indexOf("أ. بدون مجموعات") + 900);
+    const rowTwo = html.slice(html.indexOf("أ. عنده مجموعتين"), html.indexOf("أ. عنده مجموعتين") + 900);
+    expect(rowNone).not.toContain("مجموعة/مجموعات شغالة");
+    expect(rowTwo).toContain("عنده 2 مجموعة/مجموعات شغالة");
+  });
+
   it("retire-toggle flips retired_at on and back off", async () => {
     await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('retire-test-toggle', 'أ. تبديل', 'math')").run();
     await adminFetch("https://example.com/admin/teachers/retire-test-toggle/retire-toggle", { method: "POST" });
@@ -3158,6 +3205,25 @@ describe("Teacher retire/return via retired_at (added 2026-07-16)", () => {
     await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('retire-test-clerk', 'أ. محمي', 'math')").run();
     const res = await clerkFetch("https://example.com/admin/teachers/retire-test-clerk/retire-toggle", { method: "POST" });
     expect(res.status).toBe(403);
+  });
+
+  it("retiring a teacher deactivates their active groups (so they stop showing on the schedule) -- but un-retiring does not reactivate them", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('retire-test-cascade', 'أ. تسريح جماعي', 'math')").run();
+    const room = (await env.DB.prepare("SELECT id FROM rooms ORDER BY id LIMIT 1").first()) as any;
+    const { meta } = await env.DB.prepare(
+      "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES ('retire-test-cascade', 'أ. تسريح جماعي', 'math', 'sat', '17:00', '19:00', ?, 1)"
+    ).bind(room.id).run();
+    const groupId = meta.last_row_id;
+
+    await adminFetch("https://example.com/admin/teachers/retire-test-cascade/retire-toggle", { method: "POST" });
+    let group = await env.DB.prepare("SELECT active FROM groups WHERE id = ?").bind(groupId).first() as any;
+    expect(group.active).toBe(0);
+
+    // Un-retiring is the reverse toggle -- deliberately does NOT bring the
+    // group back active, since the old slot may no longer be valid.
+    await adminFetch("https://example.com/admin/teachers/retire-test-cascade/retire-toggle", { method: "POST" });
+    group = await env.DB.prepare("SELECT active FROM groups WHERE id = ?").bind(groupId).first() as any;
+    expect(group.active).toBe(0);
   });
 
   it("excludes a retired teacher from /public/roster", async () => {
