@@ -2,5 +2,6 @@ node_modules/
 .wrangler/
 scratch_*.log
 scratch_*.sql
+.scratch-*
 backup-test.sql
 .backups/
