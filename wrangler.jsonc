@@ -11,6 +11,12 @@
   // this change is baked to whatever hostname was live at the time).
   // Adding a `routes` block disables this by default unless set explicitly.
   "workers_dev": true,
+  // Lets src/index.js `import` the bundled Cairo font files as raw binary
+  // data (used by the student ID-card PNG renderer) -- .wasm is handled
+  // natively by Wrangler already, .ttf needs this explicit rule.
+  "rules": [
+    { "type": "Data", "globs": ["**/*.ttf"], "fallthrough": true }
+  ],
   "d1_databases": [
     {
       "binding": "DB",

@@ -295,6 +295,30 @@ describe("/student: unknown id", () => {
   });
 });
 
+describe("/card/:id.png: branded student ID card image (added 2026-07-26)", () => {
+  it("is public (no Cf-Access header needed, same as /register and /student) and returns a real PNG for an approved student", async () => {
+    const id = await insertStudent({ name: "Card Test", status: "approved", subjects: "math" });
+    const res = await SELF.fetch(`https://example.com/card/${id}.png`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/png");
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    // PNG magic number -- confirms svgToPng() actually produced a real
+    // raster image, not just SVG text mislabeled as image/png.
+    expect([...bytes.slice(0, 8)]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  });
+
+  it("404s for a pending (not yet approved) student -- never exposes an unapproved registration's card", async () => {
+    const id = await insertStudent({ name: "Card Pending Test", status: "pending" });
+    const res = await SELF.fetch(`https://example.com/card/${id}.png`);
+    expect(res.status).toBe(404);
+  });
+
+  it("404s for a nonexistent student id instead of crashing", async () => {
+    const res = await SELF.fetch("https://example.com/card/999999.png");
+    expect(res.status).toBe(404);
+  });
+});
+
 describe("/admin/students/:id/process: booking rows (estamara table)", () => {
   async function processForm(id: number, extra: Record<string, string>) {
     const form = new FormData();
@@ -2956,12 +2980,13 @@ async function viewerFetch(path: string, init?: RequestInit) {
   });
 }
 
-describe("roster: one-tap WhatsApp send per row (added 2026-07-14)", () => {
-  it("renders a WhatsApp link linking to the student's own /student page, for an approved student with a phone", async () => {
+describe("roster: one-tap WhatsApp send per row (added 2026-07-14, switched from a /student page link to the /card PNG link 2026-07-26)", () => {
+  it("renders a WhatsApp link to the student's own card image, not the /student page, for an approved student with a phone", async () => {
     const id = await insertStudent({ name: "WA Roster Test", status: "approved", phone: "01000000077" });
     const html = await (await adminFetch("https://example.com/admin")).text();
     expect(html).toContain("wa.me/201000000077");
-    expect(html).toContain(encodeURIComponent(`student?id=${id}`));
+    expect(html).toContain(encodeURIComponent(`card/${id}.png`));
+    expect(html).not.toContain(encodeURIComponent(`student?id=${id}`));
   });
 
   it("omits the WhatsApp button for an approved student with no phone on file", async () => {

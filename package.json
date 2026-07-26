@@ -12,6 +12,7 @@
     "wrangler": "^4"
   },
   "dependencies": {
+    "@resvg/resvg-wasm": "^2.6.2",
     "qrcode-generator": "^1.4.4"
   }
 }
