@@ -225,7 +225,11 @@ function qrSvg(text) {
 // across requests within the same isolate.
 let resvgReady = null;
 function ensureResvgReady() {
-  if (!resvgReady) resvgReady = initWasm(RESVG_WASM_MODULE);
+  // Resets on failure (claude-review, retroactive review on PR #36) -- a
+  // transient init error (e.g. a cold-start hiccup) would otherwise cache
+  // the rejected promise forever, permanently breaking /card for the rest
+  // of that Worker isolate's lifetime instead of just retrying next request.
+  if (!resvgReady) resvgReady = initWasm(RESVG_WASM_MODULE).catch(err => { resvgReady = null; throw err; });
   return resvgReady;
 }
 
@@ -2692,15 +2696,21 @@ export default {
       const langQs = lang === "en" ? "?lang=en" : "";
       const { results } = await env.DB.prepare("SELECT id, name, subject, share_type, share_value, person_id, retired_at FROM teachers ORDER BY name").all();
       const today = new Date().toISOString().slice(0, 10);
-      // Active-group counts per teacher (one batched query, not N+1) -- feeds
-      // the retire confirm prompt below so it names the real consequence
-      // ("this also deactivates N of their live classes") instead of retiring
+      // Active-group counts per teacher (one query, not N+1) -- feeds the
+      // retire confirm prompt below so it names the real consequence ("this
+      // also deactivates N of their live classes") instead of retiring
       // silently leaving groups behind that still show up on the schedule for
       // someone who no longer teaches here (real case: Ahmed Samir Megaly's
       // group kept showing on /admin/schedule after he'd already been retired
       // and removed from the public site).
-      const groupCountRows = (await env.DB.prepare("SELECT teacher_id, COUNT(*) AS n FROM groups WHERE active = 1 AND teacher_id IS NOT NULL GROUP BY teacher_id").all()).results;
-      const activeGroupCountByTeacher = new Map(groupCountRows.map(r => [r.teacher_id, r.n]));
+      // Matched with the same (teacher_id = t.id OR (teacher_id IS NULL AND
+      // teacher_name = t.name)) predicate the actual retire-toggle cascade
+      // uses below -- a teacher_id-only count (claude-review, retroactive
+      // review on PR #36) would undercount/hide the consequence entirely for
+      // legacy name-matched groups, showing the generic confirm message even
+      // though the cascade would still deactivate those groups.
+      const activeGroupRows = (await env.DB.prepare("SELECT teacher_id, teacher_name FROM groups WHERE active = 1").all()).results;
+      const activeGroupCountFor = tch => activeGroupRows.filter(g => g.teacher_id === tch.id || (g.teacher_id === null && g.teacher_name === tch.name)).length;
       // "Money left" = owed computed since their last recorded payout (or since
       // the beginning, if never paid out) — a naive unbounded-always computation
       // would show every configured teacher as "owing" forever, since payouts
@@ -2714,7 +2724,7 @@ export default {
       // roster grows enough for this page to noticeably lag (claude-review
       // finding #4 on PR #12).
       const withStatus = await Promise.all(results.map(async tch => {
-        const activeGroups = activeGroupCountByTeacher.get(tch.id) || 0;
+        const activeGroups = activeGroupCountFor(tch);
         if (!tch.share_type) return { ...tch, needsAttention: true, owed: 0, activeGroups };
         const from = await lastPayoutFrom(env, tch.id);
         const { owed } = await computeTeacherOwed(env, tch.id, tch.name, tch.share_type, tch.share_value, from, today);
@@ -2734,7 +2744,12 @@ export default {
       const retireConfirmMsg = tch => tch.retired_at
         ? t.confirmReturn
         : tch.activeGroups > 0 ? t.confirmRetireGroups.replace("{n}", String(tch.activeGroups)) : t.confirmRetire;
-      const retireForm = tch => `<form method="POST" action="/admin/teachers/${tch.id}/retire-toggle${langQs}" onsubmit="return confirm('${retireConfirmMsg(tch).replace(/'/g, "\\'")}')">
+      // JSON.stringify, not a hand-rolled .replace(/'/g, ...) -- that only
+      // escapes quotes, not backslashes, so a value ending in \ could break
+      // out of the string (claude-review, retroactive review on PR #36; not
+      // exploitable today since both call sites here only embed static
+      // translated text + a number, but the escaping itself was fragile).
+      const retireForm = tch => `<form method="POST" action="/admin/teachers/${tch.id}/retire-toggle${langQs}" onsubmit="return confirm(${JSON.stringify(retireConfirmMsg(tch))})">
           <button type="submit" class="${tch.retired_at ? "" : "btn-reject"}">${tch.retired_at ? t.activateBack : t.retire}</button>
         </form>`;
       // Phase 4: rename is deliberately a prompt()-driven single button, not a
@@ -2743,7 +2758,7 @@ export default {
       // pre-filled current name in the prompt (deliberate, not an oversight):
       // embedding it would put the name in the markup twice, which is exactly
       // the "same person shown twice" bug class Phase 2's merge fixed.
-      const renameForm = tch => `<form method="POST" action="/admin/teachers/${tch.id}/rename${langQs}" onsubmit="var n=prompt('${t.renamePrompt.replace(/'/g, "\\'")}'); if(!n||!n.trim())return false; this.elements['name'].value=n.trim(); return true;">
+      const renameForm = tch => `<form method="POST" action="/admin/teachers/${tch.id}/rename${langQs}" onsubmit="var n=prompt(${JSON.stringify(t.renamePrompt)}); if(!n||!n.trim())return false; this.elements['name'].value=n.trim(); return true;">
           <input type="hidden" name="name">
           <button type="submit" class="btn-reject">${t.rename}</button>
         </form>`;

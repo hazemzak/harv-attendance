@@ -3216,6 +3216,21 @@ describe("Teacher retire/return via retired_at (added 2026-07-16)", () => {
     expect(rowTwo).toContain("عنده 2 مجموعة/مجموعات شغالة");
   });
 
+  it("counts a legacy name-matched group (no teacher_id FK) toward the confirm message too, not just teacher_id-linked groups (claude-review, retroactive review on PR #36)", async () => {
+    await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('retire-test-confirm-namematch', 'أ. مجموعة قديمة', 'math')").run();
+    const room = (await env.DB.prepare("SELECT id FROM rooms ORDER BY id LIMIT 1").first()) as any;
+    // teacher_id deliberately NULL -- same legacy/import-era shape already
+    // relied on elsewhere in this file (computeTeacherOwed, the retire
+    // cascade itself), where a group is matched by teacher_name instead of
+    // a real FK.
+    await env.DB.prepare(
+      "INSERT INTO groups (teacher_id, teacher_name, subject, day, start_time, end_time, room_id, active) VALUES (NULL, 'أ. مجموعة قديمة', 'math', 'wed', '10:00', '11:00', ?, 1)"
+    ).bind(room.id).run();
+    const html = await (await adminFetch("https://example.com/admin/teachers")).text();
+    const row = html.slice(html.indexOf("أ. مجموعة قديمة"), html.indexOf("أ. مجموعة قديمة") + 1400);
+    expect(row).toContain("عنده 1 مجموعة/مجموعات شغالة");
+  });
+
   it("retire-toggle flips retired_at on and back off", async () => {
     await env.DB.prepare("INSERT INTO teachers (id, name, subject) VALUES ('retire-test-toggle', 'أ. تبديل', 'math')").run();
     await adminFetch("https://example.com/admin/teachers/retire-test-toggle/retire-toggle", { method: "POST" });
